@@ -314,7 +314,10 @@ func statusCommand(args []string) error {
 
 func processCommand(command string, args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("%s requires PROJECT/PROCESS", command)
+		if len(args) > 1 && command != "logs" && containsArgument(args[1:], "--follow") {
+			return fmt.Errorf("--follow is only supported by logs; try: goserve logs %s --follow", args[0])
+		}
+		return fmt.Errorf("invalid %s arguments: expected one PROJECT/PROCESS, for example: goserve %s demo/api", command, command)
 	}
 	response, err := call("process."+command, struct{ Key string }{args[0]})
 	if err != nil {
@@ -322,6 +325,15 @@ func processCommand(command string, args []string) error {
 	}
 	printJSON(response.Data)
 	return nil
+}
+
+func containsArgument(args []string, target string) bool {
+	for _, arg := range args {
+		if arg == target {
+			return true
+		}
+	}
+	return false
 }
 
 func logsCommand(args []string) error {

@@ -4,6 +4,7 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 )
@@ -24,4 +25,8 @@ func Listen(endpoint string) (net.Listener, error) {
 func dial(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "unix", endpointForCurrentUser())
+}
+
+func endpointUnavailable(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
 }

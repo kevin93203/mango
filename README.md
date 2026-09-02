@@ -146,6 +146,20 @@ daemon 目前沒有額外參數。
 
 daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
 
+需要 daemon 提供服務的指令（例如 `list`、`status`、process action 與 `logs`）若無法連線，會提示：
+
+~~~text
+daemon is not running; start it with: goserve daemon start
+~~~
+
+請先啟動 daemon，再執行這些指令。`--follow` 只適用於 `logs`，例如：
+
+~~~powershell
+goserve logs demo/api --follow
+~~~
+
+`start`、`stop`、`restart`、`enable` 與 `disable` 只接受一個 `PROJECT/PROCESS` 參數，例如 `goserve stop demo/api`。
+
 ### project
 
 註冊、移除與列出 project。

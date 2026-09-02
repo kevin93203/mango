@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 )
+
+var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: goserve daemon start")
 
 var endpointState struct {
 	sync.RWMutex
@@ -115,6 +118,9 @@ func Call(ctx context.Context, request Request) (Response, error) {
 	}
 	conn, err := dial(ctx)
 	if err != nil {
+		if endpointUnavailable(err) {
+			return Response{}, ErrDaemonUnavailable
+		}
 		return Response{}, err
 	}
 	defer conn.Close()
