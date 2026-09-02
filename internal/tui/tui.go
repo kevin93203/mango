@@ -5,21 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"golang.org/x/term"
+	"goserve/internal/cliui"
 	"goserve/internal/daemon"
 	"goserve/internal/ipc"
 )
 
-func Run() error {
+func Run(output *cliui.Renderer) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		items, err := list()
 		if err != nil {
 			return err
 		}
-		printTable(items, -1)
+		printTable(output, items, -1)
 		return nil
 	}
 	state, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -27,8 +27,8 @@ func Run() error {
 		return err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), state)
-	fmt.Print("\x1b[?25l")
-	defer fmt.Print("\x1b[?25h\x1b[0m\n")
+	output.Printf("\x1b[?25l")
+	defer output.Printf("\x1b[?25h\x1b[0m\n")
 
 	input := make(chan byte, 8)
 	go readInput(input)
@@ -51,11 +51,11 @@ func Run() error {
 			}
 			lastErr = ""
 		}
-		fmt.Print("\x1b[2J\x1b[H")
-		fmt.Println("goserve monitor  (q quit, ↑/↓ or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)")
-		printTable(items, selected)
+		output.Printf("\x1b[2J\x1b[H")
+		output.Println(output.Text(cliui.StyleHeader, "goserve monitor"), output.Text(cliui.StyleMuted, "(q quit, up/down or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)"))
+		printTable(output, items, selected)
 		if lastErr != "" {
-			fmt.Printf("\nerror: %s\n", lastErr)
+			output.Printf("\n%s\n", output.ErrorText("error: "+lastErr))
 		}
 	}
 	draw()
@@ -85,14 +85,14 @@ func Run() error {
 				draw()
 			case 'l':
 				if selected < len(items) {
-					if err := showLogs(items[selected].Project+"/"+items[selected].Name, input); err != nil {
+					if err := showLogs(output, items[selected].Project+"/"+items[selected].Name, input); err != nil {
 						lastErr = err.Error()
 					}
 					draw()
 				}
 			case 13:
 				if selected < len(items) {
-					if err := showDetail(items[selected], input); err != nil {
+					if err := showDetail(output, items[selected], input); err != nil {
 						lastErr = err.Error()
 					}
 					draw()
@@ -145,13 +145,13 @@ func list() ([]daemon.ProcessInfo, error) {
 
 func operate(method, key string) error {
 	request, _ := ipc.NewRequest(method, struct{ Key string }{key})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, err := ipc.Call(ctx, request)
 	return err
 }
 
-func showLogs(key string, input <-chan byte) error {
+func showLogs(output *cliui.Renderer, key string, input <-chan byte) error {
 	request, _ := ipc.NewRequest("logs.read", struct {
 		Key    string
 		Stream string
@@ -168,71 +168,96 @@ func showLogs(key string, input <-chan byte) error {
 	if err := json.Unmarshal(encoded, &data); err != nil {
 		return err
 	}
-	fmt.Print("\x1b[2J\x1b[H")
-	fmt.Printf("%s logs (press any key to return)\n\n", key)
+	output.Printf("\x1b[2J\x1b[H")
+	output.Printf("%s %s\n\n", output.Text(cliui.StyleHeader, fmt.Sprintf("%s logs", key)), output.Text(cliui.StyleMuted, "(press any key to return)"))
 	if data["stdout"] != "" {
-		fmt.Printf("[stdout]\n%s", data["stdout"])
+		output.Printf("%s\n", output.Text(cliui.StyleStdout, "[stdout]"))
+		output.PrintStyled(cliui.StyleNone, data["stdout"])
 	}
 	if data["stderr"] != "" {
-		fmt.Printf("[stderr]\n%s", data["stderr"])
+		output.Printf("%s\n", output.Text(cliui.StyleStderr, "[stderr]"))
+		output.PrintStyled(cliui.StyleStderr, data["stderr"])
 	}
 	<-input
 	return nil
 }
 
-func showDetail(item daemon.ProcessInfo, input <-chan byte) error {
-	fmt.Print("\x1b[2J\x1b[H")
-	fmt.Printf("%s/%s\n\nstate: %s\npid: %d\ncpu: %.2f%%\nrss: %s\nmemory: %.2f%%\nuptime: %s\nrestarts: %d\nlast exit: %v\nlast error: %s\n\npress any key to return",
-		item.Project, item.Name, item.State, item.PID, item.CPUPercent, formatBytes(item.RSSBytes), item.MemoryPercent,
-		formatDuration(item.UptimeSeconds), item.RestartCount, item.LastExitCode, item.LastError)
+func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan byte) error {
+	output.Printf("\x1b[2J\x1b[H")
+	lastExit := "-"
+	if item.LastExitCode != nil {
+		lastExit = fmt.Sprintf("%d", *item.LastExitCode)
+	}
+	output.Println(output.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
+	output.KeyValues([][]cliui.Cell{
+		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
+		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
+		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
+		{{Text: "rss"}, {Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight}},
+		{{Text: "memory"}, {Text: fmt.Sprintf("%.2f%%", item.MemoryPercent), Align: cliui.AlignRight}},
+		{{Text: "uptime"}, {Text: cliui.FormatDuration(item.UptimeSeconds), Style: zeroStyle(item.UptimeSeconds)}},
+		{{Text: "restarts"}, {Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight}},
+		{{Text: "last exit"}, {Text: lastExit, Style: zeroStyle(lastExit)}},
+		{{Text: "last error"}, {Text: item.LastError, Style: errorStyle(item.LastError)}},
+	})
+	output.Printf("\n%s", output.Text(cliui.StyleMuted, "Press any key to return"))
 	<-input
 	return nil
 }
 
-func printTable(items []daemon.ProcessInfo, selected int) {
-	fmt.Printf("%s%-24s %-13s %6s %8s %10s %8s %8s\n", "", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART")
+func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int) {
+	if len(items) == 0 {
+		output.Println(output.Text(cliui.StyleMuted, "No processes found."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0, len(items))
 	for i, item := range items {
 		marker := " "
 		if i == selected {
 			marker = ">"
 		}
-		pid := "-"
-		if item.PID > 0 {
-			pid = fmt.Sprintf("%d", item.PID)
+		rows = append(rows, []cliui.Cell{
+			{Text: marker, Style: cliui.StyleHeader},
+			{Text: item.Project + "/" + item.Name},
+			{Text: item.State, Style: cliui.StateStyle(item.State)},
+			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
+			{Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%.2f", item.MemoryPercent), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
+		})
+	}
+	output.Table([]string{"", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+}
+
+func formatPID(pid int) string {
+	if pid <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", pid)
+}
+
+func zeroStyle(value interface{}) cliui.Style {
+	switch typed := value.(type) {
+	case uint64:
+		if typed == 0 {
+			return cliui.StyleMuted
 		}
-		fmt.Printf("%s%-24s %-13s %6s %7.2f %10s %7.2f %8d\n",
-			marker, item.Project+"/"+item.Name, item.State, pid, item.CPUPercent, formatBytes(item.RSSBytes), item.MemoryPercent, item.RestartCount)
+	case int:
+		if typed == 0 {
+			return cliui.StyleMuted
+		}
+	case string:
+		if typed == "" || typed == "-" {
+			return cliui.StyleMuted
+		}
 	}
+	return cliui.StyleNone
 }
 
-func formatBytes(value uint64) string {
-	if value == 0 {
-		return "-"
+func errorStyle(value string) cliui.Style {
+	if value != "" {
+		return cliui.StyleError
 	}
-	units := []string{"B", "KiB", "MiB", "GiB"}
-	n := float64(value)
-	index := 0
-	for n >= 1024 && index < len(units)-1 {
-		n /= 1024
-		index++
-	}
-	return fmt.Sprintf("%.1f%s", n, units[index])
-}
-
-func formatDuration(seconds float64) string {
-	if seconds <= 0 {
-		return "-"
-	}
-	d := time.Duration(seconds * float64(time.Second))
-	parts := []string{}
-	if hours := d / time.Hour; hours > 0 {
-		parts = append(parts, fmt.Sprintf("%dh", hours))
-		d %= time.Hour
-	}
-	if minutes := d / time.Minute; minutes > 0 {
-		parts = append(parts, fmt.Sprintf("%dm", minutes))
-		d %= time.Minute
-	}
-	parts = append(parts, fmt.Sprintf("%ds", d/time.Second))
-	return strings.Join(parts, " ")
+	return cliui.StyleMuted
 }

@@ -6,28 +6,43 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"goserve/internal/cliui"
 	"goserve/internal/config"
 	"goserve/internal/daemon"
 	"goserve/internal/ipc"
 	"goserve/internal/paths"
 	"goserve/internal/registry"
+	"goserve/internal/scheduler"
 	"goserve/internal/startup"
 	"goserve/internal/tui"
 )
 
 const processOperationTimeout = 30 * time.Second
 
+var (
+	cliOutput  = cliui.New(os.Stdout, os.Stderr, cliui.Options{Color: cliui.ColorAuto})
+	jsonOutput bool
+)
+
 func main() {
+	options, args, err := cliui.ParseOptions(os.Args[1:])
+	if err != nil {
+		cliOutput.Errorln("error: " + err.Error())
+		os.Exit(1)
+	}
+	cliOutput = cliui.New(os.Stdout, os.Stderr, options)
+	jsonOutput = options.JSON
+
 	layout, err := paths.Default()
 	if err != nil {
 		fatal(err)
@@ -36,40 +51,44 @@ func main() {
 		fatal(err)
 	}
 	ipc.SetEndpoint(layout.SocketPath)
-	if len(os.Args) < 2 {
+	if len(args) == 0 {
 		usage()
 		return
 	}
 	var commandErr error
-	switch os.Args[1] {
+	switch args[0] {
 	case "daemon":
-		commandErr = daemonCommand(layout, os.Args[2:])
+		commandErr = daemonCommand(layout, args[1:])
 	case "project":
-		commandErr = projectCommand(layout, os.Args[2:])
+		commandErr = projectCommand(layout, args[1:])
 	case "config":
-		commandErr = configCommand(os.Args[2:])
+		commandErr = configCommand(args[1:])
 	case "apply":
-		commandErr = applyCommand(os.Args[2:])
+		commandErr = applyCommand(args[1:])
 	case "list":
 		commandErr = listCommand()
 	case "status":
-		commandErr = statusCommand(os.Args[2:])
+		commandErr = statusCommand(args[1:])
 	case "start", "stop", "restart", "enable", "disable":
-		commandErr = processCommand(os.Args[1], os.Args[2:])
+		commandErr = processCommand(args[0], args[1:])
 	case "logs":
-		commandErr = logsCommand(os.Args[2:])
+		commandErr = logsCommand(args[1:])
 	case "monitor":
-		commandErr = tui.Run()
+		if err := rejectJSON("monitor"); err != nil {
+			commandErr = err
+		} else {
+			commandErr = tui.Run(cliOutput)
+		}
 	case "schedule":
-		commandErr = scheduleCommand(os.Args[2:])
+		commandErr = scheduleCommand(args[1:])
 	case "startup":
-		commandErr = startupCommand(layout, os.Args[2:])
+		commandErr = startupCommand(layout, args[1:])
 	case "doctor":
 		commandErr = doctorCommand(layout)
 	case "help", "-h", "--help":
 		usage()
 	default:
-		commandErr = fmt.Errorf("unknown command %q", os.Args[1])
+		commandErr = fmt.Errorf("unknown command %q", args[0])
 	}
 	if commandErr != nil {
 		fatal(commandErr)
@@ -77,8 +96,9 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(strings.Join([]string{
+	cliOutput.Println(strings.Join([]string{
 		"goserve - cross-platform process manager",
+		"Global options: --color=auto|always|never, --json (where supported)",
 		"",
 		"Commands:",
 		"  daemon run|start|stop|restart|status",
@@ -102,15 +122,27 @@ func daemonCommand(layout paths.Layout, args []string) error {
 	}
 	switch args[0] {
 	case "run":
+		if err := rejectJSON("daemon run"); err != nil {
+			return err
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return daemon.New(layout).Run(ctx)
 	case "start":
+		if err := rejectJSON("daemon start"); err != nil {
+			return err
+		}
 		return startDaemon(layout)
 	case "stop":
+		if err := rejectJSON("daemon stop"); err != nil {
+			return err
+		}
 		_, err := call("daemon.stop", nil)
 		return err
 	case "restart":
+		if err := rejectJSON("daemon restart"); err != nil {
+			return err
+		}
 		if _, err := call("daemon.stop", nil); err == nil {
 			time.Sleep(200 * time.Millisecond)
 		}
@@ -118,11 +150,16 @@ func daemonCommand(layout paths.Layout, args []string) error {
 	case "status":
 		response, err := call("health", nil)
 		if err != nil {
-			fmt.Println("stopped")
+			if jsonOutput {
+				return cliOutput.JSON(map[string]string{"status": "stopped"})
+			}
+			cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon: stopped"))
 			return nil
 		}
-		printJSON(response.Data)
-		return nil
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
+		}
+		return printDaemonStatus(response.Data)
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
@@ -130,7 +167,7 @@ func daemonCommand(layout paths.Layout, args []string) error {
 
 func startDaemon(layout paths.Layout) error {
 	if _, err := call("health", nil); err == nil {
-		fmt.Println("daemon already running")
+		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon already running"))
 		return nil
 	}
 	executable, err := os.Executable()
@@ -158,7 +195,7 @@ func startDaemon(layout paths.Layout) error {
 	if err := waitForDaemon(layout); err != nil {
 		return fmt.Errorf("daemon failed to start: %w", err)
 	}
-	fmt.Printf("daemon started (pid %d)\n", cmd.Process.Pid)
+	cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), cmd.Process.Pid)
 	return nil
 }
 
@@ -186,7 +223,10 @@ func projectCommand(layout paths.Layout, args []string) error {
 	}
 	switch args[0] {
 	case "add":
-		fs := flag.NewFlagSet("project add", flag.ContinueOnError)
+		if err := rejectJSON("project add"); err != nil {
+			return err
+		}
+		fs := newFlagSet("project add")
 		name := fs.String("name", "", "project name")
 		file := fs.String("file", "", "TOML path")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -215,10 +255,13 @@ func projectCommand(layout paths.Layout, args []string) error {
 			return err
 		}
 		_, _ = call("project.reload", nil)
-		fmt.Printf("project %s registered\n", projectName)
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", projectName)))
 		return nil
 	case "remove":
-		fs := flag.NewFlagSet("project remove", flag.ContinueOnError)
+		if err := rejectJSON("project remove"); err != nil {
+			return err
+		}
+		fs := newFlagSet("project remove")
 		name := fs.String("name", "", "project name")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -238,14 +281,21 @@ func projectCommand(layout paths.Layout, args []string) error {
 			return err
 		}
 		_, _ = call("project.reload", nil)
-		fmt.Printf("project %s removed\n", *name)
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", *name)))
 		return nil
 	case "list":
 		response, err := call("project.list", nil)
 		if err != nil {
 			return err
 		}
-		printJSON(response.Data)
+		var projects []registry.Project
+		if err := decodeData(response.Data, &projects); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cliOutput.JSON(projects)
+		}
+		printProjectTable(projects)
 		return nil
 	default:
 		return fmt.Errorf("unknown project command %q", args[0])
@@ -253,10 +303,13 @@ func projectCommand(layout paths.Layout, args []string) error {
 }
 
 func configCommand(args []string) error {
+	if err := rejectJSON("config validate"); err != nil {
+		return err
+	}
 	if len(args) == 0 || args[0] != "validate" {
 		return errors.New("config currently supports validate")
 	}
-	fs := flag.NewFlagSet("config validate", flag.ContinueOnError)
+	fs := newFlagSet("config validate")
 	file := fs.String("file", "", "TOML path")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -268,12 +321,12 @@ func configCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("valid: project=%s processes=%d schedules=%d path=%s\n", loaded.Project, len(loaded.Processes), len(loaded.Schedules), loaded.Path)
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: project=%s processes=%d schedules=%d path=%s", loaded.Project, len(loaded.Processes), len(loaded.Schedules), loaded.Path)))
 	return nil
 }
 
 func applyCommand(args []string) error {
-	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs := newFlagSet("apply")
 	project := fs.String("project", "", "project name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -285,7 +338,14 @@ func applyCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(response.Data)
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s applied", result["project"])))
 	return nil
 }
 
@@ -297,6 +357,9 @@ func listCommand() error {
 	var items []daemon.ProcessInfo
 	if err := decodeData(response.Data, &items); err != nil {
 		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(items)
 	}
 	printProcessTable(items)
 	return nil
@@ -310,7 +373,14 @@ func statusCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(response.Data)
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var item daemon.ProcessInfo
+	if err := decodeData(response.Data, &item); err != nil {
+		return err
+	}
+	printProcessDetail(item)
 	return nil
 }
 
@@ -325,7 +395,18 @@ func processCommand(command string, args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(response.Data)
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	action := map[string]string{
+		"start": "started", "stop": "stopped", "restart": "restarted",
+		"enable": "enabled", "disable": "disabled",
+	}[command]
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Process %s %s", result["key"], action)))
 	return nil
 }
 
@@ -338,12 +419,28 @@ func containsArgument(args []string, target string) bool {
 	return false
 }
 
+func newFlagSet(name string) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	return flags
+}
+
+func rejectJSON(command string) error {
+	if jsonOutput {
+		return fmt.Errorf("--json is not supported for %s", command)
+	}
+	return nil
+}
+
 func logsCommand(args []string) error {
+	if err := rejectJSON("logs"); err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("logs requires PROJECT/PROCESS")
 	}
 	key := args[0]
-	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	fs := newFlagSet("logs")
 	stream := fs.String("stream", "stdout", "stdout, stderr, or all")
 	tail := fs.Int("tail", 100, "number of lines")
 	follow := fs.Bool("follow", false, "follow new output")
@@ -367,13 +464,13 @@ func logsCommand(args []string) error {
 	}
 	if *stream == "all" {
 		if data["stdout"] != "" {
-			fmt.Printf("[stdout]\n%s", data["stdout"])
+			printLogBlock("stdout", data["stdout"])
 		}
 		if data["stderr"] != "" {
-			fmt.Printf("[stderr]\n%s", data["stderr"])
+			printLogBlock("stderr", data["stderr"])
 		}
 	} else {
-		fmt.Print(data["data"])
+		printLogBlock(*stream, data["data"])
 	}
 	return nil
 }
@@ -402,9 +499,9 @@ func followLogs(key, stream string, tail int) error {
 				}
 				if data["data"] != "" {
 					if stream == "all" {
-						fmt.Printf("[%s]\n", item)
+						printLogLabel(item)
 					}
-					fmt.Print(data["data"])
+					printLogContent(item, data["data"])
 				}
 				offsets[item] = -1
 				continue
@@ -427,9 +524,9 @@ func followLogs(key, stream string, tail int) error {
 			}
 			if data.Data != "" {
 				if stream == "all" {
-					fmt.Printf("[%s]\n", item)
+					printLogLabel(item)
 				}
-				fmt.Print(data.Data)
+				printLogContent(item, data.Data)
 			}
 			offsets[item] = data.NextOffset
 		}
@@ -462,7 +559,29 @@ func scheduleCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	printJSON(response.Data)
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	switch method {
+	case "schedule.list":
+		var schedules []daemon.ScheduleInfo
+		if err := decodeData(response.Data, &schedules); err != nil {
+			return err
+		}
+		printScheduleTable(schedules)
+	case "schedule.history":
+		var history []scheduler.Record
+		if err := decodeData(response.Data, &history); err != nil {
+			return err
+		}
+		printScheduleHistory(history)
+	case "schedule.run":
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			return err
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Schedule %s started", result["key"])))
+	}
 	return nil
 }
 
@@ -472,6 +591,9 @@ func startupCommand(layout paths.Layout, args []string) error {
 	}
 	switch args[0] {
 	case "install":
+		if err := rejectJSON("startup install"); err != nil {
+			return err
+		}
 		executable, err := os.Executable()
 		if err != nil {
 			return err
@@ -479,18 +601,24 @@ func startupCommand(layout paths.Layout, args []string) error {
 		if err := startup.Install(layout, executable); err != nil {
 			return err
 		}
-		fmt.Println("startup installed")
+		cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration installed"))
 	case "uninstall":
+		if err := rejectJSON("startup uninstall"); err != nil {
+			return err
+		}
 		if err := startup.Uninstall(); err != nil {
 			return err
 		}
-		fmt.Println("startup uninstalled")
+		cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration uninstalled"))
 	case "status":
 		status, err := startup.GetStatus()
 		if err != nil {
 			return err
 		}
-		printJSON(status)
+		if jsonOutput {
+			return cliOutput.JSON(status)
+		}
+		printStartupStatus(status)
 	default:
 		return fmt.Errorf("unknown startup command %q", args[0])
 	}
@@ -498,23 +626,46 @@ func startupCommand(layout paths.Layout, args []string) error {
 }
 
 func doctorCommand(layout paths.Layout) error {
-	fmt.Printf("platform: %s\n", runtime.GOOS)
-	fmt.Printf("root: %s\n", layout.Root)
-	fmt.Printf("registry: %s\n", layout.Registry)
+	registryOK := true
+	registryError := ""
 	if _, err := os.Stat(layout.Registry); err != nil && !os.IsNotExist(err) {
-		fmt.Printf("registry: error: %v\n", err)
-	} else {
-		fmt.Println("registry: ok")
+		registryOK = false
+		registryError = err.Error()
 	}
+
+	daemonData := map[string]interface{}{"status": "stopped"}
 	if response, err := call("health", nil); err == nil {
-		fmt.Print("daemon: ")
-		printJSON(response.Data)
-	} else {
-		fmt.Printf("daemon: stopped (%v)\n", err)
+		if decoded, decodeErr := decodeMap(response.Data); decodeErr == nil {
+			daemonData = decoded
+		}
 	}
-	status, err := startup.GetStatus()
-	if err == nil {
-		fmt.Printf("startup: installed=%t detail=%s\n", status.Installed, status.Detail)
+	startupStatus, startupErr := startup.GetStatus()
+	if jsonOutput {
+		report := map[string]interface{}{
+			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry,
+			"registry_ok": registryOK, "registry_error": registryError,
+			"daemon": daemonData,
+		}
+		if startupErr == nil {
+			report["startup"] = startupStatus
+		} else {
+			report["startup_error"] = startupErr.Error()
+		}
+		return cliOutput.JSON(report)
+	}
+
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "goserve doctor"))
+	cliOutput.KeyValues([][]cliui.Cell{
+		{{Text: "platform"}, {Text: runtime.GOOS}},
+		{{Text: "root"}, {Text: layout.Root}},
+		{{Text: "registry"}, {Text: layout.Registry}},
+		{{Text: "registry status"}, {Text: doctorStatus(registryOK, registryError)}},
+		{{Text: "daemon"}, {Text: doctorStatus(daemonData["status"] == "ok" || daemonData["status"] == "degraded", fmt.Sprint(daemonData["status"]))}},
+	})
+	if startupErr == nil {
+		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: doctorStatus(startupStatus.Installed, startupStatus.Detail)}}})
+	} else {
+		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: startupErr.Error(), Style: cliui.StyleError}}})
 	}
 	return nil
 }
@@ -541,40 +692,267 @@ func decodeData(data interface{}, target interface{}) error {
 	return json.Unmarshal(encoded, target)
 }
 
-func printJSON(value interface{}) {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err == nil {
-		fmt.Println(string(data))
-	}
-}
-
 func printProcessTable(items []daemon.ProcessInfo) {
-	fmt.Printf("%-24s %-13s %6s %8s %10s %8s %8s\n", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART")
-	for _, item := range items {
-		pid := "-"
-		if item.PID > 0 {
-			pid = strconv.Itoa(item.PID)
-		}
-		fmt.Printf("%-24s %-13s %6s %7.2f %10s %7.2f %8d\n",
-			item.Project+"/"+item.Name, item.State, pid, item.CPUPercent, formatBytes(item.RSSBytes), item.MemoryPercent, item.RestartCount)
+	if len(items) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No processes found."))
+		return
 	}
+	rows := make([][]cliui.Cell, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []cliui.Cell{
+			{Text: item.Project + "/" + item.Name},
+			{Text: item.State, Style: cliui.StateStyle(item.State)},
+			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
+			{Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%.2f", item.MemoryPercent), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
+		})
+	}
+	cliOutput.Table([]string{"PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func formatBytes(value uint64) string {
-	if value == 0 {
+	return cliui.FormatBytes(value)
+}
+
+func printDaemonStatus(data interface{}) error {
+	var health struct {
+		Status       string            `json:"status"`
+		PID          int               `json:"pid"`
+		Version      int               `json:"version"`
+		ConfigErrors map[string]string `json:"config_errors"`
+	}
+	if err := decodeData(data, &health); err != nil {
+		return err
+	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "Daemon status"))
+	rows := [][]cliui.Cell{
+		{{Text: "status"}, {Text: health.Status, Style: cliui.StateStyle(health.Status)}},
+		{{Text: "pid"}, {Text: formatPID(health.PID), Style: zeroStyle(health.PID), Align: cliui.AlignRight}},
+		{{Text: "api version"}, {Text: fmt.Sprintf("%d", health.Version), Align: cliui.AlignRight}},
+	}
+	for project, message := range health.ConfigErrors {
+		rows = append(rows, []cliui.Cell{{Text: "config error: " + project}, {Text: message, Style: cliui.StyleError}})
+	}
+	cliOutput.KeyValues(rows)
+	return nil
+}
+
+func printProjectTable(projects []registry.Project) {
+	if len(projects) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No projects registered."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0, len(projects))
+	for _, project := range projects {
+		status := "disabled"
+		style := cliui.StyleWarning
+		if project.Enabled {
+			status = "enabled"
+			style = cliui.StyleSuccess
+		}
+		lastApplied := "-"
+		if project.LastApplied != nil {
+			lastApplied = project.LastApplied.Format(time.RFC3339)
+		}
+		rows = append(rows, []cliui.Cell{
+			{Text: project.Name},
+			{Text: status, Style: style},
+			{Text: project.ConfigPath},
+			{Text: fmt.Sprintf("%d", project.ConfigVersion), Align: cliui.AlignRight},
+			{Text: lastApplied, Style: zeroStyle(lastApplied)},
+		})
+	}
+	cliOutput.Table([]string{"PROJECT", "STATUS", "CONFIG PATH", "VERSION", "LAST APPLIED"}, rows)
+}
+
+func printProcessDetail(item daemon.ProcessInfo) {
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
+	lastExit := "-"
+	if item.LastExitCode != nil {
+		lastExit = fmt.Sprintf("%d", *item.LastExitCode)
+	}
+	rows := [][]cliui.Cell{
+		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
+		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
+		{{Text: "started"}, {Text: formatTime(item.StartedAt), Style: zeroStyle(item.StartedAt)}},
+		{{Text: "uptime"}, {Text: cliui.FormatDuration(item.UptimeSeconds), Style: zeroStyle(item.UptimeSeconds)}},
+		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
+		{{Text: "rss"}, {Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight}},
+		{{Text: "memory"}, {Text: fmt.Sprintf("%.2f%%", item.MemoryPercent), Align: cliui.AlignRight}},
+		{{Text: "restarts"}, {Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight}},
+		{{Text: "last exit"}, {Text: lastExit, Style: zeroStyle(lastExit)}},
+		{{Text: "disabled"}, {Text: fmt.Sprintf("%t", item.Disabled), Style: boolStyle(item.Disabled)}},
+		{{Text: "command"}, {Text: item.CommandLine, Style: zeroStyle(item.CommandLine)}},
+		{{Text: "stdout log"}, {Text: item.StdoutPath, Style: zeroStyle(item.StdoutPath)}},
+		{{Text: "stderr log"}, {Text: item.StderrPath, Style: zeroStyle(item.StderrPath)}},
+		{{Text: "last error"}, {Text: item.LastError, Style: errorStyle(item.LastError)}},
+	}
+	cliOutput.KeyValues(rows)
+}
+
+func printScheduleTable(schedules []daemon.ScheduleInfo) {
+	if len(schedules) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No schedules configured."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0, len(schedules))
+	for _, schedule := range schedules {
+		rows = append(rows, []cliui.Cell{
+			{Text: schedule.Project + "/" + schedule.Name},
+			{Text: schedule.Cron},
+			{Text: schedule.Timezone},
+			{Text: schedule.Action},
+			{Text: schedule.Target, Style: zeroStyle(schedule.Target)},
+			{Text: schedule.Concurrency},
+		})
+	}
+	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY"}, rows)
+}
+
+func printScheduleHistory(history []scheduler.Record) {
+	if len(history) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No schedule history."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0, len(history))
+	for _, record := range history {
+		result := "success"
+		style := cliui.StyleSuccess
+		if record.Error != "" || record.ExitCode != 0 {
+			result = "failed"
+			style = cliui.StyleError
+		}
+		rows = append(rows, []cliui.Cell{
+			{Text: record.Project + "/" + record.Name},
+			{Text: formatTime(record.Started)},
+			{Text: formatTime(record.Finished)},
+			{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
+			{Text: result, Style: style},
+			{Text: record.Error, Style: errorStyle(record.Error)},
+		})
+	}
+	cliOutput.Table([]string{"SCHEDULE", "STARTED", "FINISHED", "EXIT", "RESULT", "ERROR"}, rows)
+}
+
+func printStartupStatus(status startup.Status) {
+	state := "not installed"
+	style := cliui.StyleWarning
+	if status.Installed {
+		state = "installed"
+		style = cliui.StyleSuccess
+	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "Startup integration"))
+	cliOutput.KeyValues([][]cliui.Cell{
+		{{Text: "platform"}, {Text: status.Platform}},
+		{{Text: "status"}, {Text: state, Style: style}},
+		{{Text: "detail"}, {Text: status.Detail, Style: zeroStyle(status.Detail)}},
+	})
+}
+
+func printLogBlock(stream, content string) {
+	printLogLabel(stream)
+	printLogContent(stream, content)
+}
+
+func printLogLabel(stream string) {
+	style := cliui.StyleStdout
+	if stream == "stderr" {
+		style = cliui.StyleStderr
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(style, "["+stream+"]"))
+}
+
+func printLogContent(stream, content string) {
+	style := cliui.StyleNone
+	if stream == "stderr" {
+		style = cliui.StyleStderr
+	}
+	cliOutput.PrintStyled(style, content)
+}
+
+func decodeMap(data interface{}) (map[string]interface{}, error) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func formatPID(pid int) string {
+	if pid <= 0 {
 		return "-"
 	}
-	units := []string{"B", "KiB", "MiB", "GiB"}
-	n := float64(value)
-	index := 0
-	for n >= 1024 && index < len(units)-1 {
-		n /= 1024
-		index++
+	return fmt.Sprintf("%d", pid)
+}
+
+func formatTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
 	}
-	return fmt.Sprintf("%.1f%s", n, units[index])
+	return value.Format(time.RFC3339)
+}
+
+func zeroStyle(value interface{}) cliui.Style {
+	switch typed := value.(type) {
+	case uint64:
+		if typed == 0 {
+			return cliui.StyleMuted
+		}
+	case int:
+		if typed == 0 {
+			return cliui.StyleMuted
+		}
+	case float64:
+		if typed == 0 {
+			return cliui.StyleMuted
+		}
+	case string:
+		if typed == "" || typed == "-" {
+			return cliui.StyleMuted
+		}
+	case time.Time:
+		if typed.IsZero() {
+			return cliui.StyleMuted
+		}
+	}
+	return cliui.StyleNone
+}
+
+func boolStyle(value bool) cliui.Style {
+	if value {
+		return cliui.StyleWarning
+	}
+	return cliui.StyleMuted
+}
+
+func errorStyle(value string) cliui.Style {
+	if value != "" {
+		return cliui.StyleError
+	}
+	return cliui.StyleMuted
+}
+
+func doctorStatus(ok bool, detail string) string {
+	if ok {
+		if detail == "" {
+			detail = "ok"
+		}
+		return cliOutput.Text(cliui.StyleSuccess, detail)
+	}
+	style := cliui.StyleWarning
+	if detail != "stopped" && detail != "not installed" {
+		style = cliui.StyleError
+	}
+	return cliOutput.Text(style, detail)
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
+	cliOutput.Errorf("error: %v", err)
 	os.Exit(1)
 }

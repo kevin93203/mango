@@ -122,6 +122,29 @@ goserve <command> [subcommand] [arguments] [options]
 
 所有指令成功時通常回傳 exit code 0；參數錯誤、daemon 無法連線或操作失敗時回傳非零 exit code。
 
+### 全域輸出選項
+
+所有 command 都可以在 command 前或後使用以下選項：
+
+~~~text
+--color=auto|always|never
+--json
+~~~
+
+範例：
+
+~~~powershell
+goserve --color=always list
+goserve list --color=never
+goserve status demo/api --json
+~~~
+
+`--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
+
+`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project list`、`apply`、`list`、`status`、process lifecycle、`schedule`、`startup status` 與 `doctor`。
+
+`logs`、`monitor`、`config validate` 與 startup install/uninstall 維持文字或互動式輸出，不支援 `--json`。
+
 ### daemon
 
 管理背景 daemon。
@@ -145,6 +168,23 @@ goserve daemon status
 daemon 目前沒有額外參數。
 
 daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
+
+人類可讀輸出：
+
+~~~text
+Daemon status
+FIELD       | VALUE
+------------+---------
+status      | ok
+pid         | 12345
+api version | 1
+~~~
+
+若需要原始結構化資料：
+
+~~~powershell
+goserve daemon status --json
+~~~
 
 需要 daemon 提供服務的指令（例如 `list`、`status`、process action 與 `logs`）若無法連線，會提示：
 
@@ -206,6 +246,8 @@ goserve project list
 
 列出 registry 中的 project、設定檔路徑、啟用狀態與最後套用時間，需要 daemon 執行。
 
+使用 `goserve project list --json` 可輸出 JSON。
+
 ### config validate
 
 只解析與驗證 TOML，不啟動或停止 process。
@@ -259,6 +301,8 @@ goserve list
 - memory percentage
 - restart count
 
+預設使用彩色表格；可用 `goserve list --color=never` 取得不含顏色的穩定文字輸出，或使用 `goserve list --json` 取得 JSON。
+
 ### status
 
 查看單一 process 的完整狀態。
@@ -274,6 +318,8 @@ goserve status PROJECT/PROCESS
 | PROJECT/PROCESS | process key，例如 demo/api。 |
 
 輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
+
+`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/PROCESS --json` 可取得原始 JSON。
 
 ### process lifecycle
 
@@ -294,6 +340,8 @@ goserve disable PROJECT/PROCESS
 | restart | 先停止再啟動 process。 |
 | enable | 清除 disabled 狀態並啟動 process。 |
 | disable | 設為 disabled 並停止 process；直到 enable 或重新套用設定前不會 autostart。 |
+
+process lifecycle 成功時預設輸出簡短訊息，例如 `Process demo/api stopped`；加上 `--json` 可保留結構化結果。
 
 Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 
