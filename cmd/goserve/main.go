@@ -25,6 +25,8 @@ import (
 	"goserve/internal/tui"
 )
 
+const processOperationTimeout = 30 * time.Second
+
 func main() {
 	layout, err := paths.Default()
 	if err != nil {
@@ -319,7 +321,7 @@ func processCommand(command string, args []string) error {
 		}
 		return fmt.Errorf("invalid %s arguments: expected one PROJECT/PROCESS, for example: goserve %s demo/api", command, command)
 	}
-	response, err := call("process."+command, struct{ Key string }{args[0]})
+	response, err := callWithTimeout("process."+command, struct{ Key string }{args[0]}, processOperationTimeout)
 	if err != nil {
 		return err
 	}
@@ -518,11 +520,15 @@ func doctorCommand(layout paths.Layout) error {
 }
 
 func call(method string, params interface{}) (ipc.Response, error) {
+	return callWithTimeout(method, params, 5*time.Second)
+}
+
+func callWithTimeout(method string, params interface{}, timeout time.Duration) (ipc.Response, error) {
 	request, err := ipc.NewRequest(method, params)
 	if err != nil {
 		return ipc.Response{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return ipc.Call(ctx, request)
 }

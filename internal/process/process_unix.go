@@ -7,10 +7,16 @@ import (
 	"syscall"
 )
 
+type platformState struct{}
+
 func prepareCommand(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return nil
 }
+
+func attachProcessTree(h *Handle) {}
+
+func releaseProcessTree(h *Handle) {}
 
 func gracefulStop(h *Handle) error {
 	return syscall.Kill(-h.PID(), syscall.SIGTERM)

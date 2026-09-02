@@ -32,6 +32,7 @@ type Handle struct {
 	done      chan struct{}
 	mu        sync.RWMutex
 	result    Result
+	platform  platformState
 }
 
 func Start(spec Spec) (*Handle, error) {
@@ -53,6 +54,7 @@ func Start(spec Spec) (*Handle, error) {
 	}
 	cmd.Stdout = spec.Stdout
 	cmd.Stderr = spec.Stderr
+	cmd.WaitDelay = time.Second
 	if err := prepareCommand(cmd); err != nil {
 		return nil, err
 	}
@@ -61,12 +63,14 @@ func Start(spec Spec) (*Handle, error) {
 		return nil, err
 	}
 	h := &Handle{cmd: cmd, startedAt: startedAt, done: make(chan struct{})}
+	attachProcessTree(h)
 	go h.wait()
 	return h, nil
 }
 
 func (h *Handle) wait() {
 	err := h.cmd.Wait()
+	releaseProcessTree(h)
 	exitCode := -1
 	if h.cmd.ProcessState != nil {
 		exitCode = h.cmd.ProcessState.ExitCode()
@@ -108,7 +112,13 @@ func (h *Handle) Stop(timeout time.Duration) error {
 		return nil
 	default:
 	}
-	_ = gracefulStop(h)
+	if err := gracefulStop(h); err != nil {
+		// Some platforms do not support a graceful interrupt. Force-stop in
+		// that case instead of waiting for the graceful timeout first.
+		_ = forceStop(h)
+		<-h.done
+		return nil
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {

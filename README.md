@@ -295,7 +295,7 @@ goserve disable PROJECT/PROCESS
 | enable | 清除 disabled 狀態並啟動 process。 |
 | disable | 設為 disabled 並停止 process；直到 enable 或重新套用設定前不會 autostart。 |
 
-Unix 會先對 process group 發送 SIGTERM，逾時後強制終止；Windows 會終止 process tree。
+Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 
 ### logs
 
