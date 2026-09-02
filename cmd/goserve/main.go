@@ -108,7 +108,7 @@ func usage() {
 		"  list",
 		"  status PROJECT/PROCESS|ID",
 		"  start|stop|restart|enable|disable PROJECT/PROCESS|ID",
-		"  logs PROJECT/PROCESS|ID [--stream stdout|stderr|all] [--tail N] [--follow]",
+		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  monitor",
 		"  schedule list|history|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
@@ -441,7 +441,7 @@ func logsCommand(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return errors.New("logs requires PROJECT/PROCESS or ID")
+		return errors.New("logs requires PROJECT/PROCESS, PROJECT/SCHEDULE, or ID")
 	}
 	key := args[0]
 	fs := newFlagSet("logs")

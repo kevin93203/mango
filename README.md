@@ -198,7 +198,7 @@ daemon is not running; start it with: goserve daemon start
 goserve logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的 process 參數可使用 `PROJECT/PROCESS` 或 `ID`。id 可從 `goserve list` 或 `goserve status PROJECT/PROCESS` 取得，例如 `goserve stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/PROCESS` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `goserve list` 或 `goserve status PROJECT/PROCESS` 取得，例如 `goserve stop 2`。
 
 ### project
 
@@ -351,14 +351,14 @@ Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows �
 查看 process 的 stdout／stderr。
 
 ~~~text
-goserve logs PROJECT/PROCESS|ID [--stream STREAM] [--tail N] [--follow]
+goserve logs TARGET [--stream STREAM] [--tail N] [--follow]
 ~~~
 
 參數：
 
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
-| PROJECT/PROCESS\|ID | 無 | process key 或全域整數 id。 |
+| TARGET | 無 | process key、schedule key 或全域整數 process id。 |
 | --stream | stdout | 可選 stdout、stderr 或 all。 |
 | --tail | 100 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
@@ -413,6 +413,15 @@ goserve schedule run PROJECT/SCHEDULE
 | run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
 
 schedule run 的 key 格式為 PROJECT/SCHEDULE。
+
+`action = "run"` 的 schedule 可直接使用 schedule key 查看日誌：
+
+~~~powershell
+goserve logs PROJECT/SCHEDULE --stream all
+goserve logs PROJECT/SCHEDULE --stream all --follow
+~~~
+
+例如 `goserve logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 process 的日誌。
 
 ### startup
 

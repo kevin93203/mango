@@ -196,6 +196,56 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	}
 }
 
+func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.toml")
+	writeTestScheduleConfig(t, configPath, "demo", "nightly-job")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 1,
+		Projects: map[string]registry.Project{
+			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatalf("reloadRegistry() error = %v", err)
+	}
+	writer, _, err := d.logs.Open("demo", scheduleLogName("nightly-job"), "stdout", 1<<20, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("schedule output\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := ipc.NewRequest("logs.read", struct {
+		Key    string
+		Stream string
+		Tail   int
+	}{"demo/nightly-job", "all", 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule logs.read failed: %+v", response.Error)
+	}
+	var data map[string]string
+	if err := decodeTestData(response.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["stdout"] != "schedule output\n" {
+		t.Fatalf("schedule stdout = %q, want %q", data["stdout"], "schedule output\n")
+	}
+}
+
 func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
@@ -217,6 +267,23 @@ func writeTestConfig(t *testing.T, path, project string, processNames ...string)
 		)
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestScheduleConfig(t *testing.T, path, project, scheduleName string) {
+	content := strings.Join([]string{
+		"version = 1",
+		fmt.Sprintf("project = %q", project),
+		"",
+		"[[schedules]]",
+		fmt.Sprintf("name = %q", scheduleName),
+		`cron = "* * * * *"`,
+		`action = "run"`,
+		`command = "echo"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

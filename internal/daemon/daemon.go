@@ -780,11 +780,11 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 		}
 		return 0, nil
 	}
-	stdout, _, err := d.logs.Open(schedule.Project, "schedule-"+schedule.Name, "stdout", 100<<20, 10)
+	stdout, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stdout", 100<<20, 10)
 	if err != nil {
 		return 1, err
 	}
-	stderr, _, err := d.logs.Open(schedule.Project, "schedule-"+schedule.Name, "stderr", 100<<20, 10)
+	stderr, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stderr", 100<<20, 10)
 	if err != nil {
 		_ = stdout.Close()
 		return 1, err
@@ -898,7 +898,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		project, name, err := d.resolveProcessRef(p.Key)
+		project, name, err := d.resolveLogRef(p.Key)
 		if err != nil {
 			return failure(request, processReferenceErrorCode(p.Key, "BAD_PARAMS"), err)
 		}
@@ -961,6 +961,38 @@ func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lin
 		return failure(request, "LOG_READ_FAILED", err)
 	}
 	return success(request, map[string]string{"data": data})
+}
+
+func (d *Daemon) resolveLogRef(ref string) (string, string, error) {
+	if !strings.Contains(ref, "/") {
+		return d.resolveProcessRef(ref)
+	}
+	project, name, err := splitKey(ref)
+	if err != nil {
+		return "", "", err
+	}
+	if d.processExists(project, name) {
+		return project, name, nil
+	}
+	if d.scheduler.Has(project + "/" + name) {
+		return project, scheduleLogName(name), nil
+	}
+	return project, name, nil
+}
+
+func (d *Daemon) processExists(project, name string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	runtimeProject := d.projects[project]
+	if runtimeProject == nil {
+		return false
+	}
+	_, ok := runtimeProject.processes[name]
+	return ok
+}
+
+func scheduleLogName(name string) string {
+	return "schedule-" + name
 }
 
 func success(request ipc.Request, data interface{}) ipc.Response {

@@ -148,3 +148,10 @@ func (s *Scheduler) List() []config.EffectiveSchedule {
 	}
 	return result
 }
+
+func (s *Scheduler) Has(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.schedules[key]
+	return ok
+}
