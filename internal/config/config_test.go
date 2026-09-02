@@ -77,3 +77,41 @@ func TestValidateSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	file := File{
+		Version: 1,
+		Project: "demo",
+		Path:    filepath.Join(root, "goserve.toml"),
+		Defaults: Defaults{
+			WorkingDir: "defaults",
+		},
+		Processes: []Process{{
+			Name: "worker", Command: "echo", WorkingDir: external,
+		}},
+		Schedules: []Schedule{{
+			Name: "job", Cron: "0 0 * * *", Action: "run", Command: "echo", WorkingDir: external,
+		}},
+	}
+
+	processes, err := file.ProcessesEffective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedules, err := file.SchedulesEffective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.Abs(external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processes[0].WorkingDir != expected {
+		t.Fatalf("process working dir = %q, want %q", processes[0].WorkingDir, expected)
+	}
+	if schedules[0].WorkingDir != expected {
+		t.Fatalf("schedule working dir = %q, want %q", schedules[0].WorkingDir, expected)
+	}
+}

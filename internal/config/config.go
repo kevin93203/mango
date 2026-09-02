@@ -252,7 +252,7 @@ func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
 		if dir == "" {
 			dir = "."
 		}
-		dir, _ = filepath.Abs(filepath.Join(base, dir))
+		dir = resolveWorkingDir(base, dir)
 		command := p.Command
 		if strings.ContainsAny(command, "/\\") {
 			if !filepath.IsAbs(command) {
@@ -321,7 +321,7 @@ func (f File) SchedulesEffective() ([]EffectiveSchedule, error) {
 		if dir == "" {
 			dir = "."
 		}
-		dir, _ = filepath.Abs(filepath.Join(base, dir))
+		dir = resolveWorkingDir(base, dir)
 		command := s.Command
 		if strings.ContainsAny(command, "/\\") {
 			if !filepath.IsAbs(command) {
@@ -350,6 +350,17 @@ func mergeEnv(extra map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+func resolveWorkingDir(base, dir string) string {
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(base, dir)
+	}
+	resolved, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
 }
 
 func seenProcess(processes []Process, name string) bool {
