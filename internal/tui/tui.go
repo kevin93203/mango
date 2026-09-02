@@ -44,19 +44,21 @@ func Run(output *cliui.Renderer) error {
 	selected := 0
 	var lastErr string
 	var items []daemon.ProcessInfo
-	draw := func() {
-		current, err := list()
-		if err != nil {
-			lastErr = err.Error()
-		} else {
-			items = current
-			if selected >= len(items) {
-				selected = len(items) - 1
+	draw := func(refresh bool) {
+		if refresh {
+			current, err := list()
+			if err != nil {
+				lastErr = err.Error()
+			} else {
+				items = current
+				if selected >= len(items) {
+					selected = len(items) - 1
+				}
+				if selected < 0 {
+					selected = 0
+				}
+				lastErr = ""
 			}
-			if selected < 0 {
-				selected = 0
-			}
-			lastErr = ""
 		}
 		output.Printf("\x1b[H\x1b[2J")
 		output.Println(output.Text(cliui.StyleHeader, "goserve monitor"), output.Text(cliui.StyleMuted, "(q quit, up/down or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)"))
@@ -65,11 +67,11 @@ func Run(output *cliui.Renderer) error {
 			output.Printf("\n%s\n", output.ErrorText("error: "+lastErr))
 		}
 	}
-	draw()
+	draw(true)
 	for {
 		select {
 		case <-ticker.C:
-			draw()
+			draw(true)
 		case key := <-input:
 			switch key {
 			case 'q', 3:
@@ -77,10 +79,12 @@ func Run(output *cliui.Renderer) error {
 			case 'j':
 				if selected < len(items)-1 {
 					selected++
+					draw(false)
 				}
 			case 'k':
 				if selected > 0 {
 					selected--
+					draw(false)
 				}
 			case 's', 'r', 'e', 'd':
 				if selected < len(items) {
@@ -89,34 +93,40 @@ func Run(output *cliui.Renderer) error {
 						lastErr = err.Error()
 					}
 				}
-				draw()
+				draw(true)
 			case 'l':
 				if selected < len(items) {
 					if err := showLogs(output, items[selected].Project+"/"+items[selected].Name, input); err != nil {
 						lastErr = err.Error()
 					}
-					draw()
+					draw(true)
 				}
 			case 13:
 				if selected < len(items) {
 					if err := showDetail(output, items[selected], input); err != nil {
 						lastErr = err.Error()
 					}
-					draw()
+					draw(true)
 				}
 			case 27:
 				// Arrow-key escape sequences are consumed below.
 				next := <-input
 				if next == '[' {
+					moved := false
 					switch <-input {
 					case 'A':
 						if selected > 0 {
 							selected--
+							moved = true
 						}
 					case 'B':
 						if selected < len(items)-1 {
 							selected++
+							moved = true
 						}
+					}
+					if moved {
+						draw(false)
 					}
 				}
 			}
