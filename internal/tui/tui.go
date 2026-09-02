@@ -27,6 +27,8 @@ func Run(output *cliui.Renderer) error {
 		return err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), state)
+	output.SetLineEnding("\r\n")
+	defer output.SetLineEnding("\n")
 	output.Printf("\x1b[?25l")
 	defer output.Printf("\x1b[?25h\x1b[0m\n")
 

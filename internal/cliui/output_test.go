@@ -81,6 +81,19 @@ func TestRendererErrorStream(t *testing.T) {
 	}
 }
 
+func TestRendererUsesConfiguredLineEnding(t *testing.T) {
+	var output bytes.Buffer
+	renderer := New(&output, &output, Options{Color: ColorNever, Width: 80})
+	renderer.SetLineEnding("\r\n")
+	renderer.Printf("first\nsecond\r\n")
+	renderer.Println("third")
+	renderer.PrintStyled(StyleNone, "fourth\nfifth")
+
+	if output.String() != "first\r\nsecond\r\nthird\r\nfourth\r\nfifth" {
+		t.Fatalf("stdout = %q", output.String())
+	}
+}
+
 func TestRendererTableTruncatesToWidth(t *testing.T) {
 	var output bytes.Buffer
 	renderer := New(&output, &output, Options{Color: ColorNever, Width: 32})

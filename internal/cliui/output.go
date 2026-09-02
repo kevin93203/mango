@@ -59,6 +59,7 @@ type Renderer struct {
 	width    int
 	outColor bool
 	errColor bool
+	lineEnd  string
 }
 
 func ParseOptions(args []string) (Options, []string, error) {
@@ -125,15 +126,15 @@ func New(out, errOut io.Writer, options Options) *Renderer {
 	if width <= 0 {
 		width = terminalWidth(out)
 	}
-	return &Renderer{out: out, errOut: errOut, width: width, outColor: outColor, errColor: errColor}
+	return &Renderer{out: out, errOut: errOut, width: width, outColor: outColor, errColor: errColor, lineEnd: "\n"}
 }
 
 func (r *Renderer) Printf(format string, args ...interface{}) {
-	_, _ = fmt.Fprintf(r.out, format, args...)
+	r.writeOut(fmt.Sprintf(format, args...))
 }
 
 func (r *Renderer) Println(args ...interface{}) {
-	_, _ = fmt.Fprintln(r.out, args...)
+	r.writeOut(fmt.Sprintln(args...))
 }
 
 func (r *Renderer) Errorf(format string, args ...interface{}) {
@@ -164,7 +165,25 @@ func (r *Renderer) ErrorText(text string) string {
 }
 
 func (r *Renderer) PrintStyled(style Style, text string) {
-	_, _ = fmt.Fprint(r.out, r.Text(style, text))
+	r.writeOut(r.Text(style, text))
+}
+
+// SetLineEnding controls line endings written to stdout. Interactive programs
+// should use CRLF while the terminal is in raw mode because raw mode disables
+// the terminal's usual LF-to-CRLF output conversion on Unix.
+func (r *Renderer) SetLineEnding(lineEnd string) {
+	if lineEnd == "" {
+		lineEnd = "\n"
+	}
+	r.lineEnd = lineEnd
+}
+
+func (r *Renderer) writeOut(text string) {
+	if r.lineEnd != "\n" {
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+		text = strings.ReplaceAll(text, "\n", r.lineEnd)
+	}
+	_, _ = fmt.Fprint(r.out, text)
 }
 
 func (r *Renderer) Width() int {
