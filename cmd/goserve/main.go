@@ -106,9 +106,9 @@ func usage() {
 		"  config validate --file PATH",
 		"  apply --project NAME",
 		"  list",
-		"  status PROJECT/PROCESS",
-		"  start|stop|restart|enable|disable PROJECT/PROCESS",
-		"  logs PROJECT/PROCESS [--stream stdout|stderr|all] [--tail N] [--follow]",
+		"  status PROJECT/PROCESS|ID",
+		"  start|stop|restart|enable|disable PROJECT/PROCESS|ID",
+		"  logs PROJECT/PROCESS|ID [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  monitor",
 		"  schedule list|history|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
@@ -250,7 +250,11 @@ func projectCommand(layout paths.Layout, args []string) error {
 		if err != nil {
 			return err
 		}
-		reg.Projects[projectName] = registry.Project{Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version}
+		project := registry.Project{Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version}
+		if previous, ok := reg.Projects[projectName]; ok {
+			project.ProcessIDs = previous.ProcessIDs
+		}
+		reg.Projects[projectName] = project
 		if err := registry.Save(layout.Registry, reg); err != nil {
 			return err
 		}
@@ -367,7 +371,7 @@ func listCommand() error {
 
 func statusCommand(args []string) error {
 	if len(args) != 1 {
-		return errors.New("status requires PROJECT/PROCESS")
+		return errors.New("status requires PROJECT/PROCESS or ID")
 	}
 	response, err := call("process.get", struct{ Key string }{args[0]})
 	if err != nil {
@@ -389,7 +393,7 @@ func processCommand(command string, args []string) error {
 		if len(args) > 1 && command != "logs" && containsArgument(args[1:], "--follow") {
 			return fmt.Errorf("--follow is only supported by logs; try: goserve logs %s --follow", args[0])
 		}
-		return fmt.Errorf("invalid %s arguments: expected one PROJECT/PROCESS, for example: goserve %s demo/api", command, command)
+		return fmt.Errorf("invalid %s arguments: expected one PROJECT/PROCESS or ID, for example: goserve %s demo/api", command, command)
 	}
 	response, err := callWithTimeout("process."+command, struct{ Key string }{args[0]}, processOperationTimeout)
 	if err != nil {
@@ -437,7 +441,7 @@ func logsCommand(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return errors.New("logs requires PROJECT/PROCESS")
+		return errors.New("logs requires PROJECT/PROCESS or ID")
 	}
 	key := args[0]
 	fs := newFlagSet("logs")
@@ -700,6 +704,7 @@ func printProcessTable(items []daemon.ProcessInfo) {
 	rows := make([][]cliui.Cell, 0, len(items))
 	for _, item := range items {
 		rows = append(rows, []cliui.Cell{
+			{Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight},
 			{Text: item.Project + "/" + item.Name},
 			{Text: item.State, Style: cliui.StateStyle(item.State)},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
@@ -709,7 +714,7 @@ func printProcessTable(items []daemon.ProcessInfo) {
 			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
 		})
 	}
-	cliOutput.Table([]string{"PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	cliOutput.Table([]string{"ID", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func formatBytes(value uint64) string {
@@ -774,6 +779,7 @@ func printProcessDetail(item daemon.ProcessInfo) {
 		lastExit = fmt.Sprintf("%d", *item.LastExitCode)
 	}
 	rows := [][]cliui.Cell{
+		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight}},
 		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
 		{{Text: "started"}, {Text: formatTime(item.StartedAt), Style: zeroStyle(item.StartedAt)}},

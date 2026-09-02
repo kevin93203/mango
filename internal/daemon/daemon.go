@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,7 @@ type projectRuntime struct {
 }
 
 type managedProcess struct {
+	id         int
 	spec       config.EffectiveProcess
 	handle     *process.Handle
 	stdout     *logging.RotatingWriter
@@ -74,6 +76,7 @@ type managedProcess struct {
 }
 
 type ProcessInfo struct {
+	ID            int
 	Project       string
 	Name          string
 	State         string
@@ -227,7 +230,13 @@ func (d *Daemon) reloadRegistry() error {
 	d.registry = reg
 	d.configErrors = map[string]string{}
 	d.mu.Unlock()
-	for name, project := range reg.Projects {
+	projectNames := make([]string, 0, len(reg.Projects))
+	for name := range reg.Projects {
+		projectNames = append(projectNames, name)
+	}
+	sort.Strings(projectNames)
+	for _, name := range projectNames {
+		project := reg.Projects[name]
 		if !project.Enabled {
 			d.removeProject(name)
 			continue
@@ -304,6 +313,7 @@ func (d *Daemon) applyProject(name, path string) error {
 	}
 
 	d.mu.Lock()
+	processIDs, nextProcessID := d.allocateProcessIDsLocked(name, desired)
 	current := d.projects[name]
 	if current == nil {
 		current = &projectRuntime{processes: map[string]*managedProcess{}}
@@ -323,11 +333,13 @@ func (d *Daemon) applyProject(name, path string) error {
 	toStart := make([]*managedProcess, 0)
 	for processName, spec := range desired {
 		if _, exists := current.processes[processName]; !exists {
-			managed := &managedProcess{spec: spec, state: StateStopped}
+			managed := &managedProcess{id: processIDs[processName], spec: spec, state: StateStopped}
 			current.processes[processName] = managed
 			if spec.Autostart {
 				toStart = append(toStart, managed)
 			}
+		} else {
+			current.processes[processName].id = processIDs[processName]
 		}
 	}
 	current.file = file
@@ -347,10 +359,74 @@ func (d *Daemon) applyProject(name, path string) error {
 	d.mu.Lock()
 	d.registry.Projects[name] = registry.Project{
 		Name: name, ConfigPath: file.Path, Enabled: true, ConfigVersion: file.Version, LastApplied: &now,
+		ProcessIDs: processIDs,
 	}
+	d.registry.NextProcessID = nextProcessID
 	reg := d.registry
 	d.mu.Unlock()
 	return registry.Save(d.layout.Registry, reg)
+}
+
+func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string]config.EffectiveProcess) (map[string]int, int) {
+	owners := map[int]string{}
+	projectNames := make([]string, 0, len(d.registry.Projects))
+	for name := range d.registry.Projects {
+		projectNames = append(projectNames, name)
+	}
+	sort.Strings(projectNames)
+	for _, name := range projectNames {
+		project := d.registry.Projects[name]
+		processNames := make([]string, 0, len(project.ProcessIDs))
+		for processName := range project.ProcessIDs {
+			processNames = append(processNames, processName)
+		}
+		sort.Strings(processNames)
+		for _, processName := range processNames {
+			id := project.ProcessIDs[processName]
+			if id <= 0 {
+				continue
+			}
+			key := name + "/" + processName
+			if owner, exists := owners[id]; !exists || key < owner {
+				owners[id] = key
+			}
+		}
+	}
+
+	nextID := d.registry.NextProcessID
+	if nextID <= 0 {
+		nextID = 1
+	}
+	for id := range owners {
+		if id >= nextID {
+			nextID = id + 1
+		}
+	}
+
+	assigned := make(map[string]int, len(desired))
+	processNames := make([]string, 0, len(desired))
+	for processName := range desired {
+		processNames = append(processNames, processName)
+	}
+	sort.Strings(processNames)
+	existing := d.registry.Projects[projectName].ProcessIDs
+	for _, processName := range processNames {
+		key := projectName + "/" + processName
+		id := existing[processName]
+		if id <= 0 || owners[id] != key {
+			for {
+				if _, used := owners[nextID]; !used {
+					break
+				}
+				nextID++
+			}
+			id = nextID
+			owners[id] = key
+			nextID++
+		}
+		assigned[processName] = id
+	}
+	return assigned, nextID
 }
 
 func (d *Daemon) allSchedulesWith(schedules []config.EffectiveSchedule, projectName string) []config.EffectiveSchedule {
@@ -543,7 +619,7 @@ func (d *Daemon) stopManaged(managed *managedProcess) error {
 }
 
 func (d *Daemon) StartProcess(key string) error {
-	project, name, err := splitKey(key)
+	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
 		return err
 	}
@@ -567,7 +643,7 @@ func (d *Daemon) StartProcess(key string) error {
 }
 
 func (d *Daemon) StopProcess(key string, disable bool) error {
-	project, name, err := splitKey(key)
+	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
 		return err
 	}
@@ -615,7 +691,7 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		managed := item.managed
 		d.mu.RLock()
 		info := ProcessInfo{
-			Project: item.project, Name: managed.spec.Name, State: managed.state, Disabled: managed.disabled,
+			ID: managed.id, Project: item.project, Name: managed.spec.Name, State: managed.state, Disabled: managed.disabled,
 			StartedAt: managed.startedAt, RestartCount: managed.restarts, LastExitCode: managed.lastExit,
 			LastError: managed.lastError, StdoutPath: managed.stdoutPath, StderrPath: managed.stderrPath,
 		}
@@ -641,12 +717,50 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 }
 
 func (d *Daemon) GetProcess(key string) (ProcessInfo, error) {
+	project, name, err := d.resolveProcessRef(key)
+	if err != nil {
+		return ProcessInfo{}, err
+	}
+	canonicalKey := project + "/" + name
 	for _, info := range d.ListProcesses("") {
-		if info.Project+"/"+info.Name == key {
+		if info.Project+"/"+info.Name == canonicalKey {
 			return info, nil
 		}
 	}
 	return ProcessInfo{}, fmt.Errorf("process %q not found", key)
+}
+
+func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
+	if strings.Contains(ref, "/") {
+		return splitKey(ref)
+	}
+	id, err := strconv.Atoi(ref)
+	if err != nil || id <= 0 {
+		return "", "", fmt.Errorf("process reference must be PROJECT/PROCESS or a positive integer id")
+	}
+
+	d.mu.RLock()
+	projectNames := make([]string, 0, len(d.projects))
+	for projectName := range d.projects {
+		projectNames = append(projectNames, projectName)
+	}
+	sort.Strings(projectNames)
+	for _, projectName := range projectNames {
+		project := d.projects[projectName]
+		processNames := make([]string, 0, len(project.processes))
+		for processName := range project.processes {
+			processNames = append(processNames, processName)
+		}
+		sort.Strings(processNames)
+		for _, processName := range processNames {
+			if project.processes[processName].id == id {
+				d.mu.RUnlock()
+				return projectName, processName, nil
+			}
+		}
+	}
+	d.mu.RUnlock()
+	return "", "", fmt.Errorf("process id %d not found", id)
 }
 
 func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) (int, error) {
@@ -760,29 +874,33 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		var err error
+		project, name, err := d.resolveProcessRef(p.Key)
+		if err != nil {
+			return failure(request, processReferenceErrorCode(p.Key, "PROCESS_OPERATION_FAILED"), err)
+		}
+		canonicalKey := project + "/" + name
 		switch request.Method {
 		case "process.start", "process.enable":
-			err = d.StartProcess(p.Key)
+			err = d.StartProcess(canonicalKey)
 		case "process.stop":
-			err = d.StopProcess(p.Key, false)
+			err = d.StopProcess(canonicalKey, false)
 		case "process.disable":
-			err = d.StopProcess(p.Key, true)
+			err = d.StopProcess(canonicalKey, true)
 		case "process.restart":
-			err = d.RestartProcess(p.Key)
+			err = d.RestartProcess(canonicalKey)
 		}
 		if err != nil {
 			return failure(request, "PROCESS_OPERATION_FAILED", err)
 		}
-		return success(request, map[string]string{"key": p.Key, "status": "ok"})
+		return success(request, map[string]string{"key": canonicalKey, "status": "ok"})
 	case "logs.read":
 		var p logRequest
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		project, name, err := splitKey(p.Key)
+		project, name, err := d.resolveProcessRef(p.Key)
 		if err != nil {
-			return failure(request, "BAD_PARAMS", err)
+			return failure(request, processReferenceErrorCode(p.Key, "BAD_PARAMS"), err)
 		}
 		if p.Stream == "" {
 			p.Stream = "stdout"
@@ -859,6 +977,15 @@ func splitKey(key string) (string, string, error) {
 		return "", "", fmt.Errorf("key must be project/process")
 	}
 	return parts[0], parts[1], nil
+}
+
+func processReferenceErrorCode(ref, fallback string) string {
+	if !strings.Contains(ref, "/") {
+		if id, err := strconv.Atoi(ref); err == nil && id > 0 {
+			return "PROCESS_NOT_FOUND"
+		}
+	}
+	return fallback
 }
 
 func sameSpec(a, b config.EffectiveProcess) bool {

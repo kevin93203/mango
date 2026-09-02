@@ -190,6 +190,7 @@ func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan by
 	}
 	output.Println(output.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
 	output.KeyValues([][]cliui.Cell{
+		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight}},
 		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
 		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
@@ -218,6 +219,7 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 		}
 		rows = append(rows, []cliui.Cell{
 			{Text: marker, Style: cliui.StyleHeader},
+			{Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight},
 			{Text: item.Project + "/" + item.Name},
 			{Text: item.State, Style: cliui.StateStyle(item.State)},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
@@ -227,7 +229,7 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
 		})
 	}
-	output.Table([]string{"", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	output.Table([]string{"", "ID", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func formatPID(pid int) string {

@@ -198,7 +198,7 @@ daemon is not running; start it with: goserve daemon start
 goserve logs demo/api --follow
 ~~~
 
-`start`、`stop`、`restart`、`enable` 與 `disable` 只接受一個 `PROJECT/PROCESS` 參數，例如 `goserve stop demo/api`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的 process 參數可使用 `PROJECT/PROCESS` 或 `ID`。id 可從 `goserve list` 或 `goserve status PROJECT/PROCESS` 取得，例如 `goserve stop 2`。
 
 ### project
 
@@ -285,7 +285,7 @@ goserve apply --project NAME
 
 ### list
 
-列出所有 project 的 process。
+列出所有 project 的 process 與全域 process id。
 
 ~~~text
 goserve list
@@ -293,6 +293,7 @@ goserve list
 
 顯示：
 
+- process id
 - project/process
 - state
 - PID
@@ -308,29 +309,29 @@ goserve list
 查看單一 process 的完整狀態。
 
 ~~~text
-goserve status PROJECT/PROCESS
+goserve status PROJECT/PROCESS|ID
 ~~~
 
 必要參數：
 
 | 參數 | 說明 |
 | --- | --- |
-| PROJECT/PROCESS | process key，例如 demo/api。 |
+| PROJECT/PROCESS\|ID | process key（例如 demo/api）或全域整數 id。 |
 
 輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
 
-`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/PROCESS --json` 可取得原始 JSON。
+`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/PROCESS|ID --json` 可取得原始 JSON。
 
 ### process lifecycle
 
 以下指令都使用相同語法：
 
 ~~~text
-goserve start PROJECT/PROCESS
-goserve stop PROJECT/PROCESS
-goserve restart PROJECT/PROCESS
-goserve enable PROJECT/PROCESS
-goserve disable PROJECT/PROCESS
+goserve start PROJECT/PROCESS|ID
+goserve stop PROJECT/PROCESS|ID
+goserve restart PROJECT/PROCESS|ID
+goserve enable PROJECT/PROCESS|ID
+goserve disable PROJECT/PROCESS|ID
 ~~~
 
 | 指令 | 說明 |
@@ -341,7 +342,7 @@ goserve disable PROJECT/PROCESS
 | enable | 清除 disabled 狀態並啟動 process。 |
 | disable | 設為 disabled 並停止 process；直到 enable 或重新套用設定前不會 autostart。 |
 
-process lifecycle 成功時預設輸出簡短訊息，例如 `Process demo/api stopped`；加上 `--json` 可保留結構化結果。
+process lifecycle 成功時預設輸出簡短訊息，例如 `Process demo/api stopped`；使用 id 操作時仍會輸出 canonical key。加上 `--json` 可保留結構化結果。
 
 Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 
@@ -350,14 +351,14 @@ Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows �
 查看 process 的 stdout／stderr。
 
 ~~~text
-goserve logs PROJECT/PROCESS [--stream STREAM] [--tail N] [--follow]
+goserve logs PROJECT/PROCESS|ID [--stream STREAM] [--tail N] [--follow]
 ~~~
 
 參數：
 
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
-| PROJECT/PROCESS | 無 | process key。 |
+| PROJECT/PROCESS\|ID | 無 | process key 或全域整數 id。 |
 | --stream | stdout | 可選 stdout、stderr 或 all。 |
 | --tail | 100 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |

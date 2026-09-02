@@ -10,16 +10,18 @@ import (
 )
 
 type Project struct {
-	Name          string     `json:"name"`
-	ConfigPath    string     `json:"config_path"`
-	Enabled       bool       `json:"enabled"`
-	ConfigVersion int        `json:"config_version"`
-	LastApplied   *time.Time `json:"last_applied,omitempty"`
+	Name          string         `json:"name"`
+	ConfigPath    string         `json:"config_path"`
+	Enabled       bool           `json:"enabled"`
+	ConfigVersion int            `json:"config_version"`
+	LastApplied   *time.Time     `json:"last_applied,omitempty"`
+	ProcessIDs    map[string]int `json:"process_ids,omitempty"`
 }
 
 type File struct {
-	Version  int                `json:"version"`
-	Projects map[string]Project `json:"projects"`
+	Version       int                `json:"version"`
+	NextProcessID int                `json:"next_process_id,omitempty"`
+	Projects      map[string]Project `json:"projects"`
 }
 
 func Load(path string) (File, error) {
