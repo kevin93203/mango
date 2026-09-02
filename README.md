@@ -140,9 +140,11 @@ goserve daemon status
 | start | 背景啟動 daemon；若已執行則顯示 already running。 |
 | stop | 透過本機 IPC 要求 daemon 停止。 |
 | restart | 停止目前 daemon 後重新背景啟動。 |
-| status | 顯示 daemon PID、API version 與狀態；daemon 未執行時顯示 stopped。 |
+| status | 顯示 daemon PID、API version 與狀態；daemon 未執行時顯示 stopped。若個別 project 設定無法載入，會顯示 degraded 與 config_errors，但 daemon 仍會繼續服務其他 project。 |
 
 daemon 目前沒有額外參數。
+
+daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
 
 ### project
 

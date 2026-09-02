@@ -42,11 +42,12 @@ type Daemon struct {
 	metrics   *metrics.Collector
 	scheduler *scheduler.Scheduler
 
-	mu       sync.RWMutex
-	registry registry.File
-	projects map[string]*projectRuntime
-	ctx      context.Context
-	cancel   context.CancelFunc
+	mu           sync.RWMutex
+	registry     registry.File
+	projects     map[string]*projectRuntime
+	configErrors map[string]string
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 type projectRuntime struct {
@@ -111,10 +112,11 @@ type logRequest struct {
 
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
-		layout:   layout,
-		logs:     logging.NewManager(layout.Logs),
-		metrics:  metrics.NewCollector(),
-		projects: map[string]*projectRuntime{},
+		layout:       layout,
+		logs:         logging.NewManager(layout.Logs),
+		metrics:      metrics.NewCollector(),
+		projects:     map[string]*projectRuntime{},
+		configErrors: map[string]string{},
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	return d
@@ -223,26 +225,28 @@ func (d *Daemon) reloadRegistry() error {
 	}
 	d.mu.Lock()
 	d.registry = reg
+	d.configErrors = map[string]string{}
 	d.mu.Unlock()
-	var failures []error
 	for name, project := range reg.Projects {
 		if !project.Enabled {
 			d.removeProject(name)
 			continue
 		}
 		if err := d.applyProject(name, project.ConfigPath); err != nil {
-			failures = append(failures, err)
+			d.recordConfigError(name, err)
+			fmt.Fprintf(os.Stderr, "project %s skipped: %v\n", name, err)
 		}
 	}
-	d.mu.Lock()
+	var removed []string
+	d.mu.RLock()
 	for name := range d.projects {
 		if _, ok := reg.Projects[name]; !ok {
-			delete(d.projects, name)
+			removed = append(removed, name)
 		}
 	}
-	d.mu.Unlock()
-	if len(failures) > 0 {
-		return errors.Join(failures...)
+	d.mu.RUnlock()
+	for _, name := range removed {
+		d.removeProject(name)
 	}
 	return nil
 }
@@ -254,7 +258,28 @@ func (d *Daemon) ApplyProject(name string) error {
 	if !ok {
 		return fmt.Errorf("project %q is not registered", name)
 	}
-	return d.applyProject(name, project.ConfigPath)
+	err := d.applyProject(name, project.ConfigPath)
+	if err != nil {
+		d.recordConfigError(name, err)
+		return err
+	}
+	d.clearConfigError(name)
+	return nil
+}
+
+func (d *Daemon) recordConfigError(project string, err error) {
+	d.mu.Lock()
+	if d.configErrors == nil {
+		d.configErrors = map[string]string{}
+	}
+	d.configErrors[project] = err.Error()
+	d.mu.Unlock()
+}
+
+func (d *Daemon) clearConfigError(project string) {
+	d.mu.Lock()
+	delete(d.configErrors, project)
+	d.mu.Unlock()
 }
 
 func (d *Daemon) applyProject(name, path string) error {
@@ -676,7 +701,19 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	}
 	switch request.Method {
 	case "health":
-		return success(request, map[string]interface{}{"status": "ok", "pid": os.Getpid(), "version": 1})
+		d.mu.RLock()
+		configErrors := make(map[string]string, len(d.configErrors))
+		for project, message := range d.configErrors {
+			configErrors[project] = message
+		}
+		d.mu.RUnlock()
+		status := "ok"
+		if len(configErrors) > 0 {
+			status = "degraded"
+		}
+		return success(request, map[string]interface{}{
+			"status": status, "pid": os.Getpid(), "version": 1, "config_errors": configErrors,
+		})
 	case "daemon.stop":
 		if d.cancel != nil {
 			d.cancel()

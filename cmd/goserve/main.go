@@ -153,8 +153,29 @@ func startDaemon(layout paths.Layout) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	if err := waitForDaemon(layout); err != nil {
+		return fmt.Errorf("daemon failed to start: %w", err)
+	}
 	fmt.Printf("daemon started (pid %d)\n", cmd.Process.Pid)
 	return nil
+}
+
+func waitForDaemon(layout paths.Layout) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := call("health", nil); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(layout.DaemonLog); err == nil {
+		message := string(data)
+		if len(message) > 2000 {
+			message = message[len(message)-2000:]
+		}
+		return fmt.Errorf("daemon did not become ready; recent daemon log:\n%s", message)
+	}
+	return errors.New("daemon did not become ready within 5 seconds")
 }
 
 func projectCommand(layout paths.Layout, args []string) error {
