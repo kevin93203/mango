@@ -1,0 +1,78 @@
+package registry
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+type Project struct {
+	Name          string     `json:"name"`
+	ConfigPath    string     `json:"config_path"`
+	Enabled       bool       `json:"enabled"`
+	ConfigVersion int        `json:"config_version"`
+	LastApplied   *time.Time `json:"last_applied,omitempty"`
+}
+
+type File struct {
+	Version  int                `json:"version"`
+	Projects map[string]Project `json:"projects"`
+}
+
+func Load(path string) (File, error) {
+	result := File{Version: 1, Projects: map[string]Project{}}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil {
+		return File{}, fmt.Errorf("read registry: %w", err)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return File{}, fmt.Errorf("decode registry: %w", err)
+	}
+	if result.Version == 0 {
+		result.Version = 1
+	}
+	if result.Projects == nil {
+		result.Projects = map[string]Project{}
+	}
+	return result, nil
+}
+
+func Save(path string, registry File) error {
+	if registry.Version == 0 {
+		registry.Version = 1
+	}
+	if registry.Projects == nil {
+		registry.Projects = map[string]Project{}
+	}
+	data, err := json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".projects-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(append(data, '\n')); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempName, path)
+}
