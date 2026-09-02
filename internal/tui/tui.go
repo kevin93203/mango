@@ -29,8 +29,13 @@ func Run(output *cliui.Renderer) error {
 	defer term.Restore(int(os.Stdin.Fd()), state)
 	output.SetLineEnding("\r\n")
 	defer output.SetLineEnding("\n")
-	output.Printf("\x1b[?25l")
-	defer output.Printf("\x1b[?25h\x1b[0m\n")
+	// Keep monitor redraws in the terminal's alternate screen so they never
+	// append to or scroll the shell's main screen. The main screen is restored
+	// automatically when monitor exits.
+	output.Printf("\x1b[?1049h\x1b[?25l")
+	defer func() {
+		output.Printf("\x1b[?1049l\x1b[?25h\x1b[0m\n")
+	}()
 
 	input := make(chan byte, 8)
 	go readInput(input)
@@ -53,7 +58,7 @@ func Run(output *cliui.Renderer) error {
 			}
 			lastErr = ""
 		}
-		output.Printf("\x1b[2J\x1b[H")
+		output.Printf("\x1b[H\x1b[2J")
 		output.Println(output.Text(cliui.StyleHeader, "goserve monitor"), output.Text(cliui.StyleMuted, "(q quit, up/down or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)"))
 		printTable(output, items, selected)
 		if lastErr != "" {
