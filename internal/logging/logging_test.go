@@ -73,3 +73,41 @@ func TestReadSinceDoesNotReplayAfterTruncate(t *testing.T) {
 		t.Fatalf("next offset after truncate = %d, want %d", nextOffset, len("new\n"))
 	}
 }
+
+func TestTailWithOffsetContinuesFromTailSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stdout.log")
+	if err := os.WriteFile(path, []byte("old 1\nold 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tail, offset, err := TailWithOffset(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail != "old 2\n" {
+		t.Fatalf("tail = %q, want %q", tail, "old 2\n")
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("new 1\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, nextOffset, err := ReadSince(path, offset, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data != "new 1\n" {
+		t.Fatalf("new data = %q, want %q", data, "new 1\n")
+	}
+	if nextOffset != offset+int64(len("new 1\n")) {
+		t.Fatalf("next offset = %d, want %d", nextOffset, offset+int64(len("new 1\n")))
+	}
+}

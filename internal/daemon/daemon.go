@@ -106,11 +106,12 @@ type ScheduleInfo struct {
 }
 
 type logRequest struct {
-	Key      string
-	Stream   string
-	Offset   int64
-	MaxBytes int
-	Tail     int
+	Key           string
+	Stream        string
+	Offset        int64
+	MaxBytes      int
+	Tail          int
+	IncludeOffset bool
 }
 
 func New(layout paths.Layout) *Daemon {
@@ -906,7 +907,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			p.Stream = "stdout"
 		}
 		if p.Tail > 0 {
-			return d.readTail(request, project, name, p.Stream, p.Tail)
+			return d.readTail(request, project, name, p.Stream, p.Tail, p.IncludeOffset)
 		}
 		if p.Stream == "all" {
 			return failure(request, "BAD_PARAMS", fmt.Errorf("stream all is supported only with tail"))
@@ -941,7 +942,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	}
 }
 
-func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lines int) ipc.Response {
+func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lines int, includeOffset bool) ipc.Response {
 	if stream == "all" {
 		stdout, err := logging.Tail(d.logs.Path(project, name, "stdout"), lines)
 		if err != nil {
@@ -956,9 +957,12 @@ func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lin
 	if stream != "stdout" && stream != "stderr" {
 		return failure(request, "BAD_PARAMS", fmt.Errorf("stream must be stdout, stderr, or all"))
 	}
-	data, err := logging.Tail(d.logs.Path(project, name, stream), lines)
+	data, offset, err := logging.TailWithOffset(d.logs.Path(project, name, stream), lines)
 	if err != nil {
 		return failure(request, "LOG_READ_FAILED", err)
+	}
+	if includeOffset {
+		return success(request, map[string]interface{}{"data": data, "next_offset": offset})
 	}
 	return success(request, map[string]string{"data": data})
 }

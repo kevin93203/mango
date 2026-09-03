@@ -153,16 +153,26 @@ func ReadSince(path string, offset int64, maxBytes int) (string, int64, error) {
 }
 
 func Tail(path string, lines int) (string, error) {
+	data, _, err := TailWithOffset(path, lines)
+	return data, err
+}
+
+// TailWithOffset returns the last lines in path and the byte offset at the
+// end of the file snapshot used to produce them. The offset lets a follower
+// continue from the same snapshot without skipping output written between
+// the tail read and the first follow poll.
+func TailWithOffset(path string, lines int) (string, int64, error) {
 	if lines <= 0 {
 		lines = 100
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return "", 0, nil
 	}
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
+	offset := int64(len(data))
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 64<<10), 8<<20)
 	all := make([]string, 0)
@@ -170,15 +180,15 @@ func Tail(path string, lines int) (string, error) {
 		all = append(all, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if len(all) > lines {
 		all = all[len(all)-lines:]
 	}
 	if len(all) == 0 {
-		return "", nil
+		return "", offset, nil
 	}
-	return strings.Join(all, "\n") + "\n", nil
+	return strings.Join(all, "\n") + "\n", offset, nil
 }
 
 func cleanPart(value string) string {
