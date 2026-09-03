@@ -14,7 +14,7 @@ func TestPrintTableShowsChildRowsWithoutSelectingThem(t *testing.T) {
 	renderer := cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	printTable(renderer, []daemon.ProcessInfo{{
 		ID: 0, Project: "demo", Name: "api", State: daemon.StateRunning, PID: 100,
-		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", State: "sleeping"}},
+		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}}, 0)
 
 	text := output.String()

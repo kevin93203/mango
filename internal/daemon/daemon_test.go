@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"goserve/internal/config"
 	"goserve/internal/ipc"
 	"goserve/internal/metrics"
 	"goserve/internal/paths"
@@ -28,7 +30,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		PIDFile:    filepath.Join(root, "runtime", "daemon.pid"),
 	}
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 1,
+		Version: 2,
 		Projects: map[string]registry.Project{
 			"demo": {
 				Name:       "demo",
@@ -79,7 +81,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	writeTestConfig(t, alphaPath, "alpha", "api")
 	writeTestConfig(t, betaPath, "beta", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 1,
+		Version: 2,
 		Projects: map[string]registry.Project{
 			"beta":  {Name: "beta", ConfigPath: betaPath, Enabled: true},
 			"alpha": {Name: "alpha", ConfigPath: alphaPath, Enabled: true},
@@ -102,13 +104,13 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 		t.Fatalf("resolve key = %s/%s, %v", project, name, err)
 	}
 
-	request, err := ipc.NewRequest("process.stop", struct{ Key string }{"1"})
+	request, err := ipc.NewRequest("service.stop", struct{ Key string }{"1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("process.stop by id failed: %+v", response.Error)
+		t.Fatalf("service.stop by id failed: %+v", response.Error)
 	}
 	var actionResult map[string]string
 	if err := decodeTestData(response.Data, &actionResult); err != nil {
@@ -202,12 +204,12 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 			t.Fatalf("resolve %q unexpectedly succeeded", ref)
 		}
 	}
-	request, err = ipc.NewRequest("process.get", struct{ Key string }{"999"})
+	request, err = ipc.NewRequest("service.get", struct{ Key string }{"999"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
-	if response.OK || response.Error == nil || response.Error.Code != "PROCESS_NOT_FOUND" {
+	if response.OK || response.Error == nil || response.Error.Code != "SERVICE_NOT_FOUND" {
 		t.Fatalf("unknown id response = %+v", response)
 	}
 
@@ -309,12 +311,216 @@ func TestChildProcessInfosCopiesSnapshotMetrics(t *testing.T) {
 	if child.PID != 200 || child.ParentPID != 100 || child.Depth != 1 || child.Name != "worker" || child.CommandLine != "worker --serve" {
 		t.Fatalf("child identity = %+v", child)
 	}
-	if child.State != "running" || child.CPUPercent != 1.25 || child.RSSBytes != 4096 || child.MemoryPercent != 0.5 {
+	if child.OSState != "running" || child.CPUPercent != 1.25 || child.RSSBytes != 4096 || child.MemoryPercent != 0.5 {
 		t.Fatalf("child metrics = %+v", child)
 	}
 	if len(child.Ports) != 1 || child.Ports[0] != "tcp:8080" {
 		t.Fatalf("child ports = %v, want tcp:8080", child.Ports)
 	}
+}
+
+func TestProcessJSONSeparatesHealthAndOSState(t *testing.T) {
+	items := []ProcessInfo{{
+		Project: "demo", Name: "api", State: StateRunning, OSState: "sleeping",
+		Children: []ChildProcessInfo{{PID: 200, OSState: "sleeping"}},
+	}}
+	encoded, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	if string(data["Health"]) != "null" {
+		t.Fatalf("Health = %s, want null", data["Health"])
+	}
+	if string(data["OSState"]) != `"sleeping"` {
+		t.Fatalf("OSState = %s", data["OSState"])
+	}
+	var children []map[string]json.RawMessage
+	if err := json.Unmarshal(data["Children"], &children); err != nil {
+		t.Fatal(err)
+	}
+	if string(children[0]["State"]) != "null" {
+		t.Fatalf("child State = %s, want null", children[0]["State"])
+	}
+}
+
+func TestAggregatePortsIncludesDescendantsWithoutDuplicates(t *testing.T) {
+	snapshot := metrics.ProcessSnapshot{
+		Ports: []string{"tcp:8080", "tcp:9000"},
+		Children: []metrics.ProcessSnapshot{
+			{Ports: []string{"tcp:8080", "tcp:9090"}},
+			{Children: []metrics.ProcessSnapshot{{Ports: []string{"udp:53"}}}},
+		},
+	}
+	want := []string{"tcp:8080", "tcp:9000", "tcp:9090", "udp:53"}
+	got := aggregatePorts(snapshot)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ports = %v, want %v", got, want)
+	}
+}
+
+func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.toml")
+	readyPath := filepath.Join(root, "ready")
+	content := `version = 2
+project = "demo"
+
+[defaults]
+working_dir = "."
+
+[services.db]
+command = "sh"
+args = ["-c", "sleep 2"]
+autostart = true
+restart = "never"
+
+[services.db.healthcheck]
+test = ["CMD", "test", "-f", "ready"]
+interval = "5ms"
+timeout = "100ms"
+retries = 1
+
+[services.web]
+command = "sh"
+args = ["-c", "sleep 2"]
+autostart = true
+restart = "never"
+
+[services.web.depends_on.db]
+condition = "service_healthy"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.removeProject("demo")
+	items := d.ListProcesses("demo")
+	if len(items) != 2 || items[1].State != StateWaiting {
+		t.Fatalf("initial services = %+v, want web waiting", items)
+	}
+	if err := os.WriteFile(readyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items = d.ListProcesses("demo")
+		for _, item := range items {
+			if item.Name == "web" && item.State == StateRunning {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("web did not start after dependency became healthy: %+v", items)
+}
+
+func TestRestartDependentsFollowsRestartFlagAndDependencyDepth(t *testing.T) {
+	project := &projectRuntime{processes: map[string]*managedProcess{
+		"db":  {spec: config.EffectiveService{Name: "db"}},
+		"api": {spec: config.EffectiveService{Name: "api", DependsOn: map[string]config.Dependency{"db": {Restart: true}}}, state: StateWaiting},
+		"web": {spec: config.EffectiveService{Name: "web", DependsOn: map[string]config.Dependency{"api": {Restart: true}}}, state: StateWaiting},
+		"job": {spec: config.EffectiveService{Name: "job", DependsOn: map[string]config.Dependency{"db": {Restart: false}}}, state: StateWaiting},
+	}}
+	candidates := collectRestartDependentsLocked(project, []string{"db"})
+	if len(candidates) != 2 || candidates[0].managed.spec.Name != "api" || candidates[1].managed.spec.Name != "web" {
+		t.Fatalf("restart candidates = %+v", candidates)
+	}
+}
+
+func TestTopologicalSpecsPlaceDependenciesFirst(t *testing.T) {
+	specs := []config.EffectiveService{
+		{Name: "web", DependsOn: map[string]config.Dependency{"db": {}}},
+		{Name: "db"},
+		{Name: "cache"},
+	}
+	ordered := topologicalSpecs(specs)
+	if len(ordered) != 3 || ordered[0].Name != "cache" || ordered[1].Name != "db" || ordered[2].Name != "web" {
+		t.Fatalf("order = %+v", ordered)
+	}
+}
+
+func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.toml")
+	writeDependentConfig := func(argument string) {
+		content := fmt.Sprintf(`version = 2
+project = "demo"
+
+[services.db]
+command = "sh"
+args = ["-c", "sleep %s"]
+autostart = true
+restart = "never"
+
+[services.web]
+command = "sh"
+args = ["-c", "sleep 3"]
+autostart = true
+restart = "never"
+
+[services.web.depends_on.db]
+condition = "service_started"
+restart = true
+`, argument)
+		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeDependentConfig("3")
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.removeProject("demo")
+	var before time.Time
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, item := range d.ListProcesses("demo") {
+			if item.Name == "web" && item.State == StateRunning {
+				before = item.StartedAt
+			}
+		}
+		if !before.IsZero() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if before.IsZero() {
+		t.Fatal("web did not start")
+	}
+	writeDependentConfig("4")
+	if err := d.ApplyProject("demo"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, item := range d.ListProcesses("demo") {
+			if item.Name == "web" && item.State == StateRunning && item.StartedAt.After(before) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("web was not restarted after db config change")
 }
 
 func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
@@ -323,7 +529,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	configPath := filepath.Join(root, "demo.toml")
 	writeTestScheduleConfig(t, configPath, "demo", "nightly-job")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 1,
+		Version: 2,
 		Projects: map[string]registry.Project{
 			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 		},
@@ -393,11 +599,10 @@ func testLayout(root string) paths.Layout {
 }
 
 func writeTestConfig(t *testing.T, path, project string, processNames ...string) {
-	lines := []string{"version = 1", fmt.Sprintf("project = %q", project), ""}
+	lines := []string{"version = 2", fmt.Sprintf("project = %q", project), ""}
 	for _, processName := range processNames {
 		lines = append(lines,
-			"[[processes]]",
-			fmt.Sprintf("name = %q", processName),
+			fmt.Sprintf("[services.%s]", processName),
 			`command = "echo"`,
 			"autostart = false",
 			"",
@@ -410,7 +615,7 @@ func writeTestConfig(t *testing.T, path, project string, processNames ...string)
 
 func writeTestScheduleConfig(t *testing.T, path, project, scheduleName string) {
 	content := strings.Join([]string{
-		"version = 1",
+		"version = 2",
 		fmt.Sprintf("project = %q", project),
 		"",
 		"[[schedules]]",

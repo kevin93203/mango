@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,17 +15,17 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 var namePattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 type File struct {
-	Version   int        `toml:"version"`
-	Project   string     `toml:"project"`
-	Defaults  Defaults   `toml:"defaults"`
-	Processes []Process  `toml:"processes"`
-	Schedules []Schedule `toml:"schedules"`
-	Path      string     `toml:"-"`
+	Version   int                `toml:"version"`
+	Project   string             `toml:"project"`
+	Defaults  Defaults           `toml:"defaults"`
+	Services  map[string]Service `toml:"services"`
+	Schedules []Schedule         `toml:"schedules"`
+	Path      string             `toml:"-"`
 }
 
 type Defaults struct {
@@ -40,18 +41,44 @@ type Defaults struct {
 	InheritEnv      *bool  `toml:"inherit_env"`
 }
 
-type Process struct {
-	Name          string            `toml:"name"`
-	Command       string            `toml:"command"`
-	Args          []string          `toml:"args"`
-	WorkingDir    string            `toml:"working_dir"`
-	Env           map[string]string `toml:"env"`
-	Autostart     bool              `toml:"autostart"`
-	Restart       string            `toml:"restart"`
-	StopTimeout   string            `toml:"stop_timeout"`
-	MaxRestarts   *int              `toml:"max_restarts"`
-	RestartWindow string            `toml:"restart_window"`
-	StableAfter   string            `toml:"stable_after"`
+type Service struct {
+	Name          string                `toml:"-"`
+	Command       string                `toml:"command"`
+	Args          []string              `toml:"args"`
+	WorkingDir    string                `toml:"working_dir"`
+	Environment   map[string]string     `toml:"environment"`
+	Autostart     bool                  `toml:"autostart"`
+	Restart       string                `toml:"restart"`
+	StopTimeout   string                `toml:"stop_timeout"`
+	MaxRestarts   *int                  `toml:"max_restarts"`
+	RestartWindow string                `toml:"restart_window"`
+	StableAfter   string                `toml:"stable_after"`
+	HealthCheck   *HealthCheck          `toml:"healthcheck"`
+	DependsOn     map[string]Dependency `toml:"depends_on"`
+}
+
+// Process is retained as an internal compatibility alias while the public
+// configuration and API use service terminology.
+type Process = Service
+
+type Dependency struct {
+	Condition string `toml:"condition"`
+	Restart   bool   `toml:"restart"`
+}
+
+type HealthCheck struct {
+	Test          []string               `toml:"test"`
+	Policy        string                 `toml:"policy"`
+	Checks        map[string]HealthProbe `toml:"checks"`
+	Interval      string                 `toml:"interval"`
+	Timeout       string                 `toml:"timeout"`
+	Retries       int                    `toml:"retries"`
+	StartPeriod   string                 `toml:"start_period"`
+	StartInterval string                 `toml:"start_interval"`
+}
+
+type HealthProbe struct {
+	Test []string `toml:"test"`
 }
 
 type Schedule struct {
@@ -73,7 +100,8 @@ type EffectiveProcess struct {
 	Command       string
 	Args          []string
 	WorkingDir    string
-	Env           map[string]string
+	Env           map[string]string // Deprecated alias for Environment.
+	Environment   map[string]string
 	Autostart     bool
 	Restart       string
 	StopTimeout   time.Duration
@@ -83,6 +111,25 @@ type EffectiveProcess struct {
 	LogMaxSize    int64
 	LogMaxFiles   int
 	MetricsEvery  time.Duration
+	HealthCheck   *EffectiveHealthCheck
+	DependsOn     map[string]Dependency
+}
+
+type EffectiveService = EffectiveProcess
+
+type EffectiveHealthCheck struct {
+	Test          []string
+	Policy        string
+	Checks        map[string]EffectiveHealthProbe
+	Interval      time.Duration
+	Timeout       time.Duration
+	Retries       int
+	StartPeriod   time.Duration
+	StartInterval time.Duration
+}
+
+type EffectiveHealthProbe struct {
+	Test []string
 }
 
 type EffectiveSchedule struct {
@@ -105,10 +152,26 @@ func Load(path string) (File, error) {
 		return File{}, fmt.Errorf("resolve config path: %w", err)
 	}
 	var f File
-	if _, err := toml.DecodeFile(abs, &f); err != nil {
+	meta, err := toml.DecodeFile(abs, &f)
+	if err != nil {
 		return File{}, fmt.Errorf("decode %s: %w", path, err)
 	}
 	f.Path = abs
+	// Version errors are reported before unknown fields so a v1 file receives
+	// the actionable migration message even though its [[processes]] table is
+	// no longer part of the v2 schema.
+	if f.Version != CurrentVersion {
+		return File{}, Validate(f)
+	}
+	for _, key := range meta.Undecoded() {
+		if len(key) > 0 && key[0] == "processes" {
+			return File{}, fmt.Errorf("unsupported legacy [[processes]] table; convert it to [services.<name>]")
+		}
+		if len(key) >= 3 && key[0] == "services" && key[2] == "env" {
+			return File{}, fmt.Errorf("service %q uses legacy env; use environment instead", key[1])
+		}
+		return File{}, fmt.Errorf("unsupported config field %s", strings.Join(key, "."))
+	}
 	if err := Validate(f); err != nil {
 		return File{}, err
 	}
@@ -117,13 +180,13 @@ func Load(path string) (File, error) {
 
 func Validate(f File) error {
 	if f.Version != CurrentVersion {
-		return fmt.Errorf("unsupported config version %d (expected %d)", f.Version, CurrentVersion)
+		return fmt.Errorf("unsupported config version %d; version %d is required (convert [[processes]] to [services.<name>])", f.Version, CurrentVersion)
 	}
 	if !namePattern.MatchString(f.Project) {
 		return fmt.Errorf("project must match %s", namePattern)
 	}
-	if len(f.Processes) == 0 && len(f.Schedules) == 0 {
-		return errors.New("config must define at least one process or schedule")
+	if len(f.Services) == 0 && len(f.Schedules) == 0 {
+		return errors.New("config must define at least one service or schedule")
 	}
 	d := f.Defaults
 	if _, err := parseDuration(d.StopTimeout, 10*time.Second); err != nil {
@@ -147,35 +210,57 @@ func Validate(f File) error {
 	if d.Restart != "" && !validRestart(d.Restart) {
 		return fmt.Errorf("invalid defaults.restart %q", d.Restart)
 	}
-	seen := map[string]bool{}
-	for i, p := range f.Processes {
-		if !namePattern.MatchString(p.Name) {
-			return fmt.Errorf("processes[%d].name is invalid", i)
+	for name, s := range f.Services {
+		if !namePattern.MatchString(name) {
+			return fmt.Errorf("service name %q is invalid", name)
 		}
-		if seen[p.Name] {
-			return fmt.Errorf("duplicate process name %q", p.Name)
+		if strings.TrimSpace(s.Command) == "" {
+			return fmt.Errorf("service %q command is required", name)
 		}
-		seen[p.Name] = true
-		if strings.TrimSpace(p.Command) == "" {
-			return fmt.Errorf("process %q command is required", p.Name)
+		if s.Restart != "" && !validRestart(s.Restart) {
+			return fmt.Errorf("service %q has invalid restart %q", name, s.Restart)
 		}
-		if p.Restart != "" && !validRestart(p.Restart) {
-			return fmt.Errorf("process %q has invalid restart %q", p.Name, p.Restart)
+		if _, err := parseDuration(s.StopTimeout, 10*time.Second); err != nil {
+			return fmt.Errorf("service %q stop_timeout: %w", name, err)
 		}
-		if _, err := parseDuration(p.StopTimeout, 10*time.Second); err != nil {
-			return fmt.Errorf("process %q stop_timeout: %w", p.Name, err)
+		if _, err := parseDuration(s.RestartWindow, 5*time.Minute); err != nil {
+			return fmt.Errorf("service %q restart_window: %w", name, err)
 		}
-		if _, err := parseDuration(p.RestartWindow, 5*time.Minute); err != nil {
-			return fmt.Errorf("process %q restart_window: %w", p.Name, err)
+		if _, err := parseDuration(s.StableAfter, time.Minute); err != nil {
+			return fmt.Errorf("service %q stable_after: %w", name, err)
 		}
-		if _, err := parseDuration(p.StableAfter, time.Minute); err != nil {
-			return fmt.Errorf("process %q stable_after: %w", p.Name, err)
+		if s.MaxRestarts != nil && *s.MaxRestarts < 0 {
+			return fmt.Errorf("service %q max_restarts must be non-negative", name)
 		}
-		if p.MaxRestarts != nil && *p.MaxRestarts < 0 {
-			return fmt.Errorf("process %q max_restarts must be non-negative", p.Name)
+		if err := validateHealthCheck(name, s.HealthCheck); err != nil {
+			return err
+		}
+		for dependency, spec := range s.DependsOn {
+			if _, ok := f.Services[dependency]; !ok {
+				return fmt.Errorf("service %q depends on unknown service %q", name, dependency)
+			}
+			if spec.Condition == "" {
+				spec.Condition = "service_started"
+			}
+			switch spec.Condition {
+			case "service_started":
+			case "service_healthy":
+				if !healthCheckEnabled(f.Services[dependency].HealthCheck) {
+					return fmt.Errorf("service %q depends on %q being healthy, but %q has no healthcheck", name, dependency, dependency)
+				}
+			case "service_completed_successfully":
+				if effectiveRestartPolicy(f.Defaults, f.Services[dependency]) != "never" {
+					return fmt.Errorf("service %q must use restart=never for service_completed_successfully dependency", dependency)
+				}
+			default:
+				return fmt.Errorf("service %q dependency %q has invalid condition %q", name, dependency, spec.Condition)
+			}
 		}
 	}
-	seen = map[string]bool{}
+	if err := validateDependencyCycles(f.Services); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
 	for i, s := range f.Schedules {
 		if !namePattern.MatchString(s.Name) {
 			return fmt.Errorf("schedules[%d].name is invalid", i)
@@ -203,8 +288,8 @@ func Validate(f File) error {
 				return fmt.Errorf("schedule %q command is required for action run", s.Name)
 			}
 		case "start", "stop", "restart":
-			if !seenProcess(f.Processes, s.Target) {
-				return fmt.Errorf("schedule %q target %q does not exist", s.Name, s.Target)
+			if _, ok := f.Services[s.Target]; !ok {
+				return fmt.Errorf("schedule %q target service %q does not exist", s.Name, s.Target)
 			}
 		default:
 			return fmt.Errorf("schedule %q action must be run, start, stop, or restart", s.Name)
@@ -216,7 +301,24 @@ func Validate(f File) error {
 	return nil
 }
 
-func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
+func effectiveRestartPolicy(defaults Defaults, service Service) string {
+	if service.Restart != "" {
+		return service.Restart
+	}
+	if defaults.Restart != "" {
+		return defaults.Restart
+	}
+	return "on-failure"
+}
+
+func healthCheckEnabled(health *HealthCheck) bool {
+	if health == nil {
+		return false
+	}
+	return !(len(health.Test) == 1 && strings.EqualFold(health.Test[0], "NONE")) && (len(health.Test) > 0 || len(health.Checks) > 0)
+}
+
+func (f File) ServicesEffective() ([]EffectiveService, error) {
 	if err := Validate(f); err != nil {
 		return nil, err
 	}
@@ -243,8 +345,14 @@ func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
 	if d.InheritEnv != nil {
 		inherit = *d.InheritEnv
 	}
-	result := make([]EffectiveProcess, 0, len(f.Processes))
-	for _, p := range f.Processes {
+	serviceNames := make([]string, 0, len(f.Services))
+	for name := range f.Services {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+	result := make([]EffectiveService, 0, len(f.Services))
+	for _, name := range serviceNames {
+		p := f.Services[name]
 		dir := d.WorkingDir
 		if p.WorkingDir != "" {
 			dir = p.WorkingDir
@@ -269,7 +377,7 @@ func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
 				}
 			}
 		}
-		for k, v := range p.Env {
+		for k, v := range p.Environment {
 			env[k] = v
 		}
 		restartPolicy := restart
@@ -292,14 +400,32 @@ func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
 		if p.StableAfter != "" {
 			sa, _ = parseDuration(p.StableAfter, sa)
 		}
-		result = append(result, EffectiveProcess{
-			Project: f.Project, Name: p.Name, Command: command, Args: append([]string(nil), p.Args...),
-			WorkingDir: dir, Env: env, Autostart: p.Autostart, Restart: restartPolicy,
+		effectiveHealth, err := effectiveHealthCheck(p.HealthCheck)
+		if err != nil {
+			return nil, fmt.Errorf("service %q healthcheck: %w", name, err)
+		}
+		dependsOn := map[string]Dependency{}
+		for dependency, dependencySpec := range p.DependsOn {
+			if dependencySpec.Condition == "" {
+				dependencySpec.Condition = "service_started"
+			}
+			dependsOn[dependency] = dependencySpec
+		}
+		result = append(result, EffectiveService{
+			Project: f.Project, Name: name, Command: command, Args: append([]string(nil), p.Args...),
+			WorkingDir: dir, Env: env, Environment: env, Autostart: p.Autostart, Restart: restartPolicy,
 			StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
+			HealthCheck: effectiveHealth, DependsOn: dependsOn,
 		})
 	}
 	return result, nil
+}
+
+// ProcessesEffective is retained as an internal compatibility alias for code
+// that has not yet migrated its terminology; it reads the v2 services map.
+func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
+	return f.ServicesEffective()
 }
 
 func (f File) SchedulesEffective() ([]EffectiveSchedule, error) {
@@ -363,13 +489,157 @@ func resolveWorkingDir(base, dir string) string {
 	return resolved
 }
 
-func seenProcess(processes []Process, name string) bool {
-	for _, p := range processes {
-		if p.Name == name {
-			return true
+func validateHealthCheck(service string, health *HealthCheck) error {
+	if health == nil {
+		return nil
+	}
+	if len(health.Test) > 0 && len(health.Checks) > 0 {
+		return fmt.Errorf("service %q healthcheck cannot define both test and checks", service)
+	}
+	if len(health.Test) == 0 && len(health.Checks) == 0 {
+		return fmt.Errorf("service %q healthcheck requires test or checks", service)
+	}
+	if health.Policy == "" {
+		health.Policy = "all"
+	}
+	if health.Policy != "all" && health.Policy != "any" {
+		return fmt.Errorf("service %q healthcheck policy must be all or any", service)
+	}
+	if err := validateTest(service, "test", health.Test); err != nil {
+		return err
+	}
+	for name, probe := range health.Checks {
+		if !namePattern.MatchString(name) {
+			return fmt.Errorf("service %q healthcheck check name %q is invalid", service, name)
+		}
+		if len(probe.Test) == 0 {
+			return fmt.Errorf("service %q healthcheck checks.%s.test is required", service, name)
+		}
+		if len(probe.Test) == 1 && strings.EqualFold(probe.Test[0], "NONE") {
+			return fmt.Errorf("service %q healthcheck checks.%s cannot use NONE", service, name)
+		}
+		if err := validateTest(service, "checks."+name+".test", probe.Test); err != nil {
+			return err
 		}
 	}
-	return false
+	if _, err := parseDuration(health.Interval, 10*time.Second); err != nil {
+		return fmt.Errorf("service %q healthcheck interval: %w", service, err)
+	}
+	if _, err := parseDuration(health.Timeout, 5*time.Second); err != nil {
+		return fmt.Errorf("service %q healthcheck timeout: %w", service, err)
+	}
+	if _, err := parseNonNegativeDuration(health.StartPeriod, 0); err != nil {
+		return fmt.Errorf("service %q healthcheck start_period: %w", service, err)
+	}
+	if _, err := parseDuration(health.StartInterval, 0); err != nil {
+		return fmt.Errorf("service %q healthcheck start_interval: %w", service, err)
+	}
+	if health.Retries < 0 {
+		return fmt.Errorf("service %q healthcheck retries must be non-negative", service)
+	}
+	return nil
+}
+
+func validateTest(service, field string, test []string) error {
+	if len(test) == 0 {
+		return nil
+	}
+	if len(test) == 1 && strings.EqualFold(test[0], "NONE") {
+		return nil
+	}
+	if len(test) < 2 {
+		return fmt.Errorf("service %q healthcheck %s must contain NONE, CMD, or CMD-SHELL and a command", service, field)
+	}
+	switch strings.ToUpper(test[0]) {
+	case "CMD", "CMD-SHELL":
+	default:
+		return fmt.Errorf("service %q healthcheck %s has invalid type %q", service, field, test[0])
+	}
+	if strings.TrimSpace(strings.Join(test[1:], " ")) == "" {
+		return fmt.Errorf("service %q healthcheck %s command is required", service, field)
+	}
+	return nil
+}
+
+func effectiveHealthCheck(health *HealthCheck) (*EffectiveHealthCheck, error) {
+	if health == nil {
+		return nil, nil
+	}
+	if len(health.Test) == 1 && strings.EqualFold(health.Test[0], "NONE") {
+		return nil, nil
+	}
+	interval, err := parseDuration(health.Interval, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	timeout, err := parseDuration(health.Timeout, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	startPeriod, err := parseNonNegativeDuration(health.StartPeriod, 0)
+	if err != nil {
+		return nil, err
+	}
+	startInterval, err := parseDuration(health.StartInterval, interval)
+	if err != nil {
+		return nil, err
+	}
+	retries := health.Retries
+	if retries == 0 {
+		retries = 3
+	}
+	policy := health.Policy
+	if policy == "" {
+		policy = "all"
+	}
+	result := &EffectiveHealthCheck{
+		Test: append([]string(nil), health.Test...), Policy: policy,
+		Checks: map[string]EffectiveHealthProbe{}, Interval: interval, Timeout: timeout,
+		Retries: retries, StartPeriod: startPeriod, StartInterval: startInterval,
+	}
+	for name, probe := range health.Checks {
+		result.Checks[name] = EffectiveHealthProbe{Test: append([]string(nil), probe.Test...)}
+	}
+	return result, nil
+}
+
+func validateDependencyCycles(services map[string]Service) error {
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(name string) error {
+		if visiting[name] {
+			return fmt.Errorf("service dependency cycle includes %q", name)
+		}
+		if visited[name] {
+			return nil
+		}
+		visiting[name] = true
+		dependencies := make([]string, 0, len(services[name].DependsOn))
+		for dependency := range services[name].DependsOn {
+			dependencies = append(dependencies, dependency)
+		}
+		sort.Strings(dependencies)
+		for _, dependency := range dependencies {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		delete(visiting, name)
+		visited[name] = true
+		return nil
+	}
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validRestart(value string) bool {
@@ -390,6 +660,17 @@ func parseDuration(value string, fallback time.Duration) (time.Duration, error) 
 	d, err := time.ParseDuration(value)
 	if err != nil || d <= 0 {
 		return 0, fmt.Errorf("must be a positive duration such as 10s")
+	}
+	return d, nil
+}
+
+func parseNonNegativeDuration(value string, fallback time.Duration) (time.Duration, error) {
+	if strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("must be a non-negative duration such as 0s or 10s")
 	}
 	return d, nil
 }

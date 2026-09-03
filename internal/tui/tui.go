@@ -89,7 +89,7 @@ func Run(output *cliui.Renderer) error {
 				}
 			case 's', 'r', 'e', 'd':
 				if selected < len(items) {
-					method := map[byte]string{'s': "process.stop", 'r': "process.restart", 'e': "process.enable", 'd': "process.disable"}[key]
+					method := map[byte]string{'s': "service.stop", 'r': "service.restart", 'e': "service.enable", 'd': "service.disable"}[key]
 					if err := operate(method, items[selected].Project+"/"+items[selected].Name); err != nil {
 						lastErr = err.Error()
 					}
@@ -146,7 +146,7 @@ func readInput(input chan<- byte) {
 }
 
 func list() ([]daemon.ProcessInfo, error) {
-	request, _ := ipc.NewRequest("process.list", nil)
+	request, _ := ipc.NewRequest("service.list", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	response, err := ipc.Call(ctx, request)
@@ -209,7 +209,9 @@ func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan by
 	output.Println(output.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
 	output.KeyValues([][]cliui.Cell{
 		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
-		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
+		{{Text: "state"}, {Text: displayString(item.State), Style: cliui.StateStyle(item.State)}},
+		{{Text: "health"}, {Text: healthStatus(item.Health), Style: cliui.StateStyle(healthStatus(item.Health))}},
+		{{Text: "os state"}, {Text: displayString(item.OSState), Style: cliui.StyleMuted}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
 		{{Text: "ports"}, {Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))}},
 		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
@@ -220,14 +222,32 @@ func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan by
 		{{Text: "last exit"}, {Text: lastExit, Style: zeroStyle(lastExit)}},
 		{{Text: "last error"}, {Text: item.LastError, Style: errorStyle(item.LastError)}},
 	})
+	if len(item.WaitingOn) > 0 {
+		waiting := make([]string, 0, len(item.WaitingOn))
+		for _, dependency := range item.WaitingOn {
+			value := dependency.Service + " (" + dependency.Condition + ": " + dependency.State
+			if dependency.Health != "" {
+				value += ", health=" + dependency.Health
+			}
+			waiting = append(waiting, value+")")
+		}
+		output.KeyValues([][]cliui.Cell{{{Text: "waiting on"}, {Text: strings.Join(waiting, ", "), Style: cliui.StyleWarning}}})
+	}
 	output.Printf("\n%s", output.Text(cliui.StyleMuted, "Press any key to return"))
 	<-input
 	return nil
 }
 
+func healthStatus(info *daemon.HealthInfo) string {
+	if info == nil || info.Status == "" {
+		return "-"
+	}
+	return info.Status
+}
+
 func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int) {
 	if len(items) == 0 {
-		output.Println(output.Text(cliui.StyleMuted, "No processes found."))
+		output.Println(output.Text(cliui.StyleMuted, "No services found."))
 		return
 	}
 	listRows := daemon.FlattenProcessList(items)
@@ -254,7 +274,9 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 			{Text: marker, Style: cliui.StyleHeader},
 			{Text: id, Style: idStyle, Align: cliui.AlignRight},
 			{Text: processName},
-			{Text: item.State, Style: cliui.StateStyle(item.State)},
+			{Text: displayString(item.State), Style: cliui.StateStyle(item.State)},
+			{Text: displayString(item.Health), Style: cliui.StateStyle(item.Health)},
+			{Text: displayString(item.OSState), Style: cliui.StyleMuted},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
 			{Text: ports, Style: zeroStyle(ports)},
 			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
@@ -263,7 +285,14 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
-	output.Table([]string{"", "ID", "PROCESS", "STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	output.Table([]string{"", "ID", "SERVICE", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+}
+
+func displayString(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func formatPID(pid int) string {

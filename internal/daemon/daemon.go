@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"goserve/internal/config"
+	"goserve/internal/health"
 	"goserve/internal/ipc"
 	"goserve/internal/logging"
 	"goserve/internal/metrics"
@@ -27,6 +29,7 @@ import (
 const (
 	StateStopped    = "stopped"
 	StateStarting   = "starting"
+	StateWaiting    = "waiting"
 	StateRunning    = "running"
 	StateStopping   = "stopping"
 	StateExited     = "exited"
@@ -43,36 +46,45 @@ type Daemon struct {
 	metrics   *metrics.Collector
 	scheduler *scheduler.Scheduler
 
-	mu           sync.RWMutex
-	registry     registry.File
-	projects     map[string]*projectRuntime
-	configErrors map[string]string
-	ctx          context.Context
-	cancel       context.CancelFunc
+	mu                    sync.RWMutex
+	registry              registry.File
+	projects              map[string]*projectRuntime
+	configErrors          map[string]string
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	healthExecutorFactory func(config.EffectiveService) health.Executor
 }
 
 type projectRuntime struct {
-	file      config.File
-	processes map[string]*managedProcess
+	file             config.File
+	processes        map[string]*managedProcess
+	reconcileRunning bool
 }
 
 type managedProcess struct {
-	id         int
-	spec       config.EffectiveProcess
-	handle     *process.Handle
-	stdout     *logging.RotatingWriter
-	stderr     *logging.RotatingWriter
-	stdoutPath string
-	stderrPath string
-	state      string
-	disabled   bool
-	manualStop bool
-	generation uint64
-	startedAt  time.Time
-	lastExit   *int
-	lastError  string
-	restarts   int
-	failures   []time.Time
+	id           int
+	spec         config.EffectiveProcess
+	handle       *process.Handle
+	stdout       *logging.RotatingWriter
+	stderr       *logging.RotatingWriter
+	stdoutPath   string
+	stderrPath   string
+	state        string
+	disabled     bool
+	manualStop   bool
+	generation   uint64
+	startedAt    time.Time
+	lastExit     *int
+	lastError    string
+	restarts     int
+	failures     []time.Time
+	healthCancel context.CancelFunc
+	health       *HealthInfo
+}
+
+type restartCandidate struct {
+	managed *managedProcess
+	depth   int
 }
 
 type ProcessInfo struct {
@@ -94,7 +106,43 @@ type ProcessInfo struct {
 	StderrPath    string
 	CommandLine   string
 	Disabled      bool
+	Health        *HealthInfo
+	OSState       string
+	WaitingOn     []DependencyStatus `json:"WaitingOn,omitempty"`
 	Children      []ChildProcessInfo `json:"Children,omitempty"`
+}
+
+// ServiceInfo is the public service-oriented name for ProcessInfo. The alias
+// keeps existing in-process callers source-compatible while IPC/CLI expose
+// service terminology.
+type ServiceInfo = ProcessInfo
+
+// DependencyStatus explains why a service remains in the waiting lifecycle
+// state. It is diagnostic data; dependency conditions never change HEALTH.
+type DependencyStatus struct {
+	Service   string `json:"Service"`
+	Condition string `json:"Condition"`
+	State     string `json:"State"`
+	Health    string `json:"Health,omitempty"`
+}
+
+type HealthInfo struct {
+	Status        string            `json:"Status"`
+	Policy        string            `json:"Policy,omitempty"`
+	Checks        []HealthCheckInfo `json:"Checks,omitempty"`
+	FailingStreak int               `json:"FailingStreak,omitempty"`
+	LastCheckedAt *time.Time        `json:"LastCheckedAt,omitempty"`
+	LastSuccessAt *time.Time        `json:"LastSuccessAt,omitempty"`
+	LastError     string            `json:"LastError,omitempty"`
+}
+
+type HealthCheckInfo struct {
+	Name          string     `json:"Name"`
+	Status        string     `json:"Status"`
+	FailingStreak int        `json:"FailingStreak"`
+	LastCheckedAt *time.Time `json:"LastCheckedAt,omitempty"`
+	LastSuccessAt *time.Time `json:"LastSuccessAt,omitempty"`
+	LastError     string     `json:"LastError,omitempty"`
 }
 
 type ChildProcessInfo struct {
@@ -103,13 +151,16 @@ type ChildProcessInfo struct {
 	Depth         int
 	Name          string
 	CommandLine   string
-	State         string
+	State         *string
+	OSState       string
 	CPUPercent    float64
 	RSSBytes      uint64
 	MemoryPercent float64
 	Ports         []string
 	Children      []ChildProcessInfo `json:"Children,omitempty"`
 }
+
+type ChildServiceInfo = ChildProcessInfo
 
 type ProcessListRow struct {
 	ParentIndex   int
@@ -121,11 +172,15 @@ type ProcessListRow struct {
 	PID           int
 	Ports         []string
 	State         string
+	Health        string
+	OSState       string
 	CPUPercent    float64
 	RSSBytes      uint64
 	MemoryPercent float64
 	RestartCount  int
 }
+
+type ServiceListRow = ProcessListRow
 
 type ScheduleInfo struct {
 	Project     string
@@ -156,6 +211,15 @@ func New(layout paths.Layout) *Daemon {
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	return d
+}
+
+// SetHealthExecutorFactory injects probe execution for tests or embedders.
+// Passing nil restores the host command executor. It should be called before
+// the daemon starts services.
+func (d *Daemon) SetHealthExecutorFactory(factory func(config.EffectiveService) health.Executor) {
+	d.mu.Lock()
+	d.healthExecutorFactory = factory
+	d.mu.Unlock()
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -232,6 +296,11 @@ func (d *Daemon) shutdown() {
 			if managed.handle != nil {
 				managed.manualStop = true
 				managed.generation++
+				if managed.healthCancel != nil {
+					managed.healthCancel()
+					managed.healthCancel = nil
+				}
+				managed.health = nil
 				processes = append(processes, shutdownTarget{
 					handle: managed.handle, stdout: managed.stdout, stderr: managed.stderr, timeout: managed.spec.StopTimeout,
 				})
@@ -350,7 +419,7 @@ func (d *Daemon) applyProject(name, path string) error {
 	if file.Project != name {
 		return fmt.Errorf("project registry name %q does not match TOML project %q", name, file.Project)
 	}
-	specs, err := file.ProcessesEffective()
+	specs, err := file.ServicesEffective()
 	if err != nil {
 		return err
 	}
@@ -358,10 +427,11 @@ func (d *Daemon) applyProject(name, path string) error {
 	if err != nil {
 		return err
 	}
-	desired := map[string]config.EffectiveProcess{}
+	desired := map[string]config.EffectiveService{}
 	for _, spec := range specs {
 		desired[spec.Name] = spec
 	}
+	orderedSpecs := topologicalSpecs(specs)
 
 	d.mu.Lock()
 	processIDs, nextProcessID := d.allocateProcessIDsLocked(name, desired)
@@ -369,24 +439,54 @@ func (d *Daemon) applyProject(name, path string) error {
 	if current == nil {
 		current = &projectRuntime{processes: map[string]*managedProcess{}}
 	}
+	changed := make([]string, 0)
+	recreateRunning := make(map[string]bool)
+	for processName, managed := range current.processes {
+		spec, exists := desired[processName]
+		if exists && !sameSpec(managed.spec, spec) {
+			changed = append(changed, processName)
+			recreateRunning[processName] = serviceActiveForPropagation(managed)
+		}
+	}
+	dependentRestarts := collectRestartDependentsLocked(current, changed)
 	toStop := make([]*managedProcess, 0)
+	// Dependents must be stopped before a dependency is recreated. The
+	// collected order is shallow-to-deep, so reverse it for shutdown.
+	stopSet := map[*managedProcess]bool{}
+	for i := len(dependentRestarts) - 1; i >= 0; i-- {
+		managed := dependentRestarts[i].managed
+		if !stopSet[managed] && serviceActiveForPropagation(managed) {
+			stopSet[managed] = true
+			managed.manualStop = true
+			managed.generation++
+			if managed.healthCancel != nil {
+				managed.healthCancel()
+			}
+			toStop = append(toStop, managed)
+		}
+	}
 	for processName, managed := range current.processes {
 		spec, exists := desired[processName]
 		if !exists || !sameSpec(managed.spec, spec) {
-			if managed.handle != nil {
+			if !stopSet[managed] && serviceActiveForPropagation(managed) {
+				stopSet[managed] = true
 				managed.manualStop = true
 				managed.generation++
+				if managed.healthCancel != nil {
+					managed.healthCancel()
+				}
 				toStop = append(toStop, managed)
 			}
 			delete(current.processes, processName)
 		}
 	}
 	toStart := make([]*managedProcess, 0)
-	for processName, spec := range desired {
+	for _, spec := range orderedSpecs {
+		processName := spec.Name
 		if _, exists := current.processes[processName]; !exists {
 			managed := &managedProcess{id: processIDs[processName], spec: spec, state: StateStopped}
 			current.processes[processName] = managed
-			if spec.Autostart {
+			if spec.Autostart || recreateRunning[processName] {
 				toStart = append(toStart, managed)
 			}
 		} else {
@@ -401,8 +501,12 @@ func (d *Daemon) applyProject(name, path string) error {
 		_ = d.stopManaged(managed)
 	}
 	for _, managed := range toStart {
-		_ = d.startManaged(name, managed)
+		_ = d.startService(name, managed)
 	}
+	for _, target := range dependentRestarts {
+		_ = d.startService(name, target.managed)
+	}
+	d.ensureReconciler(name)
 	if err := d.scheduler.Apply(d.allSchedulesWith(schedules, name)); err != nil {
 		return err
 	}
@@ -480,6 +584,69 @@ func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string
 	return assigned, nextID
 }
 
+// topologicalSpecs gives autostart a deterministic dependency-first order.
+// The reconciler still performs the final condition check, so a health-based
+// dependency can leave a service in waiting without blocking config.apply.
+func topologicalSpecs(specs []config.EffectiveService) []config.EffectiveService {
+	byName := make(map[string]config.EffectiveService, len(specs))
+	indegree := make(map[string]int, len(specs))
+	dependents := make(map[string][]string, len(specs))
+	for _, spec := range specs {
+		byName[spec.Name] = spec
+		indegree[spec.Name] = 0
+	}
+	for _, spec := range specs {
+		for dependency := range spec.DependsOn {
+			if _, ok := byName[dependency]; !ok {
+				continue
+			}
+			indegree[spec.Name]++
+			dependents[dependency] = append(dependents[dependency], spec.Name)
+		}
+	}
+	queue := make([]string, 0)
+	for name, degree := range indegree {
+		if degree == 0 {
+			queue = append(queue, name)
+		}
+	}
+	sort.Strings(queue)
+	result := make([]config.EffectiveService, 0, len(specs))
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		result = append(result, byName[name])
+		children := dependents[name]
+		sort.Strings(children)
+		for _, child := range children {
+			indegree[child]--
+			if indegree[child] == 0 {
+				queue = append(queue, child)
+			}
+		}
+		sort.Strings(queue)
+	}
+	// Validation rejects cycles; retain a defensive deterministic fallback if
+	// this helper is ever called with an unvalidated slice.
+	if len(result) != len(specs) {
+		seen := make(map[string]bool, len(result))
+		for _, spec := range result {
+			seen[spec.Name] = true
+		}
+		names := make([]string, 0, len(specs)-len(result))
+		for _, spec := range specs {
+			if !seen[spec.Name] {
+				names = append(names, spec.Name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			result = append(result, byName[name])
+		}
+	}
+	return result
+}
+
 func (d *Daemon) allSchedulesWith(schedules []config.EffectiveSchedule, projectName string) []config.EffectiveSchedule {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -515,7 +682,7 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	current := d.projects[projectName]
 	if current == nil || current.processes[managed.spec.Name] != managed {
 		d.mu.Unlock()
-		return fmt.Errorf("process no longer exists")
+		return fmt.Errorf("service no longer exists")
 	}
 	if managed.disabled || managed.handle != nil {
 		d.mu.Unlock()
@@ -539,7 +706,7 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	}
 	handle, err := process.Start(process.Spec{
 		Command: managed.spec.Command, Args: managed.spec.Args, WorkingDir: managed.spec.WorkingDir,
-		Env: managed.spec.Env, Stdout: stdout, Stderr: stderr,
+		Env: serviceEnvironment(managed.spec), Stdout: stdout, Stderr: stderr,
 	})
 	if err != nil {
 		_ = stdout.Close()
@@ -558,18 +725,255 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	managed.lastError = ""
 	managed.generation++
 	generation := managed.generation
+	healthConfig := managed.spec.HealthCheck
+	if healthConfig != nil {
+		initial := initialHealthInfo(healthConfig)
+		managed.health = &initial
+	}
 	go func() {
 		result := handle.Wait()
 		d.onExit(projectName, managed, handle, generation, result, stdout, stderr)
 	}()
 	go d.resetFailuresWhenStable(projectName, managed, generation)
 	d.mu.Unlock()
+	if healthConfig != nil {
+		d.startHealthMonitor(projectName, managed, generation, healthConfig)
+	}
 	return nil
+}
+
+func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess, generation uint64, cfg *config.EffectiveHealthCheck) {
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	d.mu.Lock()
+	if current := d.projects[projectName]; current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.handle == nil || managed.state != StateRunning {
+		d.mu.Unlock()
+		cancel()
+		return
+	}
+	if managed.healthCancel != nil {
+		managed.healthCancel()
+	}
+	managed.healthCancel = cancel
+	d.mu.Unlock()
+
+	checks := make([]health.Check, 0, len(cfg.Checks))
+	for name, probe := range cfg.Checks {
+		checks = append(checks, health.Check{Name: name, Test: probe.Test})
+	}
+	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
+	d.mu.RLock()
+	factory := d.healthExecutorFactory
+	d.mu.RUnlock()
+	var executor health.Executor
+	if factory != nil {
+		executor = factory(managed.spec)
+	}
+	if executor == nil {
+		executor = health.CommandExecutor{Dir: managed.spec.WorkingDir, Env: append([]string(nil), envSlice(serviceEnvironment(managed.spec))...)}
+	}
+	go health.Run(ctx, health.Config{
+		Test: cfg.Test, Checks: checks, Policy: cfg.Policy, Interval: cfg.Interval,
+		Timeout: cfg.Timeout, Retries: cfg.Retries, StartPeriod: cfg.StartPeriod,
+		StartInterval: cfg.StartInterval,
+	}, executor, func(snapshot health.Snapshot) {
+		info := healthInfoFromSnapshot(snapshot)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		current := d.projects[projectName]
+		if current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.handle == nil || managed.state != StateRunning {
+			return
+		}
+		managed.health = &info
+	})
+}
+
+func envSlice(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+env[key])
+	}
+	return result
+}
+
+func serviceEnvironment(spec config.EffectiveService) map[string]string {
+	if spec.Env != nil {
+		return spec.Env
+	}
+	return spec.Environment
+}
+
+func healthInfoFromSnapshot(snapshot health.Snapshot) HealthInfo {
+	checks := make([]HealthCheckInfo, 0, len(snapshot.Checks))
+	info := HealthInfo{Status: snapshot.Status, Policy: snapshot.Policy}
+	for _, check := range snapshot.Checks {
+		var checkedAt, successAt *time.Time
+		if !check.LastCheckedAt.IsZero() {
+			value := check.LastCheckedAt
+			checkedAt = &value
+		}
+		if !check.LastSuccessAt.IsZero() {
+			value := check.LastSuccessAt
+			successAt = &value
+		}
+		checks = append(checks, HealthCheckInfo{
+			Name: check.Name, Status: check.Status, FailingStreak: check.FailingStreak,
+			LastCheckedAt: checkedAt, LastSuccessAt: successAt, LastError: check.LastError,
+		})
+		if check.FailingStreak > info.FailingStreak {
+			info.FailingStreak = check.FailingStreak
+		}
+		if !check.LastCheckedAt.IsZero() && (info.LastCheckedAt == nil || check.LastCheckedAt.After(*info.LastCheckedAt)) {
+			value := check.LastCheckedAt
+			info.LastCheckedAt = &value
+		}
+		if !check.LastSuccessAt.IsZero() && (info.LastSuccessAt == nil || check.LastSuccessAt.After(*info.LastSuccessAt)) {
+			value := check.LastSuccessAt
+			info.LastSuccessAt = &value
+		}
+		if check.LastError != "" {
+			info.LastError = check.LastError
+		}
+	}
+	info.Checks = checks
+	return info
+}
+
+func initialHealthInfo(cfg *config.EffectiveHealthCheck) HealthInfo {
+	checks := make([]HealthCheckInfo, 0, len(cfg.Checks))
+	if len(cfg.Checks) == 0 {
+		checks = append(checks, HealthCheckInfo{Name: "default", Status: health.Starting})
+	} else {
+		names := make([]string, 0, len(cfg.Checks))
+		for name := range cfg.Checks {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			checks = append(checks, HealthCheckInfo{Name: name, Status: health.Starting})
+		}
+	}
+	return HealthInfo{Status: health.Starting, Policy: cfg.Policy, Checks: checks}
+}
+
+func (d *Daemon) startService(projectName string, managed *managedProcess) error {
+	d.mu.Lock()
+	current := d.projects[projectName]
+	if current == nil || current.processes[managed.spec.Name] != managed {
+		d.mu.Unlock()
+		return fmt.Errorf("service no longer exists")
+	}
+	if !d.dependenciesSatisfiedLocked(current, managed) {
+		managed.state = StateWaiting
+		d.mu.Unlock()
+		d.ensureReconciler(projectName)
+		return nil
+	}
+	d.mu.Unlock()
+	return d.startManaged(projectName, managed)
+}
+
+func (d *Daemon) dependenciesSatisfiedLocked(project *projectRuntime, managed *managedProcess) bool {
+	for dependencyName, dependency := range managed.spec.DependsOn {
+		dependencyProcess := project.processes[dependencyName]
+		if dependencyProcess == nil {
+			return false
+		}
+		condition := dependency.Condition
+		if condition == "" {
+			condition = "service_started"
+		}
+		switch condition {
+		case "service_started":
+			if dependencyProcess.state != StateRunning {
+				return false
+			}
+		case "service_healthy":
+			if dependencyProcess.health == nil || dependencyProcess.health.Status != health.Healthy {
+				return false
+			}
+		case "service_completed_successfully":
+			if dependencyProcess.state != StateExited || dependencyProcess.lastExit == nil || *dependencyProcess.lastExit != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (d *Daemon) ensureReconciler(projectName string) {
+	d.mu.Lock()
+	project := d.projects[projectName]
+	if project == nil || project.reconcileRunning {
+		d.mu.Unlock()
+		return
+	}
+	project.reconcileRunning = true
+	d.mu.Unlock()
+	go d.reconcileProject(projectName)
+}
+
+func (d *Daemon) reconcileProject(projectName string) {
+	defer func() {
+		d.mu.Lock()
+		if project := d.projects[projectName]; project != nil {
+			project.reconcileRunning = false
+		}
+		d.mu.Unlock()
+	}()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		started := false
+		d.mu.RLock()
+		project := d.projects[projectName]
+		waiting := make([]*managedProcess, 0)
+		if project != nil {
+			for _, managed := range project.processes {
+				if managed.state == StateWaiting {
+					waiting = append(waiting, managed)
+				}
+			}
+		}
+		d.mu.RUnlock()
+		if project == nil || len(waiting) == 0 {
+			return
+		}
+		sort.Slice(waiting, func(i, j int) bool { return waiting[i].spec.Name < waiting[j].spec.Name })
+		for _, managed := range waiting {
+			if err := d.startService(projectName, managed); err == nil {
+				started = true
+			}
+		}
+		if !started {
+			ctx := d.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}
 }
 
 func (d *Daemon) resetFailuresWhenStable(project string, managed *managedProcess, generation uint64) {
 	timer := time.NewTimer(managed.spec.StableAfter)
 	defer timer.Stop()
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-timer.C:
 		d.mu.Lock()
@@ -578,7 +982,7 @@ func (d *Daemon) resetFailuresWhenStable(project string, managed *managedProcess
 			managed.restarts = 0
 		}
 		d.mu.Unlock()
-	case <-d.ctx.Done():
+	case <-ctx.Done():
 	}
 }
 
@@ -594,6 +998,11 @@ func (d *Daemon) onExit(projectName string, managed *managedProcess, handle *pro
 		return
 	}
 	managed.handle = nil
+	if managed.healthCancel != nil {
+		managed.healthCancel()
+		managed.healthCancel = nil
+	}
+	managed.health = nil
 	managed.stdout = nil
 	managed.stderr = nil
 	managed.lastExit = &result.ExitCode
@@ -635,21 +1044,40 @@ func (d *Daemon) onExit(projectName string, managed *managedProcess, handle *pro
 	managed.state = StateBackingOff
 	generation++
 	managed.generation = generation
-	go func() {
+	go func(expectedGeneration uint64) {
 		timer := time.NewTimer(backoff)
 		defer timer.Stop()
+		ctx := d.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		select {
 		case <-timer.C:
-			_ = d.startManaged(projectName, managed)
-		case <-d.ctx.Done():
+			d.mu.RLock()
+			valid := false
+			if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed {
+				valid = managed.generation == expectedGeneration && managed.state == StateBackingOff && !managed.manualStop
+			}
+			d.mu.RUnlock()
+			if valid {
+				_ = d.startManaged(projectName, managed)
+			}
+		case <-ctx.Done():
 		}
-	}()
+	}(generation)
 }
 
 func (d *Daemon) stopManaged(managed *managedProcess) error {
 	d.mu.Lock()
+	managed.manualStop = true
+	if managed.healthCancel != nil {
+		managed.healthCancel()
+		managed.healthCancel = nil
+	}
+	managed.health = nil
 	handle := managed.handle
 	if handle == nil {
+		managed.generation++
 		managed.state = StateDisabledIf(managed.disabled)
 		d.mu.Unlock()
 		return nil
@@ -683,15 +1111,17 @@ func (d *Daemon) StartProcess(key string) error {
 	managed := runtimeProject.processes[name]
 	if managed == nil {
 		d.mu.Unlock()
-		return fmt.Errorf("process %q not found", key)
+		return fmt.Errorf("service %q not found", key)
 	}
 	managed.disabled = false
 	managed.manualStop = false
 	managed.failures = nil
 	managed.state = StateStopped
 	d.mu.Unlock()
-	return d.startManaged(project, managed)
+	return d.startService(project, managed)
 }
+
+func (d *Daemon) StartService(key string) error { return d.StartProcess(key) }
 
 func (d *Daemon) StopProcess(key string, disable bool) error {
 	project, name, err := d.resolveProcessRef(key)
@@ -702,7 +1132,7 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 	runtimeProject := d.projects[project]
 	if runtimeProject == nil || runtimeProject.processes[name] == nil {
 		d.mu.Unlock()
-		return fmt.Errorf("process %q not found", key)
+		return fmt.Errorf("service %q not found", key)
 	}
 	managed := runtimeProject.processes[name]
 	if disable {
@@ -712,11 +1142,103 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 	return d.stopManaged(managed)
 }
 
+func (d *Daemon) StopService(key string, disable bool) error { return d.StopProcess(key, disable) }
+
 func (d *Daemon) RestartProcess(key string) error {
-	if err := d.StopProcess(key, false); err != nil {
+	project, name, err := d.resolveServiceRef(key)
+	if err != nil {
 		return err
 	}
-	return d.StartProcess(key)
+	dependents := d.restartDependents(project, name)
+	for i := len(dependents) - 1; i >= 0; i-- {
+		_ = d.stopManaged(dependents[i])
+	}
+	if err := d.StopProcess(project+"/"+name, false); err != nil {
+		return err
+	}
+	if err := d.StartProcess(project + "/" + name); err != nil {
+		return err
+	}
+	for _, dependent := range dependents {
+		_ = d.startService(project, dependent)
+	}
+	return nil
+}
+
+func (d *Daemon) RestartService(key string) error { return d.RestartProcess(key) }
+
+func collectRestartDependentsLocked(project *projectRuntime, services []string) []restartCandidate {
+	if project == nil || len(services) == 0 {
+		return nil
+	}
+	result := make([]restartCandidate, 0)
+	seen := map[string]bool{}
+	var visit func(string, int)
+	visit = func(dependency string, depth int) {
+		names := make([]string, 0, len(project.processes))
+		for name := range project.processes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			managed := project.processes[name]
+			dependencySpec, ok := managed.spec.DependsOn[dependency]
+			if !ok || !dependencySpec.Restart {
+				continue
+			}
+			seen[name] = true
+			if serviceActiveForPropagation(managed) {
+				result = append(result, restartCandidate{managed: managed, depth: depth})
+			}
+			visit(name, depth+1)
+		}
+	}
+	roots := append([]string(nil), services...)
+	sort.Strings(roots)
+	for _, service := range roots {
+		visit(service, 1)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].depth != result[j].depth {
+			return result[i].depth < result[j].depth
+		}
+		return result[i].managed.spec.Name < result[j].managed.spec.Name
+	})
+	return result
+}
+
+func serviceActiveForPropagation(managed *managedProcess) bool {
+	if managed == nil {
+		return false
+	}
+	if managed.handle != nil {
+		return true
+	}
+	switch managed.state {
+	case StateWaiting, StateStarting, StateStopping, StateBackingOff:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) restartDependents(projectName, serviceName string) []*managedProcess {
+	d.mu.RLock()
+	project := d.projects[projectName]
+	if project == nil {
+		d.mu.RUnlock()
+		return nil
+	}
+	result := collectRestartDependentsLocked(project, []string{serviceName})
+	d.mu.RUnlock()
+	managed := make([]*managedProcess, 0, len(result))
+	for _, item := range result {
+		managed = append(managed, item.managed)
+	}
+	return managed
 }
 
 func (d *Daemon) ClearLogs(key string) error {
@@ -730,8 +1252,9 @@ func (d *Daemon) ClearLogs(key string) error {
 func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 	d.mu.RLock()
 	items := make([]struct {
-		project string
-		managed *managedProcess
+		project        string
+		runtimeProject *projectRuntime
+		managed        *managedProcess
 	}, 0)
 	for project, runtimeProject := range d.projects {
 		if projectFilter != "" && project != projectFilter {
@@ -739,9 +1262,10 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		}
 		for _, managed := range runtimeProject.processes {
 			items = append(items, struct {
-				project string
-				managed *managedProcess
-			}{project, managed})
+				project        string
+				runtimeProject *projectRuntime
+				managed        *managedProcess
+			}{project, runtimeProject, managed})
 		}
 	}
 	d.mu.RUnlock()
@@ -753,6 +1277,14 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 			ID: managed.id, Project: item.project, Name: managed.spec.Name, State: managed.state, Disabled: managed.disabled,
 			StartedAt: managed.startedAt, RestartCount: managed.restarts, LastExitCode: managed.lastExit,
 			LastError: managed.lastError, StdoutPath: managed.stdoutPath, StderrPath: managed.stderrPath,
+		}
+		if managed.state == StateWaiting {
+			info.WaitingOn = waitingDependencies(item.runtimeProject, managed)
+		}
+		if managed.health != nil {
+			copyHealth := *managed.health
+			copyHealth.Checks = append([]HealthCheckInfo(nil), managed.health.Checks...)
+			info.Health = &copyHealth
 		}
 		pid := 0
 		var every time.Duration
@@ -767,7 +1299,11 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 			info.PID = pid
 			info.UptimeSeconds = time.Since(startedAt).Seconds()
 			if snapshot, ok := d.metrics.Snapshot(pid, every); ok {
-				info.Ports = snapshot.Ports
+				info.Ports = aggregatePorts(snapshot)
+				info.OSState = snapshot.OSState
+				if info.OSState == "" {
+					info.OSState = snapshot.State
+				}
 				info.CPUPercent = snapshot.CPUPercent
 				info.RSSBytes = snapshot.RSSBytes
 				info.MemoryPercent = snapshot.MemoryPercent
@@ -777,6 +1313,38 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		result = append(result, info)
 	}
 	sortProcessInfo(result)
+	return result
+}
+
+func (d *Daemon) ListServices(projectFilter string) []ServiceInfo {
+	return d.ListProcesses(projectFilter)
+}
+
+func waitingDependencies(project *projectRuntime, managed *managedProcess) []DependencyStatus {
+	if project == nil || managed == nil || len(managed.spec.DependsOn) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(managed.spec.DependsOn))
+	for name := range managed.spec.DependsOn {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]DependencyStatus, 0, len(names))
+	for _, name := range names {
+		spec := managed.spec.DependsOn[name]
+		condition := spec.Condition
+		if condition == "" {
+			condition = "service_started"
+		}
+		status := DependencyStatus{Service: name, Condition: condition, State: StateUnknown}
+		if dependency := project.processes[name]; dependency != nil {
+			status.State = dependency.state
+			if dependency.health != nil {
+				status.Health = dependency.health.Status
+			}
+		}
+		result = append(result, status)
+	}
 	return result
 }
 
@@ -792,8 +1360,10 @@ func (d *Daemon) GetProcess(key string) (ProcessInfo, error) {
 			return info, nil
 		}
 	}
-	return ProcessInfo{}, fmt.Errorf("process %q not found", key)
+	return ProcessInfo{}, fmt.Errorf("service %q not found", key)
 }
+
+func (d *Daemon) GetService(key string) (ServiceInfo, error) { return d.GetProcess(key) }
 
 func childProcessInfos(snapshots []metrics.ProcessSnapshot) []ChildProcessInfo {
 	if len(snapshots) == 0 {
@@ -801,13 +1371,17 @@ func childProcessInfos(snapshots []metrics.ProcessSnapshot) []ChildProcessInfo {
 	}
 	result := make([]ChildProcessInfo, 0, len(snapshots))
 	for _, snapshot := range snapshots {
+		osState := snapshot.OSState
+		if osState == "" {
+			osState = snapshot.State
+		}
 		result = append(result, ChildProcessInfo{
 			PID:           snapshot.PID,
 			ParentPID:     snapshot.ParentPID,
 			Depth:         snapshot.Depth,
 			Name:          snapshot.Name,
 			CommandLine:   snapshot.CommandLine,
-			State:         snapshot.State,
+			OSState:       osState,
 			CPUPercent:    snapshot.CPUPercent,
 			RSSBytes:      snapshot.RSSBytes,
 			MemoryPercent: snapshot.MemoryPercent,
@@ -815,6 +1389,33 @@ func childProcessInfos(snapshots []metrics.ProcessSnapshot) []ChildProcessInfo {
 			Children:      childProcessInfos(snapshot.Children),
 		})
 	}
+	return result
+}
+
+func healthDisplay(info *HealthInfo) string {
+	if info == nil {
+		return ""
+	}
+	return info.Status
+}
+
+func aggregatePorts(snapshot metrics.ProcessSnapshot) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	var visit func(metrics.ProcessSnapshot)
+	visit = func(node metrics.ProcessSnapshot) {
+		for _, port := range node.Ports {
+			if !seen[port] {
+				seen[port] = true
+				result = append(result, port)
+			}
+		}
+		for _, child := range node.Children {
+			visit(child)
+		}
+	}
+	visit(snapshot)
+	sort.Strings(result)
 	return result
 }
 
@@ -831,6 +1432,8 @@ func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
 			PID:           item.PID,
 			Ports:         item.Ports,
 			State:         item.State,
+			Health:        healthDisplay(item.Health),
+			OSState:       item.OSState,
 			CPUPercent:    item.CPUPercent,
 			RSSBytes:      item.RSSBytes,
 			MemoryPercent: item.MemoryPercent,
@@ -841,6 +1444,8 @@ func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
 	return rows
 }
 
+func FlattenServiceList(items []ServiceInfo) []ServiceListRow { return FlattenProcessList(items) }
+
 func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project string, children []ChildProcessInfo) {
 	for _, child := range children {
 		*rows = append(*rows, ProcessListRow{
@@ -850,7 +1455,8 @@ func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project str
 			Depth:         child.Depth,
 			PID:           child.PID,
 			Ports:         child.Ports,
-			State:         child.State,
+			State:         "",
+			OSState:       child.OSState,
 			CPUPercent:    child.CPUPercent,
 			RSSBytes:      child.RSSBytes,
 			MemoryPercent: child.MemoryPercent,
@@ -859,13 +1465,13 @@ func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project str
 	}
 }
 
-func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
+func (d *Daemon) resolveServiceRef(ref string) (string, string, error) {
 	if strings.Contains(ref, "/") {
 		return splitKey(ref)
 	}
 	id, err := strconv.Atoi(ref)
 	if err != nil || id < 0 {
-		return "", "", fmt.Errorf("process reference must be PROJECT/PROCESS or a non-negative integer id")
+		return "", "", fmt.Errorf("service reference must be PROJECT/SERVICE or a non-negative integer id")
 	}
 
 	d.mu.RLock()
@@ -889,7 +1495,11 @@ func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
 		}
 	}
 	d.mu.RUnlock()
-	return "", "", fmt.Errorf("process id %d not found", id)
+	return "", "", fmt.Errorf("service id %d not found", id)
+}
+
+func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
+	return d.resolveServiceRef(ref)
 }
 
 func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) (int, error) {
@@ -984,42 +1594,42 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "CONFIG_APPLY_FAILED", err)
 		}
 		return success(request, map[string]string{"project": p.Project, "status": "applied"})
-	case "process.list":
+	case "service.list":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
 		return success(request, d.ListProcesses(p.Project))
-	case "process.get":
+	case "service.get":
 		var p struct{ Key string }
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
 		info, err := d.GetProcess(p.Key)
 		if err != nil {
-			return failure(request, "PROCESS_NOT_FOUND", err)
+			return failure(request, "SERVICE_NOT_FOUND", err)
 		}
 		return success(request, info)
-	case "process.start", "process.stop", "process.restart", "process.enable", "process.disable":
+	case "service.start", "service.stop", "service.restart", "service.enable", "service.disable":
 		var p struct{ Key string }
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
 		project, name, err := d.resolveProcessRef(p.Key)
 		if err != nil {
-			return failure(request, processReferenceErrorCode(p.Key, "PROCESS_OPERATION_FAILED"), err)
+			return failure(request, processReferenceErrorCode(p.Key, "SERVICE_OPERATION_FAILED"), err)
 		}
 		canonicalKey := project + "/" + name
 		switch request.Method {
-		case "process.start", "process.enable":
+		case "service.start", "service.enable":
 			err = d.StartProcess(canonicalKey)
-		case "process.stop":
+		case "service.stop":
 			err = d.StopProcess(canonicalKey, false)
-		case "process.disable":
+		case "service.disable":
 			err = d.StopProcess(canonicalKey, true)
-		case "process.restart":
+		case "service.restart":
 			err = d.RestartProcess(canonicalKey)
 		}
 		if err != nil {
-			return failure(request, "PROCESS_OPERATION_FAILED", err)
+			return failure(request, "SERVICE_OPERATION_FAILED", err)
 		}
 		return success(request, map[string]string{"key": canonicalKey, "status": "ok"})
 	case "logs.read":
@@ -1147,7 +1757,7 @@ func failure(request ipc.Request, code string, err error) ipc.Response {
 func splitKey(key string) (string, string, error) {
 	parts := strings.SplitN(key, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("key must be project/process")
+		return "", "", fmt.Errorf("key must be PROJECT/SERVICE")
 	}
 	return parts[0], parts[1], nil
 }
@@ -1155,7 +1765,7 @@ func splitKey(key string) (string, string, error) {
 func processReferenceErrorCode(ref, fallback string) string {
 	if !strings.Contains(ref, "/") {
 		if id, err := strconv.Atoi(ref); err == nil && id >= 0 {
-			return "PROCESS_NOT_FOUND"
+			return "SERVICE_NOT_FOUND"
 		}
 	}
 	return fallback
@@ -1168,7 +1778,7 @@ func sameSpec(a, b config.EffectiveProcess) bool {
 		a.LogMaxSize != b.LogMaxSize || a.LogMaxFiles != b.LogMaxFiles {
 		return false
 	}
-	if len(a.Args) != len(b.Args) || len(a.Env) != len(b.Env) {
+	if len(a.Args) != len(b.Args) {
 		return false
 	}
 	for i := range a.Args {
@@ -1176,12 +1786,16 @@ func sameSpec(a, b config.EffectiveProcess) bool {
 			return false
 		}
 	}
-	for key, value := range a.Env {
-		if b.Env[key] != value {
+	aEnv, bEnv := serviceEnvironment(a), serviceEnvironment(b)
+	if len(aEnv) != len(bEnv) {
+		return false
+	}
+	for key, value := range aEnv {
+		if bEnv[key] != value {
 			return false
 		}
 	}
-	return true
+	return reflect.DeepEqual(a.HealthCheck, b.HealthCheck) && reflect.DeepEqual(a.DependsOn, b.DependsOn)
 }
 
 func StateDisabledIf(disabled bool) string {

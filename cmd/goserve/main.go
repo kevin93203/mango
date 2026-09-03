@@ -95,7 +95,7 @@ func main() {
 
 func usage() {
 	cliOutput.Println(strings.Join([]string{
-		"goserve - cross-platform process manager",
+		"goserve - cross-platform service manager",
 		"Global options: --color=auto|always|never, --json (where supported)",
 		"",
 		"Commands:",
@@ -106,8 +106,8 @@ func usage() {
 		"  project list",
 		"  config validate PATH",
 		"  list",
-		"  status PROJECT/PROCESS|ID",
-		"  start|stop|restart|enable|disable PROJECT/PROCESS|ID",
+		"  status PROJECT/SERVICE|ID",
+		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID",
 		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
@@ -308,7 +308,7 @@ func configCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: project=%s processes=%d schedules=%d path=%s", loaded.Project, len(loaded.Processes), len(loaded.Schedules), loaded.Path)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: project=%s services=%d schedules=%d path=%s", loaded.Project, len(loaded.Services), len(loaded.Schedules), loaded.Path)))
 	return nil
 }
 
@@ -344,7 +344,7 @@ func projectApplyName(args []string) (string, error) {
 }
 
 func listCommand() error {
-	response, err := call("process.list", nil)
+	response, err := call("service.list", nil)
 	if err != nil {
 		return err
 	}
@@ -355,15 +355,15 @@ func listCommand() error {
 	if jsonOutput {
 		return cliOutput.JSON(items)
 	}
-	printProcessTable(items)
+	printServiceTable(items)
 	return nil
 }
 
 func statusCommand(args []string) error {
 	if len(args) != 1 {
-		return errors.New("status requires PROJECT/PROCESS or ID")
+		return errors.New("status requires PROJECT/SERVICE or ID")
 	}
-	response, err := call("process.get", struct{ Key string }{args[0]})
+	response, err := call("service.get", struct{ Key string }{args[0]})
 	if err != nil {
 		return err
 	}
@@ -383,9 +383,9 @@ func processCommand(command string, args []string) error {
 		if len(args) > 1 && command != "logs" && containsArgument(args[1:], "--follow") {
 			return fmt.Errorf("--follow is only supported by logs; try: goserve logs %s --follow", args[0])
 		}
-		return fmt.Errorf("invalid %s arguments: expected one PROJECT/PROCESS or ID, for example: goserve %s demo/api", command, command)
+		return fmt.Errorf("invalid %s arguments: expected one PROJECT/SERVICE or ID, for example: goserve %s demo/api", command, command)
 	}
-	response, err := callWithTimeout("process."+command, struct{ Key string }{args[0]}, processOperationTimeout)
+	response, err := callWithTimeout("service."+command, struct{ Key string }{args[0]}, processOperationTimeout)
 	if err != nil {
 		return err
 	}
@@ -400,7 +400,7 @@ func processCommand(command string, args []string) error {
 		"start": "started", "stop": "stopped", "restart": "restarted",
 		"enable": "enabled", "disable": "disabled",
 	}[command]
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Process %s %s", result["key"], action)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result["key"], action)))
 	return nil
 }
 
@@ -431,7 +431,7 @@ func logsCommand(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return errors.New("logs requires PROJECT/PROCESS, PROJECT/SCHEDULE, or ID")
+		return errors.New("logs requires PROJECT/SERVICE, PROJECT/SCHEDULE, or ID")
 	}
 	if args[0] == "clear" {
 		return clearLogsCommand(args[1:])
@@ -474,7 +474,7 @@ func logsCommand(args []string) error {
 
 func clearLogsCommand(args []string) error {
 	if len(args) != 1 {
-		return errors.New("logs clear requires PROJECT/PROCESS, PROJECT/SCHEDULE, or ID")
+		return errors.New("logs clear requires PROJECT/SERVICE, PROJECT/SCHEDULE, or ID")
 	}
 	response, err := call("logs.clear", struct{ Key string }{args[0]})
 	if err != nil {
@@ -708,9 +708,9 @@ func decodeData(data interface{}, target interface{}) error {
 	return json.Unmarshal(encoded, target)
 }
 
-func printProcessTable(items []daemon.ProcessInfo) {
+func printServiceTable(items []daemon.ProcessInfo) {
 	if len(items) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No processes found."))
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No services found."))
 		return
 	}
 	listRows := daemon.FlattenProcessList(items)
@@ -732,7 +732,9 @@ func printProcessTable(items []daemon.ProcessInfo) {
 		rows = append(rows, []cliui.Cell{
 			{Text: id, Style: idStyle, Align: cliui.AlignRight},
 			{Text: processName},
-			{Text: item.State, Style: cliui.StateStyle(item.State)},
+			{Text: displayString(item.State), Style: cliui.StateStyle(item.State)},
+			{Text: displayString(item.Health), Style: cliui.StateStyle(item.Health)},
+			{Text: displayString(item.OSState), Style: cliui.StyleMuted},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
 			{Text: ports, Style: zeroStyle(ports)},
 			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
@@ -741,7 +743,23 @@ func printProcessTable(items []daemon.ProcessInfo) {
 			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
-	cliOutput.Table([]string{"ID", "PROCESS", "STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	cliOutput.Table([]string{"ID", "SERVICE", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+}
+
+func printProcessTable(items []daemon.ProcessInfo) { printServiceTable(items) }
+
+func displayString(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func healthStatus(info *daemon.HealthInfo) string {
+	if info == nil || info.Status == "" {
+		return "-"
+	}
+	return info.Status
 }
 
 func formatBytes(value uint64) string {
@@ -807,7 +825,9 @@ func printProcessDetail(item daemon.ProcessInfo) {
 	}
 	rows := [][]cliui.Cell{
 		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
-		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
+		{{Text: "state"}, {Text: displayString(item.State), Style: cliui.StateStyle(item.State)}},
+		{{Text: "health"}, {Text: healthStatus(item.Health), Style: cliui.StateStyle(healthStatus(item.Health))}},
+		{{Text: "os state"}, {Text: displayString(item.OSState), Style: cliui.StyleMuted}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
 		{{Text: "ports"}, {Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))}},
 		{{Text: "started"}, {Text: formatTime(item.StartedAt), Style: zeroStyle(item.StartedAt)}},
@@ -822,6 +842,17 @@ func printProcessDetail(item daemon.ProcessInfo) {
 		{{Text: "stdout log"}, {Text: item.StdoutPath, Style: zeroStyle(item.StdoutPath)}},
 		{{Text: "stderr log"}, {Text: item.StderrPath, Style: zeroStyle(item.StderrPath)}},
 		{{Text: "last error"}, {Text: item.LastError, Style: errorStyle(item.LastError)}},
+	}
+	if len(item.WaitingOn) > 0 {
+		waiting := make([]string, 0, len(item.WaitingOn))
+		for _, dependency := range item.WaitingOn {
+			value := dependency.Service + " (" + dependency.Condition + ": " + dependency.State
+			if dependency.Health != "" {
+				value += ", health=" + dependency.Health
+			}
+			waiting = append(waiting, value+")")
+		}
+		rows = append(rows, []cliui.Cell{{Text: "waiting on"}, {Text: strings.Join(waiting, ", "), Style: cliui.StyleWarning}})
 	}
 	cliOutput.KeyValues(rows)
 }
