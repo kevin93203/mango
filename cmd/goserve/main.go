@@ -183,6 +183,7 @@ func startDaemon(layout paths.Layout) error {
 	}
 	defer logFile.Close()
 	cmd := exec.Command(executable, "daemon", "run")
+	configureDaemonCommand(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if devNull, openErr := os.OpenFile(os.DevNull, os.O_RDONLY, 0); openErr == nil {
