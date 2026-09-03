@@ -716,17 +716,18 @@ func printProcessTable(items []daemon.ProcessInfo) {
 	rows := make([][]cliui.Cell, 0, len(items))
 	for _, item := range items {
 		rows = append(rows, []cliui.Cell{
-			{Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight},
 			{Text: item.Project + "/" + item.Name},
 			{Text: item.State, Style: cliui.StateStyle(item.State)},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
+			{Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))},
 			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
 			{Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight},
 			{Text: fmt.Sprintf("%.2f", item.MemoryPercent), Align: cliui.AlignRight},
 			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
 		})
 	}
-	cliOutput.Table([]string{"ID", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	cliOutput.Table([]string{"ID", "PROCESS", "STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func formatBytes(value uint64) string {
@@ -791,9 +792,10 @@ func printProcessDetail(item daemon.ProcessInfo) {
 		lastExit = fmt.Sprintf("%d", *item.LastExitCode)
 	}
 	rows := [][]cliui.Cell{
-		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight}},
+		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
 		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
+		{{Text: "ports"}, {Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))}},
 		{{Text: "started"}, {Text: formatTime(item.StartedAt), Style: zeroStyle(item.StartedAt)}},
 		{{Text: "uptime"}, {Text: cliui.FormatDuration(item.UptimeSeconds), Style: zeroStyle(item.UptimeSeconds)}},
 		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
@@ -907,6 +909,13 @@ func formatPID(pid int) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d", pid)
+}
+
+func formatPorts(ports []string) string {
+	if len(ports) == 0 {
+		return "-"
+	}
+	return strings.Join(ports, ", ")
 }
 
 func formatTime(value time.Time) string {

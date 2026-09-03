@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
@@ -207,9 +208,10 @@ func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan by
 	}
 	output.Println(output.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
 	output.KeyValues([][]cliui.Cell{
-		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight}},
+		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
 		{{Text: "state"}, {Text: item.State, Style: cliui.StateStyle(item.State)}},
 		{{Text: "pid"}, {Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight}},
+		{{Text: "ports"}, {Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))}},
 		{{Text: "cpu"}, {Text: fmt.Sprintf("%.2f%%", item.CPUPercent), Align: cliui.AlignRight}},
 		{{Text: "rss"}, {Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight}},
 		{{Text: "memory"}, {Text: fmt.Sprintf("%.2f%%", item.MemoryPercent), Align: cliui.AlignRight}},
@@ -236,17 +238,18 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 		}
 		rows = append(rows, []cliui.Cell{
 			{Text: marker, Style: cliui.StyleHeader},
-			{Text: fmt.Sprintf("%d", item.ID), Style: zeroStyle(item.ID), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight},
 			{Text: item.Project + "/" + item.Name},
 			{Text: item.State, Style: cliui.StateStyle(item.State)},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
+			{Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))},
 			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
 			{Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight},
 			{Text: fmt.Sprintf("%.2f", item.MemoryPercent), Align: cliui.AlignRight},
 			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
 		})
 	}
-	output.Table([]string{"", "ID", "PROCESS", "STATE", "PID", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	output.Table([]string{"", "ID", "PROCESS", "STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func formatPID(pid int) string {
@@ -254,6 +257,13 @@ func formatPID(pid int) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d", pid)
+}
+
+func formatPorts(ports []string) string {
+	if len(ports) == 0 {
+		return "-"
+	}
+	return strings.Join(ports, ", ")
 }
 
 func zeroStyle(value interface{}) cliui.Style {

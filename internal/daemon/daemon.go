@@ -81,6 +81,7 @@ type ProcessInfo struct {
 	Name          string
 	State         string
 	PID           int
+	Ports         []string
 	StartedAt     time.Time
 	UptimeSeconds float64
 	CPUPercent    float64
@@ -139,7 +140,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	d.scheduler.SetContext(d.ctx)
-	if err := d.reloadRegistry(); err != nil {
+	if err := d.reloadRegistryForStart(); err != nil {
 		return err
 	}
 	if err := d.writePID(); err != nil {
@@ -223,9 +224,27 @@ func (d *Daemon) shutdown() {
 }
 
 func (d *Daemon) reloadRegistry() error {
+	return d.reloadRegistryWithOptions(false)
+}
+
+func (d *Daemon) reloadRegistryForStart() error {
+	return d.reloadRegistryWithOptions(true)
+}
+
+func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	reg, err := registry.Load(d.layout.Registry)
 	if err != nil {
 		return err
+	}
+	if resetProcessIDs {
+		reg.NextProcessID = 0
+		for name, project := range reg.Projects {
+			project.ProcessIDs = nil
+			reg.Projects[name] = project
+		}
+		if err := registry.Save(d.layout.Registry, reg); err != nil {
+			return err
+		}
 	}
 	d.mu.Lock()
 	d.registry = reg
@@ -384,7 +403,7 @@ func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string
 		sort.Strings(processNames)
 		for _, processName := range processNames {
 			id := project.ProcessIDs[processName]
-			if id <= 0 {
+			if id < 0 {
 				continue
 			}
 			key := name + "/" + processName
@@ -395,8 +414,8 @@ func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string
 	}
 
 	nextID := d.registry.NextProcessID
-	if nextID <= 0 {
-		nextID = 1
+	if nextID < 0 {
+		nextID = 0
 	}
 	for id := range owners {
 		if id >= nextID {
@@ -414,7 +433,7 @@ func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string
 	for _, processName := range processNames {
 		key := projectName + "/" + processName
 		id := existing[processName]
-		if id <= 0 || owners[id] != key {
+		if id < 0 || owners[id] != key {
 			for {
 				if _, used := owners[nextID]; !used {
 					break
@@ -715,6 +734,7 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		d.mu.RUnlock()
 		if pid > 0 {
 			info.PID = pid
+			info.Ports = d.metrics.Ports(pid)
 			info.UptimeSeconds = time.Since(startedAt).Seconds()
 			sample := d.metrics.Sample(pid, every)
 			info.CPUPercent, info.RSSBytes, info.MemoryPercent = sample.CPUPercent, sample.RSSBytes, sample.MemoryPct
@@ -744,8 +764,8 @@ func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
 		return splitKey(ref)
 	}
 	id, err := strconv.Atoi(ref)
-	if err != nil || id <= 0 {
-		return "", "", fmt.Errorf("process reference must be PROJECT/PROCESS or a positive integer id")
+	if err != nil || id < 0 {
+		return "", "", fmt.Errorf("process reference must be PROJECT/PROCESS or a non-negative integer id")
 	}
 
 	d.mu.RLock()
@@ -1034,7 +1054,7 @@ func splitKey(key string) (string, string, error) {
 
 func processReferenceErrorCode(ref, fallback string) string {
 	if !strings.Contains(ref, "/") {
-		if id, err := strconv.Atoi(ref); err == nil && id > 0 {
+		if id, err := strconv.Atoi(ref); err == nil && id >= 0 {
 			return "PROCESS_NOT_FOUND"
 		}
 	}
