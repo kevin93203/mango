@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"goserve/internal/config"
+	"github.com/kevin93203/mango/internal/config"
 )
 
 type Record struct {

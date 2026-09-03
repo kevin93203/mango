@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"goserve/internal/paths"
 )
 
 type Status struct {
@@ -17,7 +15,7 @@ type Status struct {
 	Detail    string
 }
 
-func Install(layout paths.Layout, executable string) error {
+func Install(executable string) error {
 	switch runtime.GOOS {
 	case "windows":
 		return installWindows(executable)
@@ -57,7 +55,7 @@ func GetStatus() (Status, error) {
 }
 
 func installWindows(executable string) error {
-	task := exec.Command("schtasks", "/Create", "/TN", "goserve", "/TR", fmt.Sprintf("\"%s\" daemon run", executable), "/SC", "ONLOGON", "/F")
+	task := exec.Command("schtasks", "/Create", "/TN", "mango", "/TR", fmt.Sprintf("\"%s\" run", executable), "/SC", "ONLOGON", "/F")
 	if output, err := task.CombinedOutput(); err != nil {
 		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -65,7 +63,7 @@ func installWindows(executable string) error {
 }
 
 func uninstallWindows() error {
-	task := exec.Command("schtasks", "/Delete", "/TN", "goserve", "/F")
+	task := exec.Command("schtasks", "/Delete", "/TN", "mango", "/F")
 	if output, err := task.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(output)), "cannot find") {
 		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -81,14 +79,14 @@ func installLaunchd(executable string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "com.goserve.daemon.plist")
+	path := filepath.Join(dir, "com.mango.daemon.plist")
 	lines := []string{
 		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
 		"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
 		"<plist version=\"1.0\">",
 		"<dict>",
-		"  <key>Label</key><string>com.goserve.daemon</string>",
-		"  <key>ProgramArguments</key><array><string>" + xmlEscape(executable) + "</string><string>daemon</string><string>run</string></array>",
+		"  <key>Label</key><string>com.mango.daemon</string>",
+		"  <key>ProgramArguments</key><array><string>" + xmlEscape(executable) + "</string><string>run</string></array>",
 		"  <key>RunAtLoad</key><true/>",
 		"  <key>KeepAlive</key><true/>",
 		"</dict>",
@@ -109,7 +107,7 @@ func uninstallLaunchd() error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, "Library", "LaunchAgents", "com.goserve.daemon.plist")
+	path := filepath.Join(home, "Library", "LaunchAgents", "com.mango.daemon.plist")
 	_ = exec.Command("launchctl", "unload", path).Run()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
@@ -122,7 +120,7 @@ func statusLaunchd() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	path := filepath.Join(home, "Library", "LaunchAgents", "com.goserve.daemon.plist")
+	path := filepath.Join(home, "Library", "LaunchAgents", "com.mango.daemon.plist")
 	_, err = os.Stat(path)
 	return Status{Platform: "darwin", Installed: err == nil, Detail: path}, nil
 }
@@ -136,13 +134,13 @@ func installSystemd(executable string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "goserve.service")
+	path := filepath.Join(dir, "mango.service")
 	lines := []string{
 		"[Unit]",
-		"Description=goserve service manager",
+		"Description=mango service manager",
 		"",
 		"[Service]",
-		"ExecStart=" + systemdEscape(executable) + " daemon run",
+		"ExecStart=" + systemdEscape(executable) + " run",
 		"Restart=always",
 		"RestartSec=2",
 		"",
@@ -153,19 +151,19 @@ func installSystemd(executable string) error {
 		return err
 	}
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if output, err := exec.Command("systemctl", "--user", "enable", "--now", "goserve.service").CombinedOutput(); err != nil {
+	if output, err := exec.Command("systemctl", "--user", "enable", "--now", "mango.service").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
 func uninstallSystemd() error {
-	_ = exec.Command("systemctl", "--user", "disable", "--now", "goserve.service").Run()
+	_ = exec.Command("systemctl", "--user", "disable", "--now", "mango.service").Run()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".config", "systemd", "user", "goserve.service")
+	path := filepath.Join(home, ".config", "systemd", "user", "mango.service")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -178,13 +176,13 @@ func statusSystemd() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	path := filepath.Join(home, ".config", "systemd", "user", "goserve.service")
+	path := filepath.Join(home, ".config", "systemd", "user", "mango.service")
 	_, err = os.Stat(path)
 	return Status{Platform: "linux", Installed: err == nil, Detail: path}, nil
 }
 
 func statusWindows() (Status, error) {
-	output, err := exec.Command("schtasks", "/Query", "/TN", "goserve").CombinedOutput()
+	output, err := exec.Command("schtasks", "/Query", "/TN", "mango").CombinedOutput()
 	return Status{Platform: "windows", Installed: err == nil, Detail: strings.TrimSpace(string(output))}, nil
 }
 

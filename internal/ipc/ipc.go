@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: goserve daemon start")
+var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: mango daemon start")
 
 var endpointState struct {
 	sync.RWMutex

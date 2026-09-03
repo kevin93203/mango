@@ -9,22 +9,20 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
-	"goserve/internal/cliui"
-	"goserve/internal/config"
-	"goserve/internal/daemon"
-	"goserve/internal/ipc"
-	"goserve/internal/paths"
-	"goserve/internal/registry"
-	"goserve/internal/scheduler"
-	"goserve/internal/startup"
-	"goserve/internal/tui"
+	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/startup"
+	"github.com/kevin93203/mango/internal/tui"
 )
 
 const processOperationTimeout = 30 * time.Second
@@ -95,11 +93,11 @@ func main() {
 
 func usage() {
 	cliOutput.Println(strings.Join([]string{
-		"goserve - cross-platform service manager",
+		"mango - cross-platform service manager",
 		"Global options: --color=auto|always|never, --json (where supported)",
 		"",
 		"Commands:",
-		"  daemon run|start|stop|restart|status",
+		"  daemon start|stop|restart|status",
 		"  project add PATH",
 		"  project remove NAME",
 		"  project apply NAME",
@@ -119,16 +117,9 @@ func usage() {
 
 func daemonCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
-		return errors.New("daemon requires run, start, stop, restart, or status")
+		return errors.New("daemon requires start, stop, restart, or status")
 	}
 	switch args[0] {
-	case "run":
-		if err := rejectJSON("daemon run"); err != nil {
-			return err
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return daemon.New(layout).Run(ctx)
 	case "start":
 		if err := rejectJSON("daemon start"); err != nil {
 			return err
@@ -145,7 +136,9 @@ func daemonCommand(layout paths.Layout, args []string) error {
 			return err
 		}
 		if _, err := call("daemon.stop", nil); err == nil {
-			time.Sleep(200 * time.Millisecond)
+			if err := waitForDaemonStop(); err != nil {
+				return err
+			}
 		}
 		return startDaemon(layout)
 	case "status":
@@ -171,7 +164,7 @@ func startDaemon(layout paths.Layout) error {
 		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon already running"))
 		return nil
 	}
-	executable, err := os.Executable()
+	executable, err := resolveDaemonExecutable()
 	if err != nil {
 		return err
 	}
@@ -183,7 +176,7 @@ func startDaemon(layout paths.Layout) error {
 		return err
 	}
 	defer logFile.Close()
-	cmd := exec.Command(executable, "daemon", "run")
+	cmd := exec.Command(executable, "run")
 	configureDaemonCommand(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -217,6 +210,51 @@ func waitForDaemon(layout paths.Layout) error {
 		return fmt.Errorf("daemon did not become ready; recent daemon log:\n%s", message)
 	}
 	return errors.New("daemon did not become ready within 5 seconds")
+}
+
+func waitForDaemonStop() error {
+	return waitForUnavailable(func() error {
+		_, err := callWithTimeout("health", nil, 200*time.Millisecond)
+		return err
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
+func waitForUnavailable(health func() error, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := health(); err != nil {
+			return nil
+		}
+		time.Sleep(interval)
+	}
+	return fmt.Errorf("daemon did not stop within %s", timeout)
+}
+
+func resolveDaemonExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		executable = ""
+	}
+	return resolveDaemonExecutableFrom(executable, runtime.GOOS, exec.LookPath)
+}
+
+func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(string) (string, error)) (string, error) {
+	name := "mangod"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	if cliExecutable != "" {
+		candidate := filepath.Join(filepath.Dir(cliExecutable), name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && (goos == "windows" || info.Mode()&0o111 != 0) {
+			return candidate, nil
+		}
+	}
+	if lookPath != nil {
+		if path, err := lookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("mangod executable not found; install mango and mangod together or add %s to PATH", name)
 }
 
 func projectCommand(layout paths.Layout, args []string) error {
@@ -348,7 +386,7 @@ func listCommand() error {
 	if err != nil {
 		return err
 	}
-	var items []daemon.ProcessInfo
+	var items []api.ServiceInfo
 	if err := decodeData(response.Data, &items); err != nil {
 		return err
 	}
@@ -370,7 +408,7 @@ func statusCommand(args []string) error {
 	if jsonOutput {
 		return cliOutput.JSON(response.Data)
 	}
-	var item daemon.ProcessInfo
+	var item api.ServiceInfo
 	if err := decodeData(response.Data, &item); err != nil {
 		return err
 	}
@@ -381,9 +419,9 @@ func statusCommand(args []string) error {
 func processCommand(command string, args []string) error {
 	if len(args) != 1 {
 		if len(args) > 1 && command != "logs" && containsArgument(args[1:], "--follow") {
-			return fmt.Errorf("--follow is only supported by logs; try: goserve logs %s --follow", args[0])
+			return fmt.Errorf("--follow is only supported by logs; try: mango logs %s --follow", args[0])
 		}
-		return fmt.Errorf("invalid %s arguments: expected one PROJECT/SERVICE or ID, for example: goserve %s demo/api", command, command)
+		return fmt.Errorf("invalid %s arguments: expected one PROJECT/SERVICE or ID, for example: mango %s demo/api", command, command)
 	}
 	response, err := callWithTimeout("service."+command, struct{ Key string }{args[0]}, processOperationTimeout)
 	if err != nil {
@@ -580,7 +618,7 @@ func scheduleCommand(args []string) error {
 	}
 	switch method {
 	case "schedule.list":
-		var schedules []daemon.ScheduleInfo
+		var schedules []api.ScheduleInfo
 		if err := decodeData(response.Data, &schedules); err != nil {
 			return err
 		}
@@ -610,11 +648,11 @@ func startupCommand(layout paths.Layout, args []string) error {
 		if err := rejectJSON("startup install"); err != nil {
 			return err
 		}
-		executable, err := os.Executable()
+		executable, err := resolveDaemonExecutable()
 		if err != nil {
 			return err
 		}
-		if err := startup.Install(layout, executable); err != nil {
+		if err := startup.Install(executable); err != nil {
 			return err
 		}
 		cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration installed"))
@@ -655,12 +693,18 @@ func doctorCommand(layout paths.Layout) error {
 			daemonData = decoded
 		}
 	}
+	daemonExecutable, daemonExecutableErr := resolveDaemonExecutable()
 	startupStatus, startupErr := startup.GetStatus()
 	if jsonOutput {
 		report := map[string]interface{}{
 			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry,
 			"registry_ok": registryOK, "registry_error": registryError,
 			"daemon": daemonData,
+		}
+		if daemonExecutableErr == nil {
+			report["daemon_executable"] = daemonExecutable
+		} else {
+			report["daemon_executable_error"] = daemonExecutableErr.Error()
 		}
 		if startupErr == nil {
 			report["startup"] = startupStatus
@@ -670,7 +714,7 @@ func doctorCommand(layout paths.Layout) error {
 		return cliOutput.JSON(report)
 	}
 
-	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "goserve doctor"))
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "mango doctor"))
 	cliOutput.KeyValues([][]cliui.Cell{
 		{{Text: "platform"}, {Text: runtime.GOOS}},
 		{{Text: "root"}, {Text: layout.Root}},
@@ -678,6 +722,11 @@ func doctorCommand(layout paths.Layout) error {
 		{{Text: "registry status"}, {Text: doctorStatus(registryOK, registryError)}},
 		{{Text: "daemon"}, {Text: doctorStatus(daemonData["status"] == "ok" || daemonData["status"] == "degraded", fmt.Sprint(daemonData["status"]))}},
 	})
+	if daemonExecutableErr == nil {
+		cliOutput.KeyValues([][]cliui.Cell{{{Text: "daemon binary"}, {Text: daemonExecutable}}})
+	} else {
+		cliOutput.KeyValues([][]cliui.Cell{{{Text: "daemon binary"}, {Text: daemonExecutableErr.Error(), Style: cliui.StyleError}}})
+	}
 	if startupErr == nil {
 		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: doctorStatus(startupStatus.Installed, startupStatus.Detail)}}})
 	} else {
@@ -708,12 +757,12 @@ func decodeData(data interface{}, target interface{}) error {
 	return json.Unmarshal(encoded, target)
 }
 
-func printServiceTable(items []daemon.ProcessInfo) {
+func printServiceTable(items []api.ServiceInfo) {
 	if len(items) == 0 {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No services found."))
 		return
 	}
-	listRows := daemon.FlattenProcessList(items)
+	listRows := api.FlattenServiceList(items)
 	rows := make([][]cliui.Cell, 0, len(listRows))
 	for _, item := range listRows {
 		id := "-"
@@ -746,7 +795,7 @@ func printServiceTable(items []daemon.ProcessInfo) {
 	cliOutput.Table([]string{"ID", "SERVICE", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
-func printProcessTable(items []daemon.ProcessInfo) { printServiceTable(items) }
+func printProcessTable(items []api.ServiceInfo) { printServiceTable(items) }
 
 func displayString(value string) string {
 	if value == "" {
@@ -755,7 +804,7 @@ func displayString(value string) string {
 	return value
 }
 
-func healthStatus(info *daemon.HealthInfo) string {
+func healthStatus(info *api.HealthInfo) string {
 	if info == nil || info.Status == "" {
 		return "-"
 	}
@@ -817,7 +866,7 @@ func printProjectTable(projects []registry.Project) {
 	cliOutput.Table([]string{"PROJECT", "STATUS", "CONFIG PATH", "VERSION", "LAST APPLIED"}, rows)
 }
 
-func printProcessDetail(item daemon.ProcessInfo) {
+func printProcessDetail(item api.ServiceInfo) {
 	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
 	lastExit := "-"
 	if item.LastExitCode != nil {
@@ -857,7 +906,7 @@ func printProcessDetail(item daemon.ProcessInfo) {
 	cliOutput.KeyValues(rows)
 }
 
-func printScheduleTable(schedules []daemon.ScheduleInfo) {
+func printScheduleTable(schedules []api.ScheduleInfo) {
 	if len(schedules) == 0 {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No schedules configured."))
 		return

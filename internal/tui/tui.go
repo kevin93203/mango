@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/ipc"
 	"golang.org/x/term"
-	"goserve/internal/cliui"
-	"goserve/internal/daemon"
-	"goserve/internal/ipc"
 )
 
 func Run(output *cliui.Renderer) error {
@@ -44,7 +44,7 @@ func Run(output *cliui.Renderer) error {
 	defer ticker.Stop()
 	selected := 0
 	var lastErr string
-	var items []daemon.ProcessInfo
+	var items []api.ServiceInfo
 	draw := func(refresh bool) {
 		if refresh {
 			current, err := list()
@@ -62,7 +62,7 @@ func Run(output *cliui.Renderer) error {
 			}
 		}
 		output.Printf("\x1b[H\x1b[2J")
-		output.Println(output.Text(cliui.StyleHeader, "goserve monitor"), output.Text(cliui.StyleMuted, "(q quit, up/down or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)"))
+		output.Println(output.Text(cliui.StyleHeader, "mango monitor"), output.Text(cliui.StyleMuted, "(q quit, up/down or j/k select, s stop, r restart, e enable, d disable, l logs, Enter detail)"))
 		printTable(output, items, selected)
 		if lastErr != "" {
 			output.Printf("\n%s\n", output.ErrorText("error: "+lastErr))
@@ -145,7 +145,7 @@ func readInput(input chan<- byte) {
 	}
 }
 
-func list() ([]daemon.ProcessInfo, error) {
+func list() ([]api.ServiceInfo, error) {
 	request, _ := ipc.NewRequest("service.list", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -157,7 +157,7 @@ func list() ([]daemon.ProcessInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var items []daemon.ProcessInfo
+	var items []api.ServiceInfo
 	return items, json.Unmarshal(data, &items)
 }
 
@@ -200,7 +200,7 @@ func showLogs(output *cliui.Renderer, key string, input <-chan byte) error {
 	return nil
 }
 
-func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan byte) error {
+func showDetail(output *cliui.Renderer, item api.ServiceInfo, input <-chan byte) error {
 	output.Printf("\x1b[2J\x1b[H")
 	lastExit := "-"
 	if item.LastExitCode != nil {
@@ -238,19 +238,19 @@ func showDetail(output *cliui.Renderer, item daemon.ProcessInfo, input <-chan by
 	return nil
 }
 
-func healthStatus(info *daemon.HealthInfo) string {
+func healthStatus(info *api.HealthInfo) string {
 	if info == nil || info.Status == "" {
 		return "-"
 	}
 	return info.Status
 }
 
-func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int) {
+func printTable(output *cliui.Renderer, items []api.ServiceInfo, selected int) {
 	if len(items) == 0 {
 		output.Println(output.Text(cliui.StyleMuted, "No services found."))
 		return
 	}
-	listRows := daemon.FlattenProcessList(items)
+	listRows := api.FlattenServiceList(items)
 	rows := make([][]cliui.Cell, 0, len(listRows))
 	for _, item := range listRows {
 		marker := " "

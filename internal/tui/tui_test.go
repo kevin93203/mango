@@ -5,16 +5,16 @@ import (
 	"strings"
 	"testing"
 
-	"goserve/internal/cliui"
-	"goserve/internal/daemon"
+	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/cliui"
 )
 
 func TestPrintTableShowsChildRowsWithoutSelectingThem(t *testing.T) {
 	var output bytes.Buffer
 	renderer := cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
-	printTable(renderer, []daemon.ProcessInfo{{
-		ID: 0, Project: "demo", Name: "api", State: daemon.StateRunning, PID: 100,
-		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
+	printTable(renderer, []api.ServiceInfo{{
+		ID: 0, Project: "demo", Name: "api", State: api.StateRunning, PID: 100,
+		Children: []api.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}}, 0)
 
 	text := output.String()

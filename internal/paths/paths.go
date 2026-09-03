@@ -17,7 +17,7 @@ type Layout struct {
 }
 
 func Default() (Layout, error) {
-	if root := os.Getenv("GOSERVE_HOME"); root != "" {
+	if root := os.Getenv("MANGO_HOME"); root != "" {
 		root, err := filepath.Abs(root)
 		if err != nil {
 			return Layout{}, err
@@ -25,7 +25,7 @@ func Default() (Layout, error) {
 		return Layout{
 			Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 			State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-			SocketPath: filepath.Join(root, "runtime", "goserve.sock"),
+			SocketPath: filepath.Join(root, "runtime", "mango.sock"),
 			DaemonLog:  filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 		}, nil
 	}
@@ -37,13 +37,13 @@ func Default() (Layout, error) {
 	if err != nil {
 		return Layout{}, err
 	}
-	root := filepath.Join(config, "goserve")
-	data := filepath.Join(cache, "goserve")
+	root := filepath.Join(config, "mango")
+	data := filepath.Join(cache, "mango")
 	runtime := filepath.Join(root, "runtime")
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),
 		State: filepath.Join(data, "state"), Registry: filepath.Join(root, "projects.json"),
-		SocketPath: filepath.Join(runtime, "goserve.sock"),
+		SocketPath: filepath.Join(runtime, "mango.sock"),
 		DaemonLog:  filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),
 	}, nil
 }

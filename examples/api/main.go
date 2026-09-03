@@ -36,7 +36,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "hello from goserve api pid=%d\n", os.Getpid())
+		_, _ = fmt.Fprintf(w, "hello from mango api pid=%d\n", os.Getpid())
 	})
 
 	server := &http.Server{
