@@ -491,24 +491,25 @@ func followLogs(key, stream string, tail int) error {
 		for _, item := range streams {
 			if first {
 				response, err := call("logs.read", struct {
-					Key    string
-					Stream string
-					Tail   int
-				}{key, item, tail})
+					Key           string
+					Stream        string
+					Tail          int
+					IncludeOffset bool
+				}{key, item, tail, true})
 				if err != nil {
 					return err
 				}
-				var data map[string]string
+				var data followLogResponse
 				if err := decodeData(response.Data, &data); err != nil {
 					return err
 				}
-				if data["data"] != "" {
+				if data.Data != "" {
 					if stream == "all" {
 						printLogLabel(item)
 					}
-					printLogContent(item, data["data"])
+					printLogContent(item, data.Data)
 				}
-				offsets[item] = -1
+				offsets[item] = data.NextOffset
 				continue
 			}
 			response, err := call("logs.read", struct {
