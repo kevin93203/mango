@@ -114,11 +114,11 @@ func TestCommandExecutorSupportsCMDAndShellWithEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX command names")
 	}
-	executor := CommandExecutor{Env: []string{"GOSERVE_HEALTH_TEST=ok"}}
+	executor := CommandExecutor{Env: []string{"MANGO_HEALTH_TEST=ok"}}
 	if err := executor.Run(context.Background(), []string{"CMD", "true"}); err != nil {
 		t.Fatalf("CMD = %v", err)
 	}
-	if err := executor.Run(context.Background(), []string{"CMD-SHELL", "test \"$GOSERVE_HEALTH_TEST\" = ok"}); err != nil {
+	if err := executor.Run(context.Background(), []string{"CMD-SHELL", "test \"$MANGO_HEALTH_TEST\" = ok"}); err != nil {
 		t.Fatalf("CMD-SHELL = %v", err)
 	}
 }

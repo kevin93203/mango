@@ -15,29 +15,30 @@ import (
 	"sync"
 	"time"
 
-	"goserve/internal/config"
-	"goserve/internal/health"
-	"goserve/internal/ipc"
-	"goserve/internal/logging"
-	"goserve/internal/metrics"
-	"goserve/internal/paths"
-	"goserve/internal/process"
-	"goserve/internal/registry"
-	"goserve/internal/scheduler"
+	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/health"
+	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/logging"
+	"github.com/kevin93203/mango/internal/metrics"
+	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/process"
+	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/scheduler"
 )
 
 const (
-	StateStopped    = "stopped"
-	StateStarting   = "starting"
-	StateWaiting    = "waiting"
-	StateRunning    = "running"
-	StateStopping   = "stopping"
-	StateExited     = "exited"
-	StateBackingOff = "backing_off"
-	StateCrashLoop  = "crash_loop"
-	StateFailed     = "failed"
-	StateDisabled   = "disabled"
-	StateUnknown    = "unknown"
+	StateStopped    = api.StateStopped
+	StateStarting   = api.StateStarting
+	StateWaiting    = api.StateWaiting
+	StateRunning    = api.StateRunning
+	StateStopping   = api.StateStopping
+	StateExited     = api.StateExited
+	StateBackingOff = api.StateBackingOff
+	StateCrashLoop  = api.StateCrashLoop
+	StateFailed     = api.StateFailed
+	StateDisabled   = api.StateDisabled
+	StateUnknown    = api.StateUnknown
 )
 
 type Daemon struct {
@@ -79,7 +80,7 @@ type managedProcess struct {
 	restarts     int
 	failures     []time.Time
 	healthCancel context.CancelFunc
-	health       *HealthInfo
+	health       *api.HealthInfo
 }
 
 type restartCandidate struct {
@@ -87,110 +88,18 @@ type restartCandidate struct {
 	depth   int
 }
 
-type ProcessInfo struct {
-	ID            int
-	Project       string
-	Name          string
-	State         string
-	PID           int
-	Ports         []string
-	StartedAt     time.Time
-	UptimeSeconds float64
-	CPUPercent    float64
-	RSSBytes      uint64
-	MemoryPercent float64
-	RestartCount  int
-	LastExitCode  *int
-	LastError     string
-	StdoutPath    string
-	StderrPath    string
-	CommandLine   string
-	Disabled      bool
-	Health        *HealthInfo
-	OSState       string
-	WaitingOn     []DependencyStatus `json:"WaitingOn,omitempty"`
-	Children      []ChildProcessInfo `json:"Children,omitempty"`
-}
-
-// ServiceInfo is the public service-oriented name for ProcessInfo. The alias
-// keeps existing in-process callers source-compatible while IPC/CLI expose
-// service terminology.
-type ServiceInfo = ProcessInfo
-
-// DependencyStatus explains why a service remains in the waiting lifecycle
-// state. It is diagnostic data; dependency conditions never change HEALTH.
-type DependencyStatus struct {
-	Service   string `json:"Service"`
-	Condition string `json:"Condition"`
-	State     string `json:"State"`
-	Health    string `json:"Health,omitempty"`
-}
-
-type HealthInfo struct {
-	Status        string            `json:"Status"`
-	Policy        string            `json:"Policy,omitempty"`
-	Checks        []HealthCheckInfo `json:"Checks,omitempty"`
-	FailingStreak int               `json:"FailingStreak,omitempty"`
-	LastCheckedAt *time.Time        `json:"LastCheckedAt,omitempty"`
-	LastSuccessAt *time.Time        `json:"LastSuccessAt,omitempty"`
-	LastError     string            `json:"LastError,omitempty"`
-}
-
-type HealthCheckInfo struct {
-	Name          string     `json:"Name"`
-	Status        string     `json:"Status"`
-	FailingStreak int        `json:"FailingStreak"`
-	LastCheckedAt *time.Time `json:"LastCheckedAt,omitempty"`
-	LastSuccessAt *time.Time `json:"LastSuccessAt,omitempty"`
-	LastError     string     `json:"LastError,omitempty"`
-}
-
-type ChildProcessInfo struct {
-	PID           int
-	ParentPID     int
-	Depth         int
-	Name          string
-	CommandLine   string
-	State         *string
-	OSState       string
-	CPUPercent    float64
-	RSSBytes      uint64
-	MemoryPercent float64
-	Ports         []string
-	Children      []ChildProcessInfo `json:"Children,omitempty"`
-}
-
-type ChildServiceInfo = ChildProcessInfo
-
-type ProcessListRow struct {
-	ParentIndex   int
-	Managed       bool
-	ID            int
-	Project       string
-	Name          string
-	Depth         int
-	PID           int
-	Ports         []string
-	State         string
-	Health        string
-	OSState       string
-	CPUPercent    float64
-	RSSBytes      uint64
-	MemoryPercent float64
-	RestartCount  int
-}
-
-type ServiceListRow = ProcessListRow
-
-type ScheduleInfo struct {
-	Project     string
-	Name        string
-	Cron        string
-	Timezone    string
-	Action      string
-	Target      string
-	Concurrency string
-}
+// Aliases preserve the daemon's internal implementation while keeping
+// client-facing data types in the dependency-free internal/api package.
+type ProcessInfo = api.ServiceInfo
+type ServiceInfo = api.ServiceInfo
+type DependencyStatus = api.DependencyStatus
+type HealthInfo = api.HealthInfo
+type HealthCheckInfo = api.HealthCheckInfo
+type ChildProcessInfo = api.ChildProcessInfo
+type ChildServiceInfo = api.ChildProcessInfo
+type ProcessListRow = api.ServiceListRow
+type ServiceListRow = api.ServiceListRow
+type ScheduleInfo = api.ScheduleInfo
 
 type logRequest struct {
 	Key           string

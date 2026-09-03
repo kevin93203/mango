@@ -1,6 +1,6 @@
-# goserve
+# Mango
 
-goserve 是使用 Go 開發的跨平台 CLI service manager，透過背景 daemon 管理任何可執行檔，不限定 Node.js。
+mango 是使用 Go 開發的跨平台 service manager：`mango` CLI 透過 `mangod` 背景 daemon 管理任何可執行檔，不限定 Node.js。
 
 支援 Windows、Linux 與 macOS，主要功能包括：
 
@@ -11,28 +11,32 @@ goserve 是使用 Go 開發的跨平台 CLI service manager，透過背景 daemo
 - 五欄位 cron 排程與 IANA timezone
 - Unix Domain Socket／Windows Named Pipe 本機 IPC
 - Windows Task Scheduler、Linux systemd user、macOS launchd 每使用者開機自啟
-- 互動式 goserve monitor
+- 互動式 mango monitor
 
 ## 安裝與建置
 
 直接執行：
 
 ~~~powershell
-go run ./cmd/goserve --help
+go run ./cmd/mango --help
 ~~~
 
 建置可執行檔：
 
 ~~~powershell
 New-Item -ItemType Directory -Force bin
-go build -o bin/goserve.exe ./cmd/goserve
+go build -o bin/mango.exe ./cmd/mango
+go build -o bin/mangod.exe ./cmd/mangod
 ~~~
 
 Linux／macOS：
 
 ~~~bash
 mkdir -p bin
-go build -o bin/goserve ./cmd/goserve
+go build -o bin/mango ./cmd/mango
+go build -o bin/mangod ./cmd/mangod
+
+正式安裝時請同時提供兩個 binary，並放在同一個目錄，讓 `mango daemon start` 能優先找到相同版本的 `mangod`。
 ~~~
 
 測試與靜態檢查：
@@ -46,14 +50,14 @@ go vet ./...
 
 預設使用作業系統的 user config／cache 目錄：
 
-- Windows：%APPDATA%\goserve 與 %LOCALAPPDATA%\goserve
-- Linux：$XDG_CONFIG_HOME/goserve、$XDG_CACHE_HOME/goserve 或 user home fallback
-- macOS：~/Library/Application Support/goserve 與 user cache 目錄
+- Windows：%APPDATA%\mango 與 %LOCALAPPDATA%\mango
+- Linux：$XDG_CONFIG_HOME/mango、$XDG_CACHE_HOME/mango 或 user home fallback
+- macOS：~/Library/Application Support/mango 與 user cache 目錄
 
-測試或需要隔離環境時，可以設定 GOSERVE_HOME：
+測試或需要隔離環境時，可以設定 MANGO_HOME：
 
 ~~~powershell
-$env:GOSERVE_HOME = "C:\temp\goserve-test"
+$env:MANGO_HOME = "C:\temp\mango-test"
 ~~~
 
 此時 registry、runtime、logs、state 都會放在該目錄下。
@@ -61,11 +65,11 @@ $env:GOSERVE_HOME = "C:\temp\goserve-test"
 主要內容：
 
 ~~~text
-GOSERVE_HOME/
+MANGO_HOME/
 ├─ projects.json
 ├─ runtime/
 │  ├─ daemon.pid
-│  └─ goserve.sock       # Unix；Windows 使用 Named Pipe
+│  └─ mango.sock       # Unix；Windows 使用 Named Pipe
 ├─ logs/
 │  └─ <project>/<service>/
 └─ state/
@@ -76,40 +80,40 @@ GOSERVE_HOME/
 ### 1. 驗證設定並註冊 project
 
 ~~~powershell
-goserve config validate .\goserve.example.toml
-goserve project add .\goserve.example.toml
+mango config validate .\mango.example.toml
+mango project add .\mango.example.toml
 ~~~
 
-project add 會把 TOML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，goserve 不會覆蓋原始 TOML。
+project add 會把 TOML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 TOML。
 
 ### 2. 啟動 daemon
 
 前景執行，適合開發與除錯：
 
 ~~~powershell
-goserve daemon run
+mangod run
 ~~~
 
 背景執行：
 
 ~~~powershell
-goserve daemon start
+mango daemon start
 ~~~
 
 ### 3. 套用設定與查看 service
 
 ~~~powershell
-goserve project apply demo
-goserve list
-goserve status demo/api
+mango project apply demo
+mango list
+mango status demo/api
 ~~~
 
 ### 4. 查看日誌與監控
 
 ~~~powershell
-goserve logs demo/api --stream all --tail 50
-goserve logs demo/api --stream stdout --follow
-goserve monitor
+mango logs demo/api --stream all --tail 50
+mango logs demo/api --stream stdout --follow
+mango monitor
 ~~~
 
 ## CLI 指令總覽
@@ -117,7 +121,7 @@ goserve monitor
 一般語法：
 
 ~~~text
-goserve <command> [subcommand] [arguments] [options]
+mango <command> [subcommand] [arguments] [options]
 ~~~
 
 所有指令成功時通常回傳 exit code 0；參數錯誤、daemon 無法連線或操作失敗時回傳非零 exit code。
@@ -134,9 +138,9 @@ goserve <command> [subcommand] [arguments] [options]
 範例：
 
 ~~~powershell
-goserve --color=always list
-goserve list --color=never
-goserve status demo/api --json
+mango --color=always list
+mango list --color=never
+mango status demo/api --json
 ~~~
 
 `--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
@@ -150,22 +154,22 @@ goserve status demo/api --json
 管理背景 daemon。
 
 ~~~text
-goserve daemon run
-goserve daemon start
-goserve daemon stop
-goserve daemon restart
-goserve daemon status
+mangod run
+mango daemon start
+mango daemon stop
+mango daemon restart
+mango daemon status
 ~~~
 
 | 指令 | 說明 |
 | --- | --- |
-| run | 在目前終端以前景模式啟動 daemon，按 Ctrl+C 停止。 |
+| `mangod run` | 在目前終端以前景模式啟動 daemon，按 Ctrl+C 停止。 |
 | start | 背景啟動 daemon；若已執行則顯示 already running。 |
 | stop | 透過本機 IPC 要求 daemon 停止。 |
-| restart | 停止目前 daemon 後重新背景啟動。 |
+| restart | 停止目前 daemon，等待 IPC endpoint 關閉後重新背景啟動。 |
 | status | 顯示 daemon PID、API version 與狀態；daemon 未執行時顯示 stopped。若個別 project 設定無法載入，會顯示 degraded 與 config_errors，但 daemon 仍會繼續服務其他 project。 |
 
-daemon 目前沒有額外參數。
+`mangod` 目前只有 `run` 入口，沒有其他參數。`mango daemon` 只負責控制與查詢 daemon。
 
 daemon IPC 的 service lifecycle method 為 `service.list`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
 
@@ -185,22 +189,22 @@ api version | 1
 若需要原始結構化資料：
 
 ~~~powershell
-goserve daemon status --json
+mango daemon status --json
 ~~~
 
 需要 daemon 提供服務的指令（例如 `list`、`status`、service action 與 `logs`）若無法連線，會提示：
 
 ~~~text
-daemon is not running; start it with: goserve daemon start
+daemon is not running; start it with: mango daemon start
 ~~~
 
 請先啟動 daemon，再執行這些指令。`--follow` 只適用於 `logs`，例如：
 
 ~~~powershell
-goserve logs demo/api --follow
+mango logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `goserve list` 或 `goserve status PROJECT/SERVICE` 取得，例如 `goserve stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango list` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
 
 ### project
 
@@ -209,7 +213,7 @@ goserve logs demo/api --follow
 #### project add
 
 ~~~text
-goserve project add PATH
+mango project add PATH
 ~~~
 
 參數：
@@ -223,14 +227,14 @@ project name 只能使用英數字、.、_、-，且第一個字元必須是英�
 範例：
 
 ~~~powershell
-goserve project add .\goserve.example.toml
-goserve project add C:\apps\demo\goserve.toml
+mango project add .\mango.example.toml
+mango project add C:\apps\demo\mango.toml
 ~~~
 
 #### project remove
 
 ~~~text
-goserve project remove NAME
+mango project remove NAME
 ~~~
 
 | 參數 | 必填 | 說明 |
@@ -242,19 +246,19 @@ goserve project remove NAME
 #### project list
 
 ~~~text
-goserve project list
+mango project list
 ~~~
 
 列出 registry 中的 project、設定檔路徑、啟用狀態與最後套用時間，需要 daemon 執行。
 
-使用 `goserve project list --json` 可輸出 JSON。
+使用 `mango project list --json` 可輸出 JSON。
 
 #### project apply
 
 重新讀取 project TOML 並套用變更。
 
 ~~~text
-goserve project apply NAME
+mango project apply NAME
 ~~~
 
 | 參數 | 必填 | 說明 |
@@ -268,7 +272,7 @@ goserve project apply NAME
 只解析與驗證 TOML，不啟動或停止 service。
 
 ~~~text
-goserve config validate PATH
+mango config validate PATH
 ~~~
 
 | 參數 | 必填 | 說明 |
@@ -290,14 +294,14 @@ goserve config validate PATH
 列出所有 project 的 service 與全域 service id。每次 daemon 啟動或重啟時，id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 service 的 id。
 
 ~~~text
-goserve list
+mango list
 ~~~
 
 顯示：
 
 - service id
 - project/service
-- goserve lifecycle state
+- mango lifecycle state
 - health
 - root PID 的 OS state
 - PID
@@ -307,20 +311,20 @@ goserve list
 - memory percentage
 - restart count
 
-若 service 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 goserve service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
+若 service 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
 
-`STATE` 是 goserve lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
+`STATE` 是 mango lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
 
 文字表格欄位順序為：`ID | SERVICE | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
 
-預設使用彩色表格；可用 `goserve list --color=never` 取得不含顏色的穩定文字輸出，或使用 `goserve list --json` 取得 JSON。
+預設使用彩色表格；可用 `mango list --color=never` 取得不含顏色的穩定文字輸出，或使用 `mango list --json` 取得 JSON。
 
 ### status
 
 查看單一 service 的完整狀態。
 
 ~~~text
-goserve status PROJECT/SERVICE|ID
+mango status PROJECT/SERVICE|ID
 ~~~
 
 必要參數：
@@ -331,18 +335,18 @@ goserve status PROJECT/SERVICE|ID
 
 輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
 
-`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/SERVICE|ID --json` 可取得原始 JSON。
+`status` 預設輸出 key/value detail table；使用 `mango status PROJECT/SERVICE|ID --json` 可取得原始 JSON。
 
 ### service lifecycle
 
 以下指令都使用相同語法：
 
 ~~~text
-goserve start PROJECT/SERVICE|ID
-goserve stop PROJECT/SERVICE|ID
-goserve restart PROJECT/SERVICE|ID
-goserve enable PROJECT/SERVICE|ID
-goserve disable PROJECT/SERVICE|ID
+mango start PROJECT/SERVICE|ID
+mango stop PROJECT/SERVICE|ID
+mango restart PROJECT/SERVICE|ID
+mango enable PROJECT/SERVICE|ID
+mango disable PROJECT/SERVICE|ID
 ~~~
 
 | 指令 | 說明 |
@@ -362,8 +366,8 @@ Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Wi
 查看 service 的 stdout／stderr。
 
 ~~~text
-goserve logs TARGET [--stream STREAM] [--tail N] [--follow]
-goserve logs clear TARGET
+mango logs TARGET [--stream STREAM] [--tail N] [--follow]
+mango logs clear TARGET
 ~~~
 
 參數：
@@ -375,7 +379,7 @@ goserve logs clear TARGET
 | --tail | 100 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
 
-`goserve logs clear TARGET` 會清除指定 service 或 schedule 的 stdout／stderr
+`mango logs clear TARGET` 會清除指定 service 或 schedule 的 stdout／stderr
 目前日誌與所有輪替檔。若 service 仍在執行，會保留開啟中的 writer，清除後的
 新輸出仍會繼續寫入；沒有日誌檔時視為成功。
 
@@ -393,7 +397,7 @@ goserve logs clear TARGET
 啟動互動式終端監控：
 
 ~~~text
-goserve monitor
+mango monitor
 ~~~
 
 主畫面每秒更新 service 狀態、health、OS state、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示。
@@ -417,9 +421,9 @@ goserve monitor
 查看、手動執行排程與查詢排程歷史。
 
 ~~~text
-goserve schedule list
-goserve schedule history
-goserve schedule run PROJECT/SCHEDULE
+mango schedule list
+mango schedule history
+mango schedule run PROJECT/SCHEDULE
 ~~~
 
 | 指令 | 說明 |
@@ -433,26 +437,26 @@ schedule run 的 key 格式為 PROJECT/SCHEDULE。
 `action = "run"` 的 schedule 可直接使用 schedule key 查看日誌：
 
 ~~~powershell
-goserve logs PROJECT/SCHEDULE --stream all
-goserve logs PROJECT/SCHEDULE --stream all --follow
+mango logs PROJECT/SCHEDULE --stream all
+mango logs PROJECT/SCHEDULE --stream all --follow
 ~~~
 
-例如 `goserve logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 service 的日誌。
+例如 `mango logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 service 的日誌。
 
 ### startup
 
 管理每使用者開機自啟：
 
 ~~~text
-goserve startup install
-goserve startup uninstall
-goserve startup status
+mango startup install
+mango startup uninstall
+mango startup status
 ~~~
 
 | 指令 | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | install | User-level Task Scheduler | systemd --user | launchd LaunchAgent |
-| uninstall | 移除 goserve task | 停用並移除 user service | unload 並移除 LaunchAgent |
+| uninstall | 移除 mango task | 停用並移除 user service | unload 並移除 LaunchAgent |
 | status | 查詢 task | 檢查 user service 檔案 | 檢查 plist 檔案 |
 
 startup service 只會啟動 daemon；service 是否啟動仍由 TOML 的 autostart 決定。
@@ -462,23 +466,23 @@ startup service 只會啟動 daemon；service 是否啟動仍由 TOML 的 autost
 檢查目前環境：
 
 ~~~text
-goserve doctor
+mango doctor
 ~~~
 
-會顯示作業系統、goserve root、registry 路徑、daemon 是否可連線與 startup 是否已安裝。
+會顯示作業系統、mango root、registry 路徑、daemon 是否可連線與 startup 是否已安裝。
 
 ### help
 
 ~~~text
-goserve help
-goserve --help
+mango help
+mango --help
 ~~~
 
 顯示 CLI 指令總覽。
 
 ## TOML 設定參考
 
-完整範例請參考 [goserve.example.toml](goserve.example.toml)。
+完整範例請參考 [mango.example.toml](mango.example.toml)。
 
 ### 根欄位
 
@@ -727,46 +731,46 @@ go run ./examples/one-task --iterations 5 --interval 500ms
 啟動 API 與註冊 task：
 
 ~~~powershell
-goserve project add .\goserve.example.toml
-goserve daemon start
-goserve project apply demo
-goserve list
+mango project add .\mango.example.toml
+mango daemon start
+mango project apply demo
+mango list
 ~~~
 
 執行一次性 task：
 
 ~~~powershell
-goserve start demo/one-task
-goserve logs demo/one-task --stream all --follow
+mango start demo/one-task
+mango logs demo/one-task --stream all --follow
 ~~~
 
 測試排程 task：
 
 ~~~powershell
-goserve schedule list
-goserve schedule run demo/nightly-job
-goserve schedule history
+mango schedule list
+mango schedule run demo/nightly-job
+mango schedule history
 ~~~
 
 開機自啟：
 
 ~~~powershell
-goserve startup install
-goserve startup status
+mango startup install
+mango startup status
 ~~~
 
 ## 開發與驗證
 
 ~~~powershell
 go test ./...
-go test -race ./internal/...
+go test -race ./...
 go vet ./...
 ~~~
 
 跨平台 build：
 
 ~~~powershell
-$env:GOOS = "windows"; $env:GOARCH = "amd64"; go build -o bin/goserve-windows-amd64.exe ./cmd/goserve
-$env:GOOS = "linux";   $env:GOARCH = "amd64"; go build -o bin/goserve-linux-amd64 ./cmd/goserve
-$env:GOOS = "darwin";  $env:GOARCH = "arm64"; go build -o bin/goserve-darwin-arm64 ./cmd/goserve
+$env:GOOS = "windows"; $env:GOARCH = "amd64"; go build -o bin/mango-windows-amd64.exe ./cmd/mango; go build -o bin/mangod-windows-amd64.exe ./cmd/mangod
+$env:GOOS = "linux";   $env:GOARCH = "amd64"; go build -o bin/mango-linux-amd64 ./cmd/mango; go build -o bin/mangod-linux-amd64 ./cmd/mangod
+$env:GOOS = "darwin";  $env:GOARCH = "arm64"; go build -o bin/mango-darwin-arm64 ./cmd/mango; go build -o bin/mangod-darwin-arm64 ./cmd/mangod
 ~~~

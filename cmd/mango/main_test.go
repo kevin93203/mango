@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"goserve/internal/cliui"
-	"goserve/internal/daemon"
-	"goserve/internal/ipc"
-	"goserve/internal/paths"
-	"goserve/internal/registry"
+	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/registry"
 )
 
 func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
@@ -22,9 +22,9 @@ func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
 	defer func() { cliOutput = previousOutput }()
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 
-	printProcessTable([]daemon.ProcessInfo{{
-		ID: 0, Project: "demo", Name: "api", State: daemon.StateRunning, PID: 100,
-		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
+	printProcessTable([]api.ServiceInfo{{
+		ID: 0, Project: "demo", Name: "api", State: api.StateRunning, PID: 100,
+		Children: []api.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}})
 
 	text := output.String()

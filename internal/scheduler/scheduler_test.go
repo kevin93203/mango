@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"goserve/internal/config"
+	"github.com/kevin93203/mango/internal/config"
 )
 
 func TestRunNowRecordsHistory(t *testing.T) {

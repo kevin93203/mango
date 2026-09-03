@@ -9,7 +9,7 @@ import (
 
 func TestLoadNestedHealthcheckAndDependsOn(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "goserve.toml")
+	path := filepath.Join(dir, "mango.toml")
 	content := `version = 2
 project = "demo"
 
@@ -102,7 +102,7 @@ func TestValidateRejectsDependencyCycle(t *testing.T) {
 
 func TestLoadAndEffectiveProcesses(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "goserve.toml")
+	path := filepath.Join(dir, "mango.toml")
 	content := strings.Join([]string{
 		"version = 2",
 		"project = \"demo\"",
@@ -173,7 +173,7 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 	file := File{
 		Version: 2,
 		Project: "demo",
-		Path:    filepath.Join(root, "goserve.toml"),
+		Path:    filepath.Join(root, "mango.toml"),
 		Defaults: Defaults{
 			WorkingDir: "defaults",
 		},

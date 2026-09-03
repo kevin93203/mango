@@ -1,4 +1,4 @@
-module goserve
+module github.com/kevin93203/mango
 
 go 1.23
 

@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"goserve/internal/config"
-	"goserve/internal/ipc"
-	"goserve/internal/metrics"
-	"goserve/internal/paths"
-	"goserve/internal/registry"
+	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/metrics"
+	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/registry"
 )
 
 func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
@@ -25,7 +25,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		Logs:       filepath.Join(root, "logs"),
 		State:      filepath.Join(root, "state"),
 		Registry:   filepath.Join(root, "projects.json"),
-		SocketPath: filepath.Join(root, "runtime", "goserve.sock"),
+		SocketPath: filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:  filepath.Join(root, "daemon.log"),
 		PIDFile:    filepath.Join(root, "runtime", "daemon.pid"),
 	}
@@ -593,7 +593,7 @@ func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 		State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-		SocketPath: filepath.Join(root, "runtime", "goserve.sock"),
+		SocketPath: filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:  filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 	}
 }

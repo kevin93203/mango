@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const pipeName = `\\.\pipe\goserve`
+const pipeName = `\\.\pipe\mango`
 
 func Listen(endpoint string) (net.Listener, error) {
 	return winio.ListenPipe(pipeName, &winio.PipeConfig{SecurityDescriptor: "D:P(A;;GA;;;OW)"})
