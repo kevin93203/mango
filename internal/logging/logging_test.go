@@ -47,3 +47,29 @@ func TestReadSince(t *testing.T) {
 		t.Fatalf("got %q at %d", data, offset)
 	}
 }
+
+func TestReadSinceDoesNotReplayAfterTruncate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stdout.log")
+	if err := os.WriteFile(path, []byte("old log contents\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, offset, err := ReadSince(path, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, nextOffset, err := ReadSince(path, offset, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data != "" {
+		t.Fatalf("data after truncate = %q, want no replay", data)
+	}
+	if nextOffset != int64(len("new\n")) {
+		t.Fatalf("next offset after truncate = %d, want %d", nextOffset, len("new\n"))
+	}
+}
