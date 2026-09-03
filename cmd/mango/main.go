@@ -105,7 +105,7 @@ func usage() {
 		"  config validate PATH",
 		"  ls",
 		"  status PROJECT/SERVICE|ID",
-		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID",
+		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]",
 		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
@@ -417,28 +417,49 @@ func statusCommand(args []string) error {
 }
 
 func processCommand(command string, args []string) error {
-	if len(args) != 1 {
-		if len(args) > 1 && command != "logs" && containsArgument(args[1:], "--follow") {
-			return fmt.Errorf("--follow is only supported by logs; try: mango logs %s --follow", args[0])
-		}
-		return fmt.Errorf("invalid %s arguments: expected one PROJECT/SERVICE or ID, for example: mango %s demo/api", command, command)
+	if len(args) == 0 {
+		return fmt.Errorf("%s requires at least one PROJECT/SERVICE or ID", command)
 	}
-	response, err := callWithTimeout("service."+command, struct{ Key string }{args[0]}, processOperationTimeout)
-	if err != nil {
-		return err
+	if containsArgument(args, "--follow") {
+		return fmt.Errorf("--follow is only supported by logs; try: mango logs %s --follow", args[0])
 	}
-	if jsonOutput {
-		return cliOutput.JSON(response.Data)
-	}
-	var result map[string]string
-	if err := decodeData(response.Data, &result); err != nil {
-		return err
-	}
+	return processCommandWithCaller(command, args, func(key string) (ipc.Response, error) {
+		return callWithTimeout("service."+command, struct{ Key string }{key}, processOperationTimeout)
+	})
+}
+
+func processCommandWithCaller(command string, args []string, caller func(string) (ipc.Response, error)) error {
 	action := map[string]string{
 		"start": "started", "stop": "stopped", "restart": "restarted",
 		"enable": "enabled", "disable": "disabled",
 	}[command]
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result["key"], action)))
+	results := make([]map[string]string, 0, len(args))
+	var errs []error
+	for _, key := range args {
+		response, err := caller(key)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %s: %w", command, key, err))
+			continue
+		}
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			errs = append(errs, fmt.Errorf("%s %s: decode response: %w", command, key, err))
+			continue
+		}
+		results = append(results, result)
+		if !jsonOutput {
+			cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result["key"], action)))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if jsonOutput {
+		if len(results) == 1 {
+			return cliOutput.JSON(results[0])
+		}
+		return cliOutput.JSON(results)
+	}
 	return nil
 }
 
