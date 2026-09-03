@@ -1481,7 +1481,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			d.cancel()
 		}
 		return success(request, map[string]string{"status": "stopping"})
-	case "project.list":
+	case "project.ls":
 		d.mu.RLock()
 		projects := make([]registry.Project, 0, len(d.registry.Projects))
 		for _, project := range d.registry.Projects {
@@ -1503,7 +1503,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "CONFIG_APPLY_FAILED", err)
 		}
 		return success(request, map[string]string{"project": p.Project, "status": "applied"})
-	case "service.list":
+	case "service.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
 		return success(request, d.ListProcesses(p.Project))
@@ -1573,7 +1573,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "LOG_CLEAR_FAILED", err)
 		}
 		return success(request, map[string]string{"key": p.Key, "status": "cleared"})
-	case "schedule.list":
+	case "schedule.ls":
 		result := make([]ScheduleInfo, 0)
 		for _, item := range d.scheduler.List() {
 			result = append(result, ScheduleInfo{

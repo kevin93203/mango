@@ -104,7 +104,7 @@ mango daemon start
 
 ~~~powershell
 mango project apply demo
-mango list
+mango ls
 mango status demo/api
 ~~~
 
@@ -138,14 +138,14 @@ mango <command> [subcommand] [arguments] [options]
 範例：
 
 ~~~powershell
-mango --color=always list
-mango list --color=never
+mango --color=always ls
+mango ls --color=never
 mango status demo/api --json
 ~~~
 
 `--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
 
-`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project list`、`apply`、`list`、`status`、service lifecycle、`schedule`、`startup status` 與 `doctor`。
+`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project ls`、`apply`、`ls`、`status`、service lifecycle、`schedule`、`startup status` 與 `doctor`。
 
 `logs`、`monitor`、`config validate` 與 startup install/uninstall 維持文字或互動式輸出，不支援 `--json`。
 
@@ -171,7 +171,7 @@ mango daemon status
 
 `mangod` 目前只有 `run` 入口，沒有其他參數。`mango daemon` 只負責控制與查詢 daemon。
 
-daemon IPC 的 service lifecycle method 為 `service.list`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
+daemon IPC 的 service lifecycle method 為 `service.ls`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
 
 daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
 
@@ -204,7 +204,7 @@ daemon is not running; start it with: mango daemon start
 mango logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango list` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
 
 ### project
 
@@ -243,15 +243,15 @@ mango project remove NAME
 
 此指令不會刪除 TOML、日誌或應用程式檔案。
 
-#### project list
+#### project ls
 
 ~~~text
-mango project list
+mango project ls
 ~~~
 
 列出 registry 中的 project、設定檔路徑、啟用狀態與最後套用時間，需要 daemon 執行。
 
-使用 `mango project list --json` 可輸出 JSON。
+使用 `mango project ls --json` 可輸出 JSON。
 
 #### project apply
 
@@ -289,12 +289,12 @@ mango config validate PATH
 - cron 表達式與 timezone
 - schedule action 與 target
 
-### list
+### ls
 
 列出所有 project 的 service 與全域 service id。每次 daemon 啟動或重啟時，id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 service 的 id。
 
 ~~~text
-mango list
+mango ls
 ~~~
 
 顯示：
@@ -311,13 +311,13 @@ mango list
 - memory percentage
 - restart count
 
-若 service 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
+若 service 產生子 process，`ls` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
 
 `STATE` 是 mango lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
 
 文字表格欄位順序為：`ID | SERVICE | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
 
-預設使用彩色表格；可用 `mango list --color=never` 取得不含顏色的穩定文字輸出，或使用 `mango list --json` 取得 JSON。
+預設使用彩色表格；可用 `mango ls --color=never` 取得不含顏色的穩定文字輸出，或使用 `mango ls --json` 取得 JSON。
 
 ### status
 
@@ -421,14 +421,14 @@ mango monitor
 查看、手動執行排程與查詢排程歷史。
 
 ~~~text
-mango schedule list
+mango schedule ls
 mango schedule history
 mango schedule run PROJECT/SCHEDULE
 ~~~
 
 | 指令 | 說明 |
 | --- | --- |
-| list | 列出 schedule、cron、timezone、action 與 concurrency。 |
+| ls | 列出 schedule、cron、timezone、action 與 concurrency。 |
 | history | 顯示本次 daemon 執行期間的排程紀錄。 |
 | run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
 
@@ -734,7 +734,7 @@ go run ./examples/one-task --iterations 5 --interval 500ms
 mango project add .\mango.example.toml
 mango daemon start
 mango project apply demo
-mango list
+mango ls
 ~~~
 
 執行一次性 task：
@@ -747,7 +747,7 @@ mango logs demo/one-task --stream all --follow
 測試排程 task：
 
 ~~~powershell
-mango schedule list
+mango schedule ls
 mango schedule run demo/nightly-job
 mango schedule history
 ~~~

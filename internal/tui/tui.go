@@ -146,7 +146,7 @@ func readInput(input chan<- byte) {
 }
 
 func list() ([]api.ServiceInfo, error) {
-	request, _ := ipc.NewRequest("service.list", nil)
+	request, _ := ipc.NewRequest("service.ls", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	response, err := ipc.Call(ctx, request)
