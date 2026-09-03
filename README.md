@@ -284,7 +284,7 @@ goserve config validate PATH
 
 ### list
 
-列出所有 project 的 process 與全域 process id。
+列出所有 project 的 process 與全域 process id。每次 daemon 啟動或重啟時，process id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 process 的 id。
 
 ~~~text
 goserve list
@@ -296,6 +296,7 @@ goserve list
 - project/process
 - state
 - PID
+- listening TCP／UDP ports
 - CPU percentage
 - RSS memory
 - memory percentage
@@ -315,7 +316,7 @@ goserve status PROJECT/PROCESS|ID
 
 | 參數 | 說明 |
 | --- | --- |
-| PROJECT/PROCESS\|ID | process key（例如 demo/api）或全域整數 id。 |
+| PROJECT/PROCESS\|ID | process key（例如 demo/api）或全域非負整數 id。 |
 
 輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
 

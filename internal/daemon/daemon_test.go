@@ -91,17 +91,17 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatalf("reloadRegistry() error = %v", err)
 	}
-	assertProcessID(t, d.ListProcesses(""), "alpha/api", 1)
-	assertProcessID(t, d.ListProcesses(""), "beta/worker", 2)
+	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
+	assertProcessID(t, d.ListProcesses(""), "beta/worker", 1)
 
-	if project, name, err := d.resolveProcessRef("1"); err != nil || project+"/"+name != "alpha/api" {
-		t.Fatalf("resolve id 1 = %s/%s, %v", project, name, err)
+	if project, name, err := d.resolveProcessRef("0"); err != nil || project+"/"+name != "alpha/api" {
+		t.Fatalf("resolve id 0 = %s/%s, %v", project, name, err)
 	}
 	if project, name, err := d.resolveProcessRef("beta/worker"); err != nil || project+"/"+name != "beta/worker" {
 		t.Fatalf("resolve key = %s/%s, %v", project, name, err)
 	}
 
-	request, err := ipc.NewRequest("process.stop", struct{ Key string }{"2"})
+	request, err := ipc.NewRequest("process.stop", struct{ Key string }{"1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 		Key    string
 		Stream string
 		Tail   int
-	}{"2", "stdout", 10})
+	}{"1", "stdout", 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 		t.Fatalf("log data = %q, want %q", logData["data"], "from id\n")
 	}
 
-	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"2"})
+	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,14 +174,14 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
 	}
-	assertProcessID(t, d.ListProcesses(""), "alpha/api", 1)
-	assertProcessID(t, d.ListProcesses(""), "alpha/job", 3)
+	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
+	assertProcessID(t, d.ListProcesses(""), "alpha/job", 2)
 
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatalf("second reloadRegistry() error = %v", err)
 	}
-	assertProcessID(t, d.ListProcesses(""), "alpha/api", 1)
-	assertProcessID(t, d.ListProcesses(""), "alpha/job", 3)
+	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
+	assertProcessID(t, d.ListProcesses(""), "alpha/job", 2)
 
 	writeTestConfig(t, alphaPath, "alpha", "job")
 	if err := d.ApplyProject("alpha"); err != nil {
@@ -191,9 +191,9 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
 	}
-	assertProcessID(t, d.ListProcesses(""), "alpha/api", 4)
-	if _, _, err := d.resolveProcessRef("1"); err == nil {
-		t.Fatal("expected deleted process id 1 to be unavailable")
+	assertProcessID(t, d.ListProcesses(""), "alpha/api", 3)
+	if _, _, err := d.resolveProcessRef("0"); err == nil {
+		t.Fatal("expected deleted process id 0 to be unavailable")
 	}
 
 	for _, ref := range []string{"0", "-1", "abc", "999"} {
@@ -214,8 +214,45 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.NextProcessID != 5 {
-		t.Fatalf("next process id = %d, want 5", stored.NextProcessID)
+	if stored.NextProcessID != 4 {
+		t.Fatalf("next process id = %d, want 4", stored.NextProcessID)
+	}
+}
+
+func TestProcessIDsResetOnDaemonStart(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	alphaPath := filepath.Join(root, "alpha.toml")
+	betaPath := filepath.Join(root, "beta.toml")
+	writeTestConfig(t, alphaPath, "alpha", "api")
+	writeTestConfig(t, betaPath, "beta", "worker")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version:       1,
+		NextProcessID: 21,
+		Projects: map[string]registry.Project{
+			"alpha": {Name: "alpha", ConfigPath: alphaPath, Enabled: true, ProcessIDs: map[string]int{"api": 20}},
+			"beta":  {Name: "beta", ConfigPath: betaPath, Enabled: true, ProcessIDs: map[string]int{"worker": 10}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistryForStart(); err != nil {
+		t.Fatalf("reloadRegistryForStart() error = %v", err)
+	}
+	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
+	assertProcessID(t, d.ListProcesses(""), "beta/worker", 1)
+	if project, name, err := d.resolveProcessRef("0"); err != nil || project+"/"+name != "alpha/api" {
+		t.Fatalf("resolve id 0 = %s/%s, %v", project, name, err)
+	}
+
+	stored, err := registry.Load(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.NextProcessID != 2 {
+		t.Fatalf("next process id = %d, want 2", stored.NextProcessID)
 	}
 }
 
