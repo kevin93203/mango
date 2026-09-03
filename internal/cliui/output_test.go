@@ -7,14 +7,14 @@ import (
 )
 
 func TestParseOptionsAnywhere(t *testing.T) {
-	options, remaining, err := ParseOptions([]string{"list", "--color=never", "--json"})
+	options, remaining, err := ParseOptions([]string{"ls", "--color=never", "--json"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if options.Color != ColorNever || !options.JSON {
 		t.Fatalf("options = %+v", options)
 	}
-	if strings.Join(remaining, " ") != "list" {
+	if strings.Join(remaining, " ") != "ls" {
 		t.Fatalf("remaining = %v", remaining)
 	}
 }

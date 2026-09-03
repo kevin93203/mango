@@ -61,8 +61,8 @@ func main() {
 		commandErr = projectCommand(layout, args[1:])
 	case "config":
 		commandErr = configCommand(args[1:])
-	case "list":
-		commandErr = listCommand()
+	case "ls":
+		commandErr = lsCommand()
 	case "status":
 		commandErr = statusCommand(args[1:])
 	case "start", "stop", "restart", "enable", "disable":
@@ -101,15 +101,15 @@ func usage() {
 		"  project add PATH",
 		"  project remove NAME",
 		"  project apply NAME",
-		"  project list",
+		"  project ls",
 		"  config validate PATH",
-		"  list",
+		"  ls",
 		"  status PROJECT/SERVICE|ID",
 		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID",
 		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
-		"  schedule list|history|run PROJECT/SCHEDULE",
+		"  schedule ls|history|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
@@ -259,7 +259,7 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 
 func projectCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
-		return errors.New("project requires add, remove, apply, or list")
+		return errors.New("project requires add, remove, apply, or ls")
 	}
 	switch args[0] {
 	case "add":
@@ -313,8 +313,8 @@ func projectCommand(layout paths.Layout, args []string) error {
 		return nil
 	case "apply":
 		return applyProjectCommand(args[1:])
-	case "list":
-		response, err := call("project.list", nil)
+	case "ls":
+		response, err := call("project.ls", nil)
 		if err != nil {
 			return err
 		}
@@ -381,8 +381,8 @@ func projectApplyName(args []string) (string, error) {
 	return args[0], nil
 }
 
-func listCommand() error {
-	response, err := call("service.list", nil)
+func lsCommand() error {
+	response, err := call("service.ls", nil)
 	if err != nil {
 		return err
 	}
@@ -591,13 +591,13 @@ type followLogResponse struct {
 
 func scheduleCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("schedule requires list, history, or run")
+		return errors.New("schedule requires ls, history, or run")
 	}
 	var method string
 	var params interface{}
 	switch args[0] {
-	case "list":
-		method = "schedule.list"
+	case "ls":
+		method = "schedule.ls"
 	case "history":
 		method = "schedule.history"
 	case "run":
@@ -617,7 +617,7 @@ func scheduleCommand(args []string) error {
 		return cliOutput.JSON(response.Data)
 	}
 	switch method {
-	case "schedule.list":
+	case "schedule.ls":
 		var schedules []api.ScheduleInfo
 		if err := decodeData(response.Data, &schedules); err != nil {
 			return err
