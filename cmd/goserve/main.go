@@ -520,10 +520,7 @@ func followLogs(key, stream string, tail int) error {
 			if err != nil {
 				return err
 			}
-			var data struct {
-				Data       string
-				NextOffset int64
-			}
+			var data followLogResponse
 			if err := decodeData(response.Data, &data); err != nil {
 				return err
 			}
@@ -538,6 +535,11 @@ func followLogs(key, stream string, tail int) error {
 		first = false
 		time.Sleep(time.Second)
 	}
+}
+
+type followLogResponse struct {
+	Data       string `json:"data"`
+	NextOffset int64  `json:"next_offset"`
 }
 
 func scheduleCommand(args []string) error {
