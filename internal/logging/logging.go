@@ -14,6 +14,7 @@ import (
 
 type RotatingWriter struct {
 	mu       sync.Mutex
+	pathMu   *sync.RWMutex
 	file     *os.File
 	path     string
 	size     int64
@@ -44,11 +45,20 @@ func Open(path string, maxSize int64, maxFiles int) (*RotatingWriter, error) {
 }
 
 func (w *RotatingWriter) Write(data []byte) (int, error) {
+	if w.pathMu != nil {
+		w.pathMu.RLock()
+		defer w.pathMu.RUnlock()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
 		return 0, errors.New("log writer is closed")
 	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	w.size = info.Size()
 	if w.size > 0 && w.size+int64(len(data)) > w.maxSize {
 		if err := w.rotateLocked(); err != nil {
 			return 0, err
@@ -76,7 +86,7 @@ func (w *RotatingWriter) rotateLocked() error {
 	if err := os.Rename(w.path, w.path+".1"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -86,6 +96,10 @@ func (w *RotatingWriter) rotateLocked() error {
 }
 
 func (w *RotatingWriter) Close() error {
+	if w.pathMu != nil {
+		w.pathMu.RLock()
+		defer w.pathMu.RUnlock()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
@@ -97,11 +111,13 @@ func (w *RotatingWriter) Close() error {
 }
 
 type Manager struct {
-	root string
+	root      string
+	mu        sync.Mutex
+	pathLocks map[string]*sync.RWMutex
 }
 
 func NewManager(root string) *Manager {
-	return &Manager{root: root}
+	return &Manager{root: root, pathLocks: map[string]*sync.RWMutex{}}
 }
 
 func (m *Manager) Open(project, process, stream string, maxSize int64, maxFiles int) (*RotatingWriter, string, error) {
@@ -109,12 +125,88 @@ func (m *Manager) Open(project, process, stream string, maxSize int64, maxFiles 
 		return nil, "", fmt.Errorf("invalid log stream %q", stream)
 	}
 	path := filepath.Join(m.root, cleanPart(project), cleanPart(process), stream+".log")
+	pathMu := m.pathLock(path)
+	pathMu.RLock()
+	defer pathMu.RUnlock()
 	writer, err := Open(path, maxSize, maxFiles)
+	if writer != nil {
+		writer.pathMu = pathMu
+	}
 	return writer, path, err
+}
+
+// Clear truncates the current stdout and stderr logs and removes all numeric
+// rotation files. Active writers keep their file descriptors and can continue
+// writing after the current files have been cleared.
+func (m *Manager) Clear(project, process string) error {
+	for _, stream := range []string{"stdout", "stderr"} {
+		path := filepath.Join(m.root, cleanPart(project), cleanPart(process), stream+".log")
+		if err := m.clearPath(path); err != nil {
+			return fmt.Errorf("clear %s log: %w", stream, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) clearPath(path string) error {
+	pathMu := m.pathLock(path)
+	pathMu.Lock()
+	defer pathMu.Unlock()
+
+	if err := os.Truncate(path, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	prefix := filepath.Base(path) + "."
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(entry.Name(), prefix)
+		if !decimalSuffix(suffix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(filepath.Dir(path), entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) pathLock(path string) *sync.RWMutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pathLocks == nil {
+		m.pathLocks = map[string]*sync.RWMutex{}
+	}
+	if pathMu := m.pathLocks[path]; pathMu != nil {
+		return pathMu
+	}
+	pathMu := &sync.RWMutex{}
+	m.pathLocks[path] = pathMu
+	return pathMu
 }
 
 func (m *Manager) Path(project, process, stream string) string {
 	return filepath.Join(m.root, cleanPart(project), cleanPart(process), stream+".log")
+}
+
+func decimalSuffix(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func ReadSince(path string, offset int64, maxBytes int) (string, int64, error) {

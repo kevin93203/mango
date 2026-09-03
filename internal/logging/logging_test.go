@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,5 +110,82 @@ func TestTailWithOffsetContinuesFromTailSnapshot(t *testing.T) {
 	}
 	if nextOffset != offset+int64(len("new 1\n")) {
 		t.Fatalf("next offset = %d, want %d", nextOffset, offset+int64(len("new 1\n")))
+	}
+}
+
+func TestManagerClearRemovesRotationsAndKeepsWriterUsable(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	stdout, stdoutPath, err := manager.Open("demo", "worker", "stdout", 8, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, stderrPath, err := manager.Open("demo", "worker", "stderr", 8, 2)
+	if err != nil {
+		_ = stdout.Close()
+		t.Fatal(err)
+	}
+
+	if _, err := stdout.Write([]byte("12345678")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdout.Write([]byte("rotated\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stderr.Write([]byte("old error\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stdoutPath+".2", []byte("old rotation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Clear("demo", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stdoutPath, stderrPath} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Fatalf("%s after clear = %q, want empty", path, data)
+		}
+	}
+	for _, path := range []string{stdoutPath + ".1", stdoutPath + ".2"} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rotation %s still exists, stat error = %v", path, err)
+		}
+	}
+
+	if _, err := stdout.Write([]byte("new output\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stderr.Write([]byte("new error\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutData, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdoutData) != "new output\n" {
+		t.Fatalf("stdout after clear = %q, want %q", stdoutData, "new output\n")
+	}
+	stderrData, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stderrData) != "new error\n" {
+		t.Fatalf("stderr after clear = %q, want %q", stderrData, "new error\n")
+	}
+}
+
+func TestManagerClearMissingLogsIsIdempotent(t *testing.T) {
+	if err := NewManager(t.TempDir()).Clear("missing", "worker"); err != nil {
+		t.Fatalf("clear missing logs = %v, want nil", err)
 	}
 }

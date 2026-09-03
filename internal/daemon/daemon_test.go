@@ -147,6 +147,29 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 		t.Fatalf("log data = %q, want %q", logData["data"], "from id\n")
 	}
 
+	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("logs.clear by id failed: %+v", response.Error)
+	}
+	var clearResult map[string]string
+	if err := decodeTestData(response.Data, &clearResult); err != nil {
+		t.Fatal(err)
+	}
+	if clearResult["status"] != "cleared" {
+		t.Fatalf("clear status = %q, want cleared", clearResult["status"])
+	}
+	cleared, err := os.ReadFile(d.logs.Path("beta", "worker", "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("log after clear = %q, want empty", cleared)
+	}
+
 	writeTestConfig(t, alphaPath, "alpha", "api", "job")
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
@@ -243,6 +266,22 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	}
 	if data["stdout"] != "schedule output\n" {
 		t.Fatalf("schedule stdout = %q, want %q", data["stdout"], "schedule output\n")
+	}
+
+	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"demo/nightly-job"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule logs.clear failed: %+v", response.Error)
+	}
+	cleared, err := os.ReadFile(d.logs.Path("demo", scheduleLogName("nightly-job"), "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("schedule log after clear = %q, want empty", cleared)
 	}
 }
 
