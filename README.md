@@ -76,8 +76,8 @@ GOSERVE_HOME/
 ### 1. 驗證設定並註冊 project
 
 ~~~powershell
-goserve config validate --file .\goserve.example.toml
-goserve project add --name demo --file .\goserve.example.toml
+goserve config validate .\goserve.example.toml
+goserve project add .\goserve.example.toml
 ~~~
 
 project add 會把 TOML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，goserve 不會覆蓋原始 TOML。
@@ -99,7 +99,7 @@ goserve daemon start
 ### 3. 套用設定與查看 process
 
 ~~~powershell
-goserve apply --project demo
+goserve project apply demo
 goserve list
 goserve status demo/api
 ~~~
@@ -207,34 +207,33 @@ goserve logs demo/api --follow
 #### project add
 
 ~~~text
-goserve project add --name NAME --file PATH
+goserve project add PATH
 ~~~
 
 參數：
 
 | 參數 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| --name | 否 | TOML 的 project | project 名稱；必須與 TOML 的 project 相同。 |
-| --file | 是 | 無 | TOML 設定檔路徑，可使用相對路徑。 |
+| PATH | 是 | 無 | TOML 設定檔路徑，可使用相對路徑。project 名稱取自 TOML 的 `project` 欄位。 |
 
 project name 只能使用英數字、.、_、-，且第一個字元必須是英數字。
 
 範例：
 
 ~~~powershell
-goserve project add --file .\goserve.example.toml
-goserve project add --name demo --file C:\apps\demo\goserve.toml
+goserve project add .\goserve.example.toml
+goserve project add C:\apps\demo\goserve.toml
 ~~~
 
 #### project remove
 
 ~~~text
-goserve project remove --name NAME
+goserve project remove NAME
 ~~~
 
 | 參數 | 必填 | 說明 |
 | --- | --- | --- |
-| --name | 是 | 要從 registry 移除的 project 名稱。 |
+| NAME | 是 | 要從 registry 移除的 project 名稱。 |
 
 此指令不會刪除 TOML、日誌或應用程式檔案。
 
@@ -248,17 +247,31 @@ goserve project list
 
 使用 `goserve project list --json` 可輸出 JSON。
 
+#### project apply
+
+重新讀取 project TOML 並套用變更。
+
+~~~text
+goserve project apply NAME
+~~~
+
+| 參數 | 必填 | 說明 |
+| --- | --- | --- |
+| NAME | 是 | 已註冊的 project 名稱。 |
+
+設定驗證失敗時，不應套用該次設定。新增 process 會依 autostart 決定是否啟動；設定變更或刪除 process 時，舊 process 會被停止。
+
 ### config validate
 
 只解析與驗證 TOML，不啟動或停止 process。
 
 ~~~text
-goserve config validate --file PATH
+goserve config validate PATH
 ~~~
 
 | 參數 | 必填 | 說明 |
 | --- | --- | --- |
-| --file | 是 | 要驗證的 TOML 設定檔。 |
+| PATH | 是 | 要驗證的 TOML 設定檔。 |
 
 驗證項目包括：
 
@@ -268,20 +281,6 @@ goserve config validate --file PATH
 - restart、duration、log size 設定格式
 - cron 表達式與 timezone
 - schedule action 與 target
-
-### apply
-
-重新讀取 project TOML 並套用變更。
-
-~~~text
-goserve apply --project NAME
-~~~
-
-| 參數 | 必填 | 說明 |
-| --- | --- | --- |
-| --project | 是 | 已註冊的 project 名稱。 |
-
-設定驗證失敗時，不應套用該次設定。新增 process 會依 autostart 決定是否啟動；設定變更或刪除 process 時，舊 process 會被停止。
 
 ### list
 
@@ -672,9 +671,9 @@ go run ./examples/one-task --iterations 5 --interval 500ms
 啟動 API 與註冊 task：
 
 ~~~powershell
-goserve project add --name demo --file .\goserve.example.toml
+goserve project add .\goserve.example.toml
 goserve daemon start
-goserve apply --project demo
+goserve project apply demo
 goserve list
 ~~~
 

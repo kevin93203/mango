@@ -63,8 +63,6 @@ func main() {
 		commandErr = projectCommand(layout, args[1:])
 	case "config":
 		commandErr = configCommand(args[1:])
-	case "apply":
-		commandErr = applyCommand(args[1:])
 	case "list":
 		commandErr = listCommand()
 	case "status":
@@ -102,9 +100,11 @@ func usage() {
 		"",
 		"Commands:",
 		"  daemon run|start|stop|restart|status",
-		"  project add|remove|list",
-		"  config validate --file PATH",
-		"  apply --project NAME",
+		"  project add PATH",
+		"  project remove NAME",
+		"  project apply NAME",
+		"  project list",
+		"  config validate PATH",
 		"  list",
 		"  status PROJECT/PROCESS|ID",
 		"  start|stop|restart|enable|disable PROJECT/PROCESS|ID",
@@ -221,33 +221,21 @@ func waitForDaemon(layout paths.Layout) error {
 
 func projectCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
-		return errors.New("project requires add, remove, or list")
+		return errors.New("project requires add, remove, apply, or list")
 	}
 	switch args[0] {
 	case "add":
 		if err := rejectJSON("project add"); err != nil {
 			return err
 		}
-		fs := newFlagSet("project add")
-		name := fs.String("name", "", "project name")
-		file := fs.String("file", "", "TOML path")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
+		if len(args) != 2 {
+			return errors.New("project add requires PATH")
 		}
-		if *file == "" {
-			return errors.New("--file is required")
-		}
-		loaded, err := config.Load(*file)
+		loaded, err := config.Load(args[1])
 		if err != nil {
 			return err
 		}
 		projectName := loaded.Project
-		if *name != "" {
-			projectName = *name
-		}
-		if projectName != loaded.Project {
-			return fmt.Errorf("project name %q does not match TOML project %q", projectName, loaded.Project)
-		}
 		reg, err := registry.Load(layout.Registry)
 		if err != nil {
 			return err
@@ -267,28 +255,26 @@ func projectCommand(layout paths.Layout, args []string) error {
 		if err := rejectJSON("project remove"); err != nil {
 			return err
 		}
-		fs := newFlagSet("project remove")
-		name := fs.String("name", "", "project name")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
+		if len(args) != 2 {
+			return errors.New("project remove requires NAME")
 		}
-		if *name == "" {
-			return errors.New("--name is required")
-		}
+		name := args[1]
 		reg, err := registry.Load(layout.Registry)
 		if err != nil {
 			return err
 		}
-		if _, ok := reg.Projects[*name]; !ok {
-			return fmt.Errorf("project %q is not registered", *name)
+		if _, ok := reg.Projects[name]; !ok {
+			return fmt.Errorf("project %q is not registered", name)
 		}
-		delete(reg.Projects, *name)
+		delete(reg.Projects, name)
 		if err := registry.Save(layout.Registry, reg); err != nil {
 			return err
 		}
 		_, _ = call("project.reload", nil)
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", *name)))
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
 		return nil
+	case "apply":
+		return applyProjectCommand(args[1:])
 	case "list":
 		response, err := call("project.list", nil)
 		if err != nil {
@@ -315,15 +301,10 @@ func configCommand(args []string) error {
 	if len(args) == 0 || args[0] != "validate" {
 		return errors.New("config currently supports validate")
 	}
-	fs := newFlagSet("config validate")
-	file := fs.String("file", "", "TOML path")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
+	if len(args) != 2 {
+		return errors.New("config validate requires PATH")
 	}
-	if *file == "" {
-		return errors.New("--file is required")
-	}
-	loaded, err := config.Load(*file)
+	loaded, err := config.Load(args[1])
 	if err != nil {
 		return err
 	}
@@ -331,16 +312,16 @@ func configCommand(args []string) error {
 	return nil
 }
 
-func applyCommand(args []string) error {
-	fs := newFlagSet("apply")
-	project := fs.String("project", "", "project name")
-	if err := fs.Parse(args); err != nil {
+func applyProjectCommand(args []string) error {
+	project, err := projectApplyName(args)
+	if err != nil {
 		return err
 	}
-	if *project == "" {
-		return errors.New("--project is required")
-	}
-	response, err := call("config.apply", struct{ Project string }{*project})
+	return applyProjectCommandWithCaller(project, call)
+}
+
+func applyProjectCommandWithCaller(project string, caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("config.apply", struct{ Project string }{project})
 	if err != nil {
 		return err
 	}
@@ -353,6 +334,13 @@ func applyCommand(args []string) error {
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s applied", result["project"])))
 	return nil
+}
+
+func projectApplyName(args []string) (string, error) {
+	if len(args) != 1 {
+		return "", errors.New("project apply requires NAME")
+	}
+	return args[0], nil
 }
 
 func listCommand() error {
