@@ -342,11 +342,11 @@ mango status PROJECT/SERVICE|ID
 以下指令都使用相同語法：
 
 ~~~text
-mango start PROJECT/SERVICE|ID
-mango stop PROJECT/SERVICE|ID
-mango restart PROJECT/SERVICE|ID
-mango enable PROJECT/SERVICE|ID
-mango disable PROJECT/SERVICE|ID
+mango start PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
+mango stop PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
+mango restart PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
+mango enable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
+mango disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
 ~~~
 
 | 指令 | 說明 |
@@ -357,7 +357,7 @@ mango disable PROJECT/SERVICE|ID
 | enable | 清除 disabled 狀態並啟動 service。 |
 | disable | 設為 disabled 並停止 service；直到 enable 或重新套用設定前不會 autostart。 |
 
-service lifecycle 成功時預設輸出簡短訊息，例如 `Service demo/api stopped`；使用 id 操作時仍會輸出 canonical key。加上 `--json` 可保留結構化結果。
+service lifecycle 可一次指定多個 target，例如 `mango stop demo/api 2 other/web`；成功時預設逐筆輸出簡短訊息，例如 `Service demo/api stopped`，使用 id 操作時仍會輸出 canonical key。加上 `--json` 可取得結構化結果；單一 target 輸出物件，多個 target 輸出陣列。
 
 Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 

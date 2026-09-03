@@ -123,6 +123,48 @@ func TestProjectApplyUsesPositionalName(t *testing.T) {
 	}
 }
 
+func TestProcessCommandSupportsMultipleTargets(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var calls []string
+	err := processCommandWithCaller("stop", []string{"demo/api", "1"}, func(key string) (ipc.Response, error) {
+		calls = append(calls, key)
+		return ipc.Response{Data: map[string]string{"key": key, "status": "ok"}}, nil
+	})
+	if err != nil {
+		t.Fatalf("process command = %v", err)
+	}
+	if strings.Join(calls, ",") != "demo/api,1" {
+		t.Fatalf("calls = %v, want [demo/api 1]", calls)
+	}
+	if !strings.Contains(output.String(), "Service demo/api stopped") || !strings.Contains(output.String(), "Service 1 stopped") {
+		t.Fatalf("output = %q, want both service results", output.String())
+	}
+
+	output.Reset()
+	jsonOutput = true
+	err = processCommandWithCaller("stop", []string{"demo/api", "1"}, func(key string) (ipc.Response, error) {
+		return ipc.Response{Data: map[string]string{"key": key, "status": "ok"}}, nil
+	})
+	if err != nil {
+		t.Fatalf("JSON process command = %v", err)
+	}
+	var results []map[string]string
+	if err := json.Unmarshal(output.Bytes(), &results); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(results) != 2 || results[0]["key"] != "demo/api" || results[1]["key"] != "1" {
+		t.Fatalf("results = %+v, want results for both targets", results)
+	}
+}
+
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.toml")
