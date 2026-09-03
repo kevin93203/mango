@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"goserve/internal/ipc"
+	"goserve/internal/metrics"
 	"goserve/internal/paths"
 	"goserve/internal/registry"
 )
@@ -253,6 +254,66 @@ func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	}
 	if stored.NextProcessID != 2 {
 		t.Fatalf("next process id = %d, want 2", stored.NextProcessID)
+	}
+}
+
+func TestFlattenProcessListPreservesHierarchyAndParentIndex(t *testing.T) {
+	items := []ProcessInfo{{
+		ID:      0,
+		Project: "demo",
+		Name:    "api",
+		PID:     100,
+		Children: []ChildProcessInfo{{
+			PID: 200, ParentPID: 100, Depth: 1, Name: "worker",
+			Children: []ChildProcessInfo{{PID: 300, ParentPID: 200, Depth: 2, Name: "helper"}},
+		}},
+	}}
+
+	rows := FlattenProcessList(items)
+	if len(rows) != 3 {
+		t.Fatalf("flattened rows = %d, want 3", len(rows))
+	}
+	if !rows[0].Managed || rows[0].ID != 0 || rows[0].ParentIndex != 0 || rows[0].Depth != 0 {
+		t.Fatalf("parent row = %+v", rows[0])
+	}
+	if rows[1].Managed || rows[1].PID != 200 || rows[1].ParentIndex != 0 || rows[1].Depth != 1 {
+		t.Fatalf("child row = %+v", rows[1])
+	}
+	if rows[2].Managed || rows[2].PID != 300 || rows[2].ParentIndex != 0 || rows[2].Depth != 2 {
+		t.Fatalf("grandchild row = %+v", rows[2])
+	}
+
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data []map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 1 || data[0]["Children"] == nil {
+		t.Fatalf("JSON = %s, want nested Children", encoded)
+	}
+}
+
+func TestChildProcessInfosCopiesSnapshotMetrics(t *testing.T) {
+	children := childProcessInfos([]metrics.ProcessSnapshot{{
+		PID: 200, ParentPID: 100, Depth: 1, Name: "worker", CommandLine: "worker --serve",
+		State: "running", CPUPercent: 1.25, RSSBytes: 4096, MemoryPercent: 0.5,
+		Ports: []string{"tcp:8080"},
+	}})
+	if len(children) != 1 {
+		t.Fatalf("children = %d, want 1", len(children))
+	}
+	child := children[0]
+	if child.PID != 200 || child.ParentPID != 100 || child.Depth != 1 || child.Name != "worker" || child.CommandLine != "worker --serve" {
+		t.Fatalf("child identity = %+v", child)
+	}
+	if child.State != "running" || child.CPUPercent != 1.25 || child.RSSBytes != 4096 || child.MemoryPercent != 0.5 {
+		t.Fatalf("child metrics = %+v", child)
+	}
+	if len(child.Ports) != 1 || child.Ports[0] != "tcp:8080" {
+		t.Fatalf("child ports = %v, want tcp:8080", child.Ports)
 	}
 }
 

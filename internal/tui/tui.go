@@ -230,23 +230,37 @@ func printTable(output *cliui.Renderer, items []daemon.ProcessInfo, selected int
 		output.Println(output.Text(cliui.StyleMuted, "No processes found."))
 		return
 	}
-	rows := make([][]cliui.Cell, 0, len(items))
-	for i, item := range items {
+	listRows := daemon.FlattenProcessList(items)
+	rows := make([][]cliui.Cell, 0, len(listRows))
+	for _, item := range listRows {
 		marker := " "
-		if i == selected {
+		if item.Managed && item.ParentIndex == selected {
 			marker = ">"
 		}
+		id := "-"
+		idStyle := cliui.StyleMuted
+		restartCount := "-"
+		if item.Managed {
+			id = fmt.Sprintf("%d", item.ID)
+			idStyle = cliui.StyleNone
+			restartCount = fmt.Sprintf("%d", item.RestartCount)
+		}
+		processName := item.Project + "/" + item.Name
+		if !item.Managed {
+			processName = strings.Repeat("  ", item.Depth-1) + "└─ " + item.Name
+		}
+		ports := formatPorts(item.Ports)
 		rows = append(rows, []cliui.Cell{
 			{Text: marker, Style: cliui.StyleHeader},
-			{Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight},
-			{Text: item.Project + "/" + item.Name},
+			{Text: id, Style: idStyle, Align: cliui.AlignRight},
+			{Text: processName},
 			{Text: item.State, Style: cliui.StateStyle(item.State)},
 			{Text: formatPID(item.PID), Style: zeroStyle(item.PID), Align: cliui.AlignRight},
-			{Text: formatPorts(item.Ports), Style: zeroStyle(formatPorts(item.Ports))},
+			{Text: ports, Style: zeroStyle(ports)},
 			{Text: fmt.Sprintf("%.2f", item.CPUPercent), Align: cliui.AlignRight},
 			{Text: cliui.FormatBytes(item.RSSBytes), Style: zeroStyle(item.RSSBytes), Align: cliui.AlignRight},
 			{Text: fmt.Sprintf("%.2f", item.MemoryPercent), Align: cliui.AlignRight},
-			{Text: fmt.Sprintf("%d", item.RestartCount), Align: cliui.AlignRight},
+			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
 	output.Table([]string{"", "ID", "PROCESS", "STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)

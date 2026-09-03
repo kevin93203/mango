@@ -302,6 +302,8 @@ goserve list
 - memory percentage
 - restart count
 
+若 process 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、state、port、CPU、RSS 與 memory；子 process 不會分配 goserve process id，也不能直接執行 lifecycle 操作。`--json` 會在 managed process 的 `Children` 欄位保留巢狀結構。
+
 預設使用彩色表格；可用 `goserve list --color=never` 取得不含顏色的穩定文字輸出，或使用 `goserve list --json` 取得 JSON。
 
 ### status
@@ -385,7 +387,7 @@ goserve logs clear TARGET
 goserve monitor
 ~~~
 
-主畫面每秒更新 process 狀態、PID、CPU、RSS、memory、uptime 與 restart count。
+主畫面每秒更新 process 狀態、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示。
 
 | 按鍵 | 操作 |
 | --- | --- |
