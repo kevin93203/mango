@@ -24,7 +24,7 @@ func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
 
 	printProcessTable([]daemon.ProcessInfo{{
 		ID: 0, Project: "demo", Name: "api", State: daemon.StateRunning, PID: 100,
-		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", State: "sleeping"}},
+		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}})
 
 	text := output.String()
@@ -126,7 +126,7 @@ func TestProjectApplyUsesPositionalName(t *testing.T) {
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.toml")
-	content := fmt.Sprintf("version = 1\nproject = %q\n\n[[processes]]\nname = %q\ncommand = %q\n", "demo", "api", "echo")
+	content := fmt.Sprintf("version = 2\nproject = %q\n\n[services.%s]\ncommand = %q\n", "demo", "api", "echo")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

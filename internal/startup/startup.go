@@ -139,7 +139,7 @@ func installSystemd(executable string) error {
 	path := filepath.Join(dir, "goserve.service")
 	lines := []string{
 		"[Unit]",
-		"Description=goserve process manager",
+		"Description=goserve service manager",
 		"",
 		"[Service]",
 		"ExecStart=" + systemdEscape(executable) + " daemon run",

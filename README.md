@@ -1,11 +1,11 @@
 # goserve
 
-goserve 是使用 Go 開發的跨平台 CLI process manager，透過背景 daemon 管理任何可執行檔，不限定 Node.js。
+goserve 是使用 Go 開發的跨平台 CLI service manager，透過背景 daemon 管理任何可執行檔，不限定 Node.js。
 
 支援 Windows、Linux 與 macOS，主要功能包括：
 
-- 多 project、多 process 管理
-- process 啟動、停止、重啟與 crash-loop 保護
+- 多 project、多 service 管理
+- service 啟動、停止、重啟與 crash-loop 保護
 - stdout／stderr 日誌與大小輪替
 - CPU、RSS memory、uptime 監控
 - 五欄位 cron 排程與 IANA timezone
@@ -67,7 +67,7 @@ GOSERVE_HOME/
 │  ├─ daemon.pid
 │  └─ goserve.sock       # Unix；Windows 使用 Named Pipe
 ├─ logs/
-│  └─ <project>/<process>/
+│  └─ <project>/<service>/
 └─ state/
 ~~~
 
@@ -96,7 +96,7 @@ goserve daemon run
 goserve daemon start
 ~~~
 
-### 3. 套用設定與查看 process
+### 3. 套用設定與查看 service
 
 ~~~powershell
 goserve project apply demo
@@ -141,7 +141,7 @@ goserve status demo/api --json
 
 `--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
 
-`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project list`、`apply`、`list`、`status`、process lifecycle、`schedule`、`startup status` 與 `doctor`。
+`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project list`、`apply`、`list`、`status`、service lifecycle、`schedule`、`startup status` 與 `doctor`。
 
 `logs`、`monitor`、`config validate` 與 startup install/uninstall 維持文字或互動式輸出，不支援 `--json`。
 
@@ -167,6 +167,8 @@ goserve daemon status
 
 daemon 目前沒有額外參數。
 
+daemon IPC 的 service lifecycle method 為 `service.list`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
+
 daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
 
 人類可讀輸出：
@@ -186,7 +188,7 @@ api version | 1
 goserve daemon status --json
 ~~~
 
-需要 daemon 提供服務的指令（例如 `list`、`status`、process action 與 `logs`）若無法連線，會提示：
+需要 daemon 提供服務的指令（例如 `list`、`status`、service action 與 `logs`）若無法連線，會提示：
 
 ~~~text
 daemon is not running; start it with: goserve daemon start
@@ -198,7 +200,7 @@ daemon is not running; start it with: goserve daemon start
 goserve logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/PROCESS` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `goserve list` 或 `goserve status PROJECT/PROCESS` 取得，例如 `goserve stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `goserve list` 或 `goserve status PROJECT/SERVICE` 取得，例如 `goserve stop 2`。
 
 ### project
 
@@ -259,11 +261,11 @@ goserve project apply NAME
 | --- | --- | --- |
 | NAME | 是 | 已註冊的 project 名稱。 |
 
-設定驗證失敗時，不應套用該次設定。新增 process 會依 autostart 決定是否啟動；設定變更或刪除 process 時，舊 process 會被停止。
+設定驗證失敗時，不應套用該次設定。新增 service 會依 autostart 決定是否啟動；設定變更或刪除 service 時，舊 service 會被停止。
 
 ### config validate
 
-只解析與驗證 TOML，不啟動或停止 process。
+只解析與驗證 TOML，不啟動或停止 service。
 
 ~~~text
 goserve config validate PATH
@@ -275,16 +277,17 @@ goserve config validate PATH
 
 驗證項目包括：
 
-- version 是否為目前支援的版本 1
-- project、process、schedule 名稱是否有效且不重複
-- command 是否有指定；實際 executable 是否可啟動會在 process start 時檢查
+- version 是否為目前支援的版本 2
+- project、service、schedule 名稱是否有效且不重複
+- command 是否有指定；實際 executable 是否可啟動會在 service start 時檢查
 - restart、duration、log size 設定格式
+- healthcheck 與 depends_on 的條件、未知服務及循環依賴
 - cron 表達式與 timezone
 - schedule action 與 target
 
 ### list
 
-列出所有 project 的 process 與全域 process id。每次 daemon 啟動或重啟時，process id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 process 的 id。
+列出所有 project 的 service 與全域 service id。每次 daemon 啟動或重啟時，id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 service 的 id。
 
 ~~~text
 goserve list
@@ -292,9 +295,11 @@ goserve list
 
 顯示：
 
-- process id
-- project/process
-- state
+- service id
+- project/service
+- goserve lifecycle state
+- health
+- root PID 的 OS state
 - PID
 - listening TCP／UDP ports
 - CPU percentage
@@ -302,55 +307,59 @@ goserve list
 - memory percentage
 - restart count
 
-若 process 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、state、port、CPU、RSS 與 memory；子 process 不會分配 goserve process id，也不能直接執行 lifecycle 操作。`--json` 會在 managed process 的 `Children` 欄位保留巢狀結構。
+若 service 產生子 process，`list` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 goserve service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
+
+`STATE` 是 goserve lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
+
+文字表格欄位順序為：`ID | SERVICE | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
 
 預設使用彩色表格；可用 `goserve list --color=never` 取得不含顏色的穩定文字輸出，或使用 `goserve list --json` 取得 JSON。
 
 ### status
 
-查看單一 process 的完整狀態。
+查看單一 service 的完整狀態。
 
 ~~~text
-goserve status PROJECT/PROCESS|ID
+goserve status PROJECT/SERVICE|ID
 ~~~
 
 必要參數：
 
 | 參數 | 說明 |
 | --- | --- |
-| PROJECT/PROCESS\|ID | process key（例如 demo/api）或全域非負整數 id。 |
+| PROJECT/SERVICE\|ID | service key（例如 demo/api）或全域非負整數 id。 |
 
 輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
 
-`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/PROCESS|ID --json` 可取得原始 JSON。
+`status` 預設輸出 key/value detail table；使用 `goserve status PROJECT/SERVICE|ID --json` 可取得原始 JSON。
 
-### process lifecycle
+### service lifecycle
 
 以下指令都使用相同語法：
 
 ~~~text
-goserve start PROJECT/PROCESS|ID
-goserve stop PROJECT/PROCESS|ID
-goserve restart PROJECT/PROCESS|ID
-goserve enable PROJECT/PROCESS|ID
-goserve disable PROJECT/PROCESS|ID
+goserve start PROJECT/SERVICE|ID
+goserve stop PROJECT/SERVICE|ID
+goserve restart PROJECT/SERVICE|ID
+goserve enable PROJECT/SERVICE|ID
+goserve disable PROJECT/SERVICE|ID
 ~~~
 
 | 指令 | 說明 |
 | --- | --- |
-| start | 啟動 process，並清除本次 crash-loop 計數。 |
-| stop | 暫時停止 process，不修改 TOML 的 autostart。 |
-| restart | 先停止再啟動 process。 |
-| enable | 清除 disabled 狀態並啟動 process。 |
-| disable | 設為 disabled 並停止 process；直到 enable 或重新套用設定前不會 autostart。 |
+| start | 啟動 service，並清除本次 crash-loop 計數。若 dependency 尚未滿足，會先進入 waiting。 |
+| stop | 暫時停止 service，不修改 TOML 的 autostart。 |
+| restart | 先停止再啟動 service；depends_on.restart=true 的 dependent 也會依序重啟。 |
+| enable | 清除 disabled 狀態並啟動 service。 |
+| disable | 設為 disabled 並停止 service；直到 enable 或重新套用設定前不會 autostart。 |
 
-process lifecycle 成功時預設輸出簡短訊息，例如 `Process demo/api stopped`；使用 id 操作時仍會輸出 canonical key。加上 `--json` 可保留結構化結果。
+service lifecycle 成功時預設輸出簡短訊息，例如 `Service demo/api stopped`；使用 id 操作時仍會輸出 canonical key。加上 `--json` 可保留結構化結果。
 
-Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
+Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 
 ### logs
 
-查看 process 的 stdout／stderr。
+查看 service 的 stdout／stderr。
 
 ~~~text
 goserve logs TARGET [--stream STREAM] [--tail N] [--follow]
@@ -361,23 +370,23 @@ goserve logs clear TARGET
 
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
-| TARGET | 無 | process key、schedule key 或全域整數 process id。 |
+| TARGET | 無 | service key、schedule key 或全域整數 service id。 |
 | --stream | stdout | 可選 stdout、stderr 或 all。 |
 | --tail | 100 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
 
-`goserve logs clear TARGET` 會清除指定 process 或 schedule 的 stdout／stderr
-目前日誌與所有輪替檔。若 process 仍在執行，會保留開啟中的 writer，清除後的
+`goserve logs clear TARGET` 會清除指定 service 或 schedule 的 stdout／stderr
+目前日誌與所有輪替檔。若 service 仍在執行，會保留開啟中的 writer，清除後的
 新輸出仍會繼續寫入；沒有日誌檔時視為成功。
 
 日誌位置：
 
 ~~~text
-<logs>/<project>/<process>/stdout.log
-<logs>/<project>/<process>/stderr.log
+<logs>/<project>/<service>/stdout.log
+<logs>/<project>/<service>/stderr.log
 ~~~
 
-預設單檔大小為 100MiB，保留 10 個輪替檔；可在 TOML 的 defaults 或 process 欄位調整。
+預設單檔大小為 100MiB，保留 10 個輪替檔；可在 TOML 的 defaults 或 service 欄位調整。
 
 ### monitor
 
@@ -387,21 +396,21 @@ goserve logs clear TARGET
 goserve monitor
 ~~~
 
-主畫面每秒更新 process 狀態、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示。
+主畫面每秒更新 service 狀態、health、OS state、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示。
 
 | 按鍵 | 操作 |
 | --- | --- |
-| ↑／↓ | 上下選取 process。 |
-| j／k | 上下選取 process 的替代按鍵。 |
+| ↑／↓ | 上下選取 service。 |
+| j／k | 上下選取 service 的替代按鍵。 |
 | s | stop。 |
 | r | restart。 |
 | e | enable。 |
 | d | disable。 |
-| l | 查看選取 process 的最近日誌。 |
-| Enter | 查看選取 process 的詳細資訊。 |
+| l | 查看選取 service 的最近日誌。 |
+| Enter | 查看選取 service 的詳細資訊。 |
 | q | 離開 monitor。 |
 
-若 stdout 或 stdin 不是 TTY，monitor 會退化成輸出一次 process table。
+若 stdout 或 stdin 不是 TTY，monitor 會退化成輸出一次 service table。
 
 ### schedule
 
@@ -428,7 +437,7 @@ goserve logs PROJECT/SCHEDULE --stream all
 goserve logs PROJECT/SCHEDULE --stream all --follow
 ~~~
 
-例如 `goserve logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 process 的日誌。
+例如 `goserve logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 service 的日誌。
 
 ### startup
 
@@ -446,7 +455,7 @@ goserve startup status
 | uninstall | 移除 goserve task | 停用並移除 user service | unload 並移除 LaunchAgent |
 | status | 查詢 task | 檢查 user service 檔案 | 檢查 plist 檔案 |
 
-startup service 只會啟動 daemon；process 是否啟動仍由 TOML 的 autostart 決定。
+startup service 只會啟動 daemon；service 是否啟動仍由 TOML 的 autostart 決定。
 
 ### doctor
 
@@ -474,13 +483,13 @@ goserve --help
 ### 根欄位
 
 ~~~toml
-version = 1
+version = 2
 project = "demo"
 ~~~
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| version | 是 | 目前必須為 1。 |
+| version | 是 | 目前必須為 2。 |
 | project | 是 | project 名稱，也必須與 registry 名稱一致。 |
 
 ### defaults
@@ -516,11 +525,10 @@ duration 使用 Go duration 格式，例如 500ms、10s、5m、1h。
 
 size 支援 bytes、KB／MB／GB 與 KiB／MiB／GiB，例如 100MiB。
 
-### processes
+### services
 
 ~~~toml
-[[processes]]
-name = "api"
+[services.api]
 command = "go"
 args = ["run", "./examples/api", "--port", "8080"]
 working_dir = "."
@@ -528,17 +536,17 @@ autostart = true
 restart = "always"
 stop_timeout = "10s"
 
-[processes.env]
+[services.api.environment]
 APP_ENV = "development"
 ~~~
 
 | 欄位 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| name | 是 | 無 | project 內唯一的 process 名稱。 |
+| service table key | 是 | 無 | project 內唯一的 service 名稱。 |
 | command | 是 | 無 | executable 名稱或路徑，不經 shell。 |
 | args | 否 | [] | 傳給 executable 的參數陣列。 |
-| working_dir | 否 | defaults 值 | process 的工作目錄。 |
-| env | 否 | 繼承環境 | 要覆寫或新增的環境變數。 |
+| working_dir | 否 | defaults 值 | service 的工作目錄。 |
+| environment | 否 | 繼承環境 | 要覆寫或新增的環境變數。 |
 | autostart | 否 | false | daemon 啟動或 apply 後是否自動啟動。 |
 | restart | 否 | defaults 值 | never、on-failure 或 always。 |
 | stop_timeout | 否 | defaults 值 | graceful stop timeout。 |
@@ -549,9 +557,51 @@ APP_ENV = "development"
 command 執行規則：
 
 - 不支援管線、重導向、&& 等 shell 語法。
-- command 中含 / 或 \ 時，會依 process working directory 解析相對路徑。
+- command 中含 / 或 \ 時，會依 service working directory 解析相對路徑。
 - 不含路徑分隔符時，會從作業系統 PATH 尋找 executable。
 - 若需要 shell，請把 shell 本身當成 command，例如 Windows 使用 cmd.exe，Unix 使用 sh，並自行在 args 中傳入參數。
+
+### healthcheck 與 depends_on
+
+healthcheck 綁定 service，而不是 process tree。單一 probe 使用 Compose 風格的 `test`：
+
+~~~toml
+[services.db.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U postgres"]
+interval = "10s"
+timeout = "5s"
+retries = 5
+start_period = "30s"
+start_interval = "5s"
+~~~
+
+腳本若提供多個應用，可使用 named checks；`policy` 可為 `all`（預設）或 `any`：
+
+~~~toml
+[services.stack.healthcheck]
+policy = "all"
+interval = "10s"
+timeout = "2s"
+retries = 3
+
+[services.stack.healthcheck.checks.api]
+test = ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+
+[services.stack.healthcheck.checks.metrics]
+test = ["CMD", "curl", "-f", "http://127.0.0.1:9090/metrics"]
+~~~
+
+`test` 與 `checks` 互斥；`["NONE"]` 會停用 healthcheck。probe 在 host 執行，沿用 service 的 working directory 與 environment。健康度只影響 `HEALTH`，不會自動改變 lifecycle 或觸發 restart。
+
+service 啟動依賴使用巢狀 table：
+
+~~~toml
+[services.web.depends_on.db]
+condition = "service_healthy"
+restart = true
+~~~
+
+`condition` 支援 `service_started`、`service_healthy` 與 `service_completed_successfully`。條件未滿足時 dependent 顯示 `waiting` 且不建立 PID；設定錯誤、未知 dependency 與 cycle 會在 apply 前拒絕。
 
 ### schedules
 
@@ -572,7 +622,7 @@ concurrency = "forbid"
 | cron | 是 | 無 | 五欄位 cron：分、時、日、月、星期。 |
 | timezone | 否 | Local | IANA timezone，例如 Asia/Taipei、UTC。 |
 | action | 是 | 無 | run、start、stop 或 restart。 |
-| target | action 非 run 時必填 | 無 | 要操作的 process name。 |
+| target | action 非 run 時必填 | 無 | 要操作的 service name。 |
 | command | action=run 時必填 | 無 | 一次性 task executable。 |
 | args | 否 | [] | 一次性 task 的參數陣列。 |
 | working_dir | 否 | defaults 值 | task 工作目錄。 |
@@ -584,15 +634,16 @@ concurrency = "forbid"
 - daemon 離線期間錯過的排程不補執行。
 - forbid 會跳過上一個相同 schedule 尚未完成的執行。
 - cron 與 timezone 錯誤會使 config validate／apply 失敗。
-- schedule task 日誌會寫入 process log root 下的 schedule-<name> 目錄。
+- schedule task 日誌會寫入 service log root 下的 schedule-<name> 目錄。
 
-## Process 狀態與重啟
+## Service 狀態與重啟
 
-可能的 process state：
+可能的 service lifecycle state：
 
 ~~~text
 stopped
 starting
+waiting
 running
 stopping
 exited
@@ -602,6 +653,8 @@ failed
 disabled
 unknown
 ~~~
+
+`waiting` 表示 depends_on 條件尚未滿足；它不代表 service unhealthy，也不會建立 PID。
 
 restart policy：
 

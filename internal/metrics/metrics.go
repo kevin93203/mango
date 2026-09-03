@@ -25,7 +25,8 @@ type ProcessSnapshot struct {
 	Depth         int
 	Name          string
 	CommandLine   string
-	State         string
+	State         string // Deprecated alias for OSState.
+	OSState       string
 	CPUPercent    float64
 	RSSBytes      uint64
 	MemoryPercent float64
@@ -206,6 +207,7 @@ func (c *Collector) snapshotProcess(p *process.Process, parentPID, depth int, to
 		Name:          name,
 		CommandLine:   commandLine,
 		State:         state,
+		OSState:       state,
 		CPUPercent:    cpu,
 		RSSBytes:      rss,
 		MemoryPercent: memoryPct,

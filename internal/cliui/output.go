@@ -285,11 +285,11 @@ func (r *Renderer) StateText(state string) string {
 
 func StateStyle(state string) Style {
 	switch strings.ToLower(state) {
-	case "running", "ok", "success", "installed":
+	case "running", "ok", "success", "installed", "healthy":
 		return StyleSuccess
-	case "failed", "crash_loop", "error":
+	case "failed", "crash_loop", "error", "unhealthy":
 		return StyleError
-	case "starting", "stopping", "stopped", "exited", "backing_off", "disabled", "degraded", "unknown":
+	case "starting", "waiting", "stopping", "stopped", "exited", "backing_off", "disabled", "degraded", "unknown":
 		return StyleWarning
 	default:
 		return StyleNone

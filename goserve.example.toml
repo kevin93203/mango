@@ -1,4 +1,4 @@
-version = 1
+version = 2
 project = "demo"
 
 [defaults]
@@ -9,18 +9,43 @@ log_max_size = "100MiB"
 log_max_files = 10
 metrics_interval = "1s"
 
-[[processes]]
-name = "api"
+[services.api]
 command = "go"
 args = ["run", "./examples/api", "--port", "8080", "--interval", "3s"]
 autostart = true
 restart = "always"
 
-[processes.env]
+[services.api.environment]
 APP_ENV = "development"
 
-[[processes]]
-name = "one-task"
+[services.api.healthcheck]
+test = ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
+interval = "10s"
+timeout = "2s"
+retries = 3
+start_period = "3s"
+
+[services.api2]
+command = "./examples/run_api.sh"
+autostart = true
+restart = "always"
+
+[services.api2.environment]
+APP_ENV = "development"
+
+[services.api2.healthcheck]
+policy = "all"
+interval = "10s"
+timeout = "2s"
+retries = 3
+
+[services.api2.healthcheck.checks.1]
+test = ["CMD", "curl", "-f", "http://127.0.0.1:9000/"]
+
+[services.api2.healthcheck.checks.2]
+test = ["CMD", "curl", "-f", "http://127.0.0.1:9090/"]
+
+[services.one-task]
 command = "go"
 args = ["run", "./examples/one-task", "--iterations", "5", "--interval", "500ms"]
 autostart = false
