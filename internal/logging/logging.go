@@ -133,7 +133,10 @@ func ReadSince(path string, offset int64, maxBytes int) (string, int64, error) {
 	if offset < 0 {
 		offset = info.Size()
 	} else if offset > info.Size() {
-		offset = 0
+		// The file may have been truncated or rotated since the previous
+		// read. Start at the current end so follow mode does not replay the
+		// existing contents as if they were new log output.
+		offset = info.Size()
 	}
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return "", offset, err
