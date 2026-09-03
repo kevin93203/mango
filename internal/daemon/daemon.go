@@ -94,6 +94,37 @@ type ProcessInfo struct {
 	StderrPath    string
 	CommandLine   string
 	Disabled      bool
+	Children      []ChildProcessInfo `json:"Children,omitempty"`
+}
+
+type ChildProcessInfo struct {
+	PID           int
+	ParentPID     int
+	Depth         int
+	Name          string
+	CommandLine   string
+	State         string
+	CPUPercent    float64
+	RSSBytes      uint64
+	MemoryPercent float64
+	Ports         []string
+	Children      []ChildProcessInfo `json:"Children,omitempty"`
+}
+
+type ProcessListRow struct {
+	ParentIndex   int
+	Managed       bool
+	ID            int
+	Project       string
+	Name          string
+	Depth         int
+	PID           int
+	Ports         []string
+	State         string
+	CPUPercent    float64
+	RSSBytes      uint64
+	MemoryPercent float64
+	RestartCount  int
 }
 
 type ScheduleInfo struct {
@@ -734,10 +765,14 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		d.mu.RUnlock()
 		if pid > 0 {
 			info.PID = pid
-			info.Ports = d.metrics.Ports(pid)
 			info.UptimeSeconds = time.Since(startedAt).Seconds()
-			sample := d.metrics.Sample(pid, every)
-			info.CPUPercent, info.RSSBytes, info.MemoryPercent = sample.CPUPercent, sample.RSSBytes, sample.MemoryPct
+			if snapshot, ok := d.metrics.Snapshot(pid, every); ok {
+				info.Ports = snapshot.Ports
+				info.CPUPercent = snapshot.CPUPercent
+				info.RSSBytes = snapshot.RSSBytes
+				info.MemoryPercent = snapshot.MemoryPercent
+				info.Children = childProcessInfos(snapshot.Children)
+			}
 		}
 		result = append(result, info)
 	}
@@ -753,10 +788,75 @@ func (d *Daemon) GetProcess(key string) (ProcessInfo, error) {
 	canonicalKey := project + "/" + name
 	for _, info := range d.ListProcesses("") {
 		if info.Project+"/"+info.Name == canonicalKey {
+			info.Children = nil
 			return info, nil
 		}
 	}
 	return ProcessInfo{}, fmt.Errorf("process %q not found", key)
+}
+
+func childProcessInfos(snapshots []metrics.ProcessSnapshot) []ChildProcessInfo {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	result := make([]ChildProcessInfo, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		result = append(result, ChildProcessInfo{
+			PID:           snapshot.PID,
+			ParentPID:     snapshot.ParentPID,
+			Depth:         snapshot.Depth,
+			Name:          snapshot.Name,
+			CommandLine:   snapshot.CommandLine,
+			State:         snapshot.State,
+			CPUPercent:    snapshot.CPUPercent,
+			RSSBytes:      snapshot.RSSBytes,
+			MemoryPercent: snapshot.MemoryPercent,
+			Ports:         snapshot.Ports,
+			Children:      childProcessInfos(snapshot.Children),
+		})
+	}
+	return result
+}
+
+func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
+	rows := make([]ProcessListRow, 0, len(items))
+	for parentIndex, item := range items {
+		rows = append(rows, ProcessListRow{
+			ParentIndex:   parentIndex,
+			Managed:       true,
+			ID:            item.ID,
+			Project:       item.Project,
+			Name:          item.Name,
+			Depth:         0,
+			PID:           item.PID,
+			Ports:         item.Ports,
+			State:         item.State,
+			CPUPercent:    item.CPUPercent,
+			RSSBytes:      item.RSSBytes,
+			MemoryPercent: item.MemoryPercent,
+			RestartCount:  item.RestartCount,
+		})
+		appendChildProcessRows(&rows, parentIndex, item.Project, item.Children)
+	}
+	return rows
+}
+
+func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project string, children []ChildProcessInfo) {
+	for _, child := range children {
+		*rows = append(*rows, ProcessListRow{
+			ParentIndex:   parentIndex,
+			Project:       project,
+			Name:          child.Name,
+			Depth:         child.Depth,
+			PID:           child.PID,
+			Ports:         child.Ports,
+			State:         child.State,
+			CPUPercent:    child.CPUPercent,
+			RSSBytes:      child.RSSBytes,
+			MemoryPercent: child.MemoryPercent,
+		})
+		appendChildProcessRows(rows, parentIndex, project, child.Children)
+	}
 }
 
 func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {

@@ -1,16 +1,40 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"goserve/internal/cliui"
+	"goserve/internal/daemon"
 	"goserve/internal/ipc"
 	"goserve/internal/paths"
 	"goserve/internal/registry"
 )
+
+func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+
+	printProcessTable([]daemon.ProcessInfo{{
+		ID: 0, Project: "demo", Name: "api", State: daemon.StateRunning, PID: 100,
+		Children: []daemon.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", State: "sleeping"}},
+	}})
+
+	text := output.String()
+	if !strings.Contains(text, "demo/api") || !strings.Contains(text, "└─ worker") {
+		t.Fatalf("table = %q, want parent and indented child rows", text)
+	}
+	if !strings.Contains(text, " 0 |") || !strings.Contains(text, " - |") {
+		t.Fatalf("table = %q, want parent ID 0 and child ID -", text)
+	}
+}
 
 func TestFollowLogResponseDecodesNextOffset(t *testing.T) {
 	var response followLogResponse
