@@ -109,6 +109,7 @@ func usage() {
 		"  status PROJECT/PROCESS|ID",
 		"  start|stop|restart|enable|disable PROJECT/PROCESS|ID",
 		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
+		"  logs clear TARGET",
 		"  monitor",
 		"  schedule list|history|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
@@ -444,6 +445,9 @@ func logsCommand(args []string) error {
 	if len(args) == 0 {
 		return errors.New("logs requires PROJECT/PROCESS, PROJECT/SCHEDULE, or ID")
 	}
+	if args[0] == "clear" {
+		return clearLogsCommand(args[1:])
+	}
 	key := args[0]
 	fs := newFlagSet("logs")
 	stream := fs.String("stream", "stdout", "stdout, stderr, or all")
@@ -477,6 +481,22 @@ func logsCommand(args []string) error {
 	} else {
 		printLogBlock(*stream, data["data"])
 	}
+	return nil
+}
+
+func clearLogsCommand(args []string) error {
+	if len(args) != 1 {
+		return errors.New("logs clear requires PROJECT/PROCESS, PROJECT/SCHEDULE, or ID")
+	}
+	response, err := call("logs.clear", struct{ Key string }{args[0]})
+	if err != nil {
+		return err
+	}
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Logs cleared for %s", result["key"])))
 	return nil
 }
 

@@ -352,6 +352,7 @@ Unix 會先對 process group 發送 SIGTERM，逾時後強制終止。Windows �
 
 ~~~text
 goserve logs TARGET [--stream STREAM] [--tail N] [--follow]
+goserve logs clear TARGET
 ~~~
 
 參數：
@@ -362,6 +363,10 @@ goserve logs TARGET [--stream STREAM] [--tail N] [--follow]
 | --stream | stdout | 可選 stdout、stderr 或 all。 |
 | --tail | 100 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
+
+`goserve logs clear TARGET` 會清除指定 process 或 schedule 的 stdout／stderr
+目前日誌與所有輪替檔。若 process 仍在執行，會保留開啟中的 writer，清除後的
+新輸出仍會繼續寫入；沒有日誌檔時視為成功。
 
 日誌位置：
 

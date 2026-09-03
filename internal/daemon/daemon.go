@@ -669,6 +669,14 @@ func (d *Daemon) RestartProcess(key string) error {
 	return d.StartProcess(key)
 }
 
+func (d *Daemon) ClearLogs(key string) error {
+	project, name, err := d.resolveLogRef(key)
+	if err != nil {
+		return err
+	}
+	return d.logs.Clear(project, name)
+}
+
 func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 	d.mu.RLock()
 	items := make([]struct {
@@ -917,6 +925,15 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "LOG_READ_FAILED", err)
 		}
 		return success(request, map[string]interface{}{"data": data, "next_offset": next})
+	case "logs.clear":
+		var p struct{ Key string }
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if err := d.ClearLogs(p.Key); err != nil {
+			return failure(request, "LOG_CLEAR_FAILED", err)
+		}
+		return success(request, map[string]string{"key": p.Key, "status": "cleared"})
 	case "schedule.list":
 		result := make([]ScheduleInfo, 0)
 		for _, item := range d.scheduler.List() {
