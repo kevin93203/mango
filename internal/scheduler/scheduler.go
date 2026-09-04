@@ -13,14 +13,37 @@ import (
 )
 
 type Record struct {
-	Project  string
-	Name     string
+	Project    string
+	Name       string
+	TargetType string
+	Target     string
+	// Trigger is the schedule name for cron executions or "manual" for an
+	// explicit workflow/task run.
+	Trigger  string
+	Status   string
 	Started  time.Time
 	Finished time.Time
 	ExitCode int
 	Error    string
 	Stderr   string
 	Attempts []Attempt
+	Tasks    []TaskRecord
+}
+
+// TaskRecord is the execution record for one direct task invocation or one
+// workflow node. Node is the workflow node name; Task is the task definition
+// referenced by that node.
+type TaskRecord struct {
+	Node            string
+	Task            string
+	Status          string
+	Started         time.Time
+	Finished        time.Time
+	DurationSeconds float64
+	ExitCode        int
+	Error           string
+	Stderr          string
+	Attempts        []Attempt
 }
 
 type Attempt struct {
@@ -37,13 +60,18 @@ type ExecutionResult struct {
 	ExitCode int
 	Err      error
 	Stderr   string
+	// Record is set by the workflow executor for unified execution history.
+	// When nil, Scheduler builds the single-process record from the result.
+	Record *Record
 }
 
 const (
-	StatusIdle    = "idle"
-	StatusRunning = "running"
-	StatusSuccess = "success"
-	StatusFailed  = "failed"
+	StatusIdle      = "idle"
+	StatusRunning   = "running"
+	StatusSuccess   = "success"
+	StatusFailed    = "failed"
+	StatusSkipped   = "skipped"
+	StatusCancelled = "cancelled"
 )
 
 // ScheduleSnapshot combines a configured schedule with its current execution
@@ -181,7 +209,9 @@ func (s *Scheduler) run(schedule config.EffectiveSchedule) {
 func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedule) {
 	key := schedule.Project + "/" + schedule.Name
 	s.mu.Lock()
-	if schedule.Concurrency == "forbid" && s.running[key] > 0 {
+	// v3 concurrency is owned by the target workflow/task. Keep the old
+	// schedule-level check for package-level compatibility with pre-v3 callers.
+	if schedule.TargetType == "" && schedule.Concurrency == "forbid" && s.running[key] > 0 {
 		s.mu.Unlock()
 		return
 	}
@@ -204,6 +234,35 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		s.mu.Unlock()
 	}()
 	execution, attempts := s.executeWithRetry(ctx, schedule)
+	if execution.Record != nil {
+		record := *execution.Record
+		if record.Project == "" {
+			record.Project = schedule.Project
+		}
+		if record.Name == "" {
+			record.Name = schedule.Name
+		}
+		if record.TargetType == "" {
+			record.TargetType = schedule.TargetType
+		}
+		if record.Target == "" {
+			record.Target = schedule.Target
+		}
+		if record.Trigger == "" {
+			record.Trigger = schedule.Name
+		}
+		if record.Started.IsZero() {
+			record.Started = started
+		}
+		if record.Finished.IsZero() {
+			record.Finished = time.Now()
+		}
+		if record.Status == "" {
+			record.Status = statusForResult(record.ExitCode, record.Error)
+		}
+		s.record(record)
+		return
+	}
 	recordStarted := started
 	recordFinished := time.Now()
 	if len(attempts) > 0 {
@@ -211,13 +270,22 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		recordFinished = attempts[len(attempts)-1].Finished
 	}
 	record := Record{
-		Project: schedule.Project, Name: schedule.Name, Started: recordStarted, Finished: recordFinished,
+		Project: schedule.Project, Name: schedule.Name, TargetType: schedule.TargetType,
+		Target: schedule.Target, Trigger: schedule.Name, Started: recordStarted, Finished: recordFinished,
 		ExitCode: execution.ExitCode, Stderr: execution.Stderr, Attempts: attempts,
 	}
 	if execution.Err != nil {
 		record.Error = execution.Err.Error()
 	}
+	record.Status = statusForResult(record.ExitCode, record.Error)
 	s.record(record)
+}
+
+func statusForResult(exitCode int, errorText string) string {
+	if errorText != "" || exitCode != 0 {
+		return StatusFailed
+	}
+	return StatusSuccess
 }
 
 func (s *Scheduler) executeWithRetry(ctx context.Context, schedule config.EffectiveSchedule) (ExecutionResult, []Attempt) {
@@ -320,7 +388,11 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 
 	latest := make(map[string]Record)
 	for _, record := range history {
-		key := record.Project + "/" + record.Name
+		name := record.Trigger
+		if name == "" {
+			name = record.Name
+		}
+		key := record.Project + "/" + name
 		previous, ok := latest[key]
 		if !ok || record.Started.After(previous.Started) {
 			latest[key] = record
@@ -358,7 +430,9 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 		} else if record, ok := latest[key]; ok {
 			snapshot.LastRun = timePtr(record.Started)
 			snapshot.DurationSeconds = recordDuration(record)
-			if record.Error != "" || record.ExitCode != 0 {
+			if record.Status != "" {
+				snapshot.Status = record.Status
+			} else if record.Error != "" || record.ExitCode != 0 {
 				snapshot.Status = StatusFailed
 			} else {
 				snapshot.Status = StatusSuccess

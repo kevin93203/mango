@@ -1,4 +1,4 @@
-version: 2
+version: 3
 
 defaults:
   working_dir: "."
@@ -56,11 +56,8 @@ services:
     autostart: false
     restart: never
 
-schedules:
-  - name: nightly-job
-    cron: "0 2 * * *"
-    timezone: Asia/Taipei
-    action: run
+tasks:
+  nightly-job:
     command: go
     args:
       - run
@@ -69,14 +66,240 @@ schedules:
       - "3"
       - --interval
       - 300ms
-    concurrency: forbid
     timeout: 5m
+    concurrency: forbid
     retry:
       retries: 3
       delay: 5s
 
-  - name: refresh-api
+  demo-prepare:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-prepare
+      - --steps
+      - "2"
+      - --delay
+      - 200ms
+    timeout: 30s
+    concurrency: forbid
+
+  demo-extract-python:
+    command: python3
+    args:
+      - ./examples/tasks/transform.py
+      - --name
+      - demo-extract-python
+      - --steps
+      - "3"
+      - --delay
+      - "0.2"
+    timeout: 30s
+    concurrency: allow
+
+  demo-transform-go:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-transform-go
+      - --steps
+      - "3"
+      - --delay
+      - 250ms
+    timeout: 30s
+    concurrency: allow
+
+  demo-load-sh:
+    command: sh
+    args:
+      - ./examples/tasks/load.sh
+      - demo-load-sh
+    timeout: 30s
+    concurrency: forbid
+
+  demo-branch-python:
+    command: python3
+    args:
+      - ./examples/tasks/transform.py
+      - --name
+      - demo-branch-python
+      - --steps
+      - "4"
+      - --delay
+      - "0.15"
+    timeout: 30s
+    concurrency: allow
+
+  demo-branch-go:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-branch-go
+      - --steps
+      - "4"
+      - --delay
+      - 150ms
+    timeout: 30s
+    concurrency: allow
+
+  demo-merge-sh:
+    command: sh
+    args:
+      - ./examples/tasks/load.sh
+      - demo-merge-sh
+    timeout: 30s
+
+  demo-retry-failure:
+    command: sh
+    args:
+      - ./examples/tasks/fail.sh
+      - demo-retry-failure
+    timeout: 10s
+    concurrency: forbid
+    retry:
+      retries: 2
+      delay: 1s
+
+  demo-independent-python:
+    command: python3
+    args:
+      - ./examples/tasks/transform.py
+      - --name
+      - demo-independent-python
+      - --steps
+      - "2"
+      - --delay
+      - "0.2"
+    timeout: 30s
+    concurrency: allow
+
+  demo-slow-timeout:
+    command: sh
+    args:
+      - ./examples/tasks/slow.sh
+      - demo-slow-timeout
+      - "10"
+    timeout: 2s
+    concurrency: forbid
+    retry:
+      retries: 1
+      delay: 500ms
+
+  demo-direct-python:
+    command: python3
+    args:
+      - ./examples/tasks/transform.py
+      - --name
+      - demo-direct-python
+      - --steps
+      - "2"
+      - --delay
+      - "0.1"
+    timeout: 30s
+    concurrency: allow
+
+workflows:
+  nightly-pipeline:
+    concurrency: forbid
+    tasks:
+      run-nightly-job:
+        uses: nightly-job
+
+  demo-linear:
+    concurrency: forbid
+    tasks:
+      prepare:
+        uses: demo-prepare
+      extract:
+        uses: demo-extract-python
+        needs: [prepare]
+      transform:
+        uses: demo-transform-go
+        needs: [extract]
+      load:
+        uses: demo-load-sh
+        needs: [transform]
+
+  demo-parallel:
+    concurrency: allow
+    tasks:
+      prepare:
+        uses: demo-prepare
+      branch-python:
+        uses: demo-branch-python
+        needs: [prepare]
+      branch-go:
+        uses: demo-branch-go
+        needs: [prepare]
+      merge:
+        uses: demo-merge-sh
+        needs: [branch-python, branch-go]
+
+  demo-failure:
+    concurrency: forbid
+    tasks:
+      retry:
+        uses: demo-retry-failure
+      independent:
+        uses: demo-independent-python
+      blocked:
+        uses: demo-load-sh
+        needs: [retry]
+      fan-in:
+        uses: demo-merge-sh
+        needs: [blocked, independent]
+
+  demo-timeout:
+    concurrency: forbid
+    tasks:
+      slow:
+        uses: demo-slow-timeout
+
+schedules:
+  - name: nightly-job
+    cron: "0 2 * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: nightly-pipeline
+
+  - name: manual-one-task
+    cron: "0 * * * *"
+    timezone: Asia/Taipei
+    target_type: task
+    target: nightly-job
+
+  - name: demo-linear-every-5m
+    cron: "*/5 * * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: demo-linear
+
+  - name: demo-parallel-every-10m
+    cron: "*/10 * * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: demo-parallel
+
+  - name: demo-failure-every-15m
+    cron: "*/15 * * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: demo-failure
+
+  - name: demo-timeout-every-20m
+    cron: "*/20 * * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: demo-timeout
+
+  - name: demo-direct-task-every-30m
     cron: "*/30 * * * *"
     timezone: Asia/Taipei
-    action: restart
-    target: api
+    target_type: task
+    target: demo-direct-python

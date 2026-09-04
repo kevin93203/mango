@@ -72,9 +72,9 @@ MANGO_HOME/
 │  ├─ daemon.pid
 │  └─ mango.sock       # Unix；Windows 使用 Named Pipe
 ├─ logs/
-│  └─ <project>/<service>/
+│  └─ <project>/<service-or-execution-kind>/
 └─ state/
-	└─ schedule-history.json
+	└─ execution-history.json
 ~~~
 
 ## 快速開始
@@ -151,7 +151,7 @@ mango status demo/api --json
 
 `--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
 
-`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project ls`、`apply`、`ls`、`status`、service lifecycle、`schedule`、`startup status` 與 `doctor`。
+`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project ls`、`apply`、`ls`、`status`、service lifecycle、`schedule`、`workflow`、`task`、`startup status` 與 `doctor`。
 
 `logs`、`monitor`、`config validate` 與 startup install/uninstall 維持文字或互動式輸出，不支援 `--json`。
 
@@ -215,7 +215,7 @@ daemon is not running; start it with: mango daemon start
 mango logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；service lifecycle 另外支援直接指定 `PROJECT` 以操作該 project 的全部 service，`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 service `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；service lifecycle 另外支援直接指定 `PROJECT` 以操作該 project 的全部 service。Task logs 使用 `PROJECT/task/TASK`，workflow node logs 使用 `PROJECT/workflow/WORKFLOW/NODE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
 
 ### project
 
@@ -301,13 +301,13 @@ mango config validate PATH
 
 驗證項目包括：
 
-- version 是否為目前支援的版本 2
-- project、service、schedule 名稱是否有效且不重複
+- version 是否為目前支援的版本 3（version 2 不會自動轉換）
+- project、service、task、workflow、schedule 名稱是否有效且不重複
 - command 是否有指定；實際 executable 是否可啟動會在 service start 時檢查
 - restart、duration、log size 設定格式
 - healthcheck 與 depends_on 的條件、未知服務及循環依賴
 - cron 表達式與 timezone
-- schedule action 與 target
+- task、workflow DAG 引用與 schedule target
 
 ### ls
 
@@ -397,7 +397,7 @@ mango logs clear TARGET
 
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
-| TARGET | 無 | 一個以上的 service key、schedule key 或全域整數 service id。 |
+| TARGET | 無 | 一個以上的 service key、task/workflow log key 或全域整數 service id。 |
 | --stream | all | 可選 stdout、stderr 或 all。 |
 | --tail | 15 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
@@ -405,7 +405,7 @@ mango logs clear TARGET
 指定多個 target 時，各 target 的 stdout／stderr 會並行追蹤並依事件抵達順序交錯輸出；每個完整輸出行都會使用解析後的 canonical target 前綴，例如
 `｜demo/api｜ log content`。互動式 TTY 會將 stdout 前綴顯示為綠色、stderr 前綴顯示為紅色，其他輸出環境不加入 ANSI 色碼。
 
-`mango logs clear TARGET` 會清除指定 service 或 schedule 的 stdout／stderr
+`mango logs clear TARGET` 會清除指定 service、task 或 workflow node 的 stdout／stderr。
 目前日誌與所有輪替檔。若 service 仍在執行，會保留開啟中的 writer，清除後的
 新輸出仍會繼續寫入；沒有日誌檔時視為成功。
 
@@ -442,55 +442,26 @@ mango monitor
 
 若 stdout 或 stdin 不是 TTY，monitor 會退化成輸出一次 service table。
 
-### schedule
+### schedule、workflow 與 task
 
-查看、手動執行排程與查詢排程歷史。
+Schedule 只負責 cron trigger；它透過 `target_type`／`target` 觸發 workflow 或單一 task。執行定義與 DAG 編排分別放在 tasks 與 workflows：
 
 ~~~text
 mango schedule ls
-mango schedule history [--tail N]
-mango schedule history --attempts [--tail N]
 mango schedule run PROJECT/SCHEDULE
+mango workflow ls|run|status|history PROJECT/WORKFLOW
+mango task ls|run|history PROJECT/TASK
 ~~~
 
-| 指令 | 說明 |
-| --- | --- |
-| ls | 列出 schedule、cron、timezone、action、concurrency、timeout 與執行狀態。 |
-| history | 顯示已保存的排程執行紀錄。 |
-| run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
+`schedule ls` 只顯示 schedule、cron、timezone、target type、target 與 next run。`workflow history` 和 `task history` 查詢共用的 `state/execution-history.json`；`schedule_history_limit` 仍是這個檔案的 retention 設定。
 
-`mango schedule ls` 會在基本設定欄位後顯示 `TIMEOUT`、`STATUS`、`LAST_RUN`、`NEXT_RUN` 與 `DURATION`：
+Task 的 `timeout` 從 process 成功啟動後開始計時。逾時會以 exit code 124 強制終止整個 process tree，並視為失敗，沿用 task 的 retry；每次 retry 都有獨立 timeout。daemon shutdown 則維持 graceful cancellation。
 
-- `STATUS` 為 `idle`、`running`、`success` 或 `failed`；執行中狀態優先顯示。
-- `LAST_RUN` 是最近一次實際執行的開始時間，包含手動執行；`NEXT_RUN` 是下一次 cron 觸發時間。
-- `DURATION` 是最近一次執行耗時；執行中則顯示目前已耗時。尚未有值時顯示 `-`。
-- `TIMEOUT` 是 `action: run` 的設定上限；未設定時顯示 `-`。`--json` 會以 `TimeoutSeconds: 0` 表示停用。
-- 時間依 schedule 的 timezone 顯示。`--json` 會以 RFC3339 時間、秒數 duration 與 `null` 空值回傳這些欄位。
-
-schedule run 的 key 格式為 PROJECT/SCHEDULE。
-
-`mango schedule history --tail N` 只限制本次輸出的筆數，預設為最近 100 筆；`--tail 0` 顯示所有已保留紀錄，不會修改 daemon 的保留設定。
-
-`mango schedule history` 預設每次 schedule run 顯示一筆摘要；`--attempts` 會以單一表格、每個 attempt 一列，展開初次執行與每次 retry 的開始／結束時間、duration、exit code、結果、error 與 stderr。`--json` 永遠包含完整的 `Attempts` 陣列；舊版 history 若沒有 attempt 詳情則回傳 `null`，文字模式會顯示 `attempt details unavailable`。history 的保留上限以 schedule run 主紀錄計算，不以 attempt 數量計算。
-
-排程 history 會保存於 `state/schedule-history.json`，daemon 重啟後仍可查詢。可在 `daemon.yaml` 設定全域保留筆數：
-
-~~~yaml
-schedule_history_limit: 1000
-~~~
-
-預設值 `0` 代表不限制。正數只保留最新 N 筆；高頻率排程建議設定正數以控制 state 檔案大小。
-
-`action = "run"` 的 stderr 會以最多 64 KiB 的尾端內容保存於 history；完整 stderr 仍可用 `mango logs PROJECT/SCHEDULE --stream stderr` 查閱。
-
-`action = "run"` 的 schedule 可直接使用 schedule key 查看日誌：
+Task logs 使用 `PROJECT/task/TASK`，workflow node logs 使用 `PROJECT/workflow/WORKFLOW/NODE`，例如：
 
 ~~~powershell
-mango logs PROJECT/SCHEDULE --stream all
-mango logs PROJECT/SCHEDULE --stream all --follow
+mango logs demo/workflow/nightly-pipeline/run-nightly-job --stream all
 ~~~
-
-例如 `mango logs demo/nightly-job --stream all`。daemon 會將它解析至 `schedule-nightly-job` 日誌目錄；`start`、`stop` 與 `restart` 類型的 schedule 沒有自己的 command logs，請查看目標 service 的日誌。
 
 ### startup
 
@@ -518,7 +489,7 @@ startup service 只會啟動 daemon；service 是否啟動仍由 YAML 的 autost
 mango doctor
 ~~~
 
-會顯示作業系統、mango root、registry、logs 根目錄、daemon.log、schedule history 路徑、daemon 是否可連線與 startup 是否已安裝。
+會顯示作業系統、mango root、registry、logs 根目錄、daemon.log、execution history 路徑、daemon 是否可連線與 startup 是否已安裝。
 
 ### help
 
@@ -536,12 +507,12 @@ mango --help
 ### 根欄位
 
 ~~~yaml
-version: 2
+version: 3
 ~~~
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| version | 是 | 目前必須為 2。 |
+| version | 是 | 目前必須為 3；version 2 會直接拒絕，不自動轉換。 |
 
 project name 不再寫在 YAML，而是在 `mango project add NAME PATH` 指定。舊設定檔中的 `project:` 欄位會被視為未知欄位，請移除後再重新註冊。
 
@@ -660,46 +631,71 @@ services:
 
 `condition` 支援 `service_started`、`service_healthy` 與 `service_completed_successfully`。條件未滿足時 dependent 顯示 `waiting` 且不建立 PID；設定錯誤、未知 dependency 與 cycle 會在 apply 前拒絕。
 
+### tasks
+
+Task 是最小的 command 執行單元；timeout、retry 與 concurrency 都在這裡定義，且不包含 service lifecycle：
+
+~~~yaml
+tasks:
+  extract:
+    command: ./bin/extract
+    timeout: 10m
+    concurrency: forbid
+    retry:
+      retries: 2
+      delay: 5s
+~~~
+
+`command`、`args`、`working_dir`、`env`、`timeout`、`retry` 與 `concurrency` 可用於 task。timeout 未設定時不設期限；明確值必須是正數 duration。`forbid` 會讓相同 task invocation 排隊，`allow` 允許平行執行。
+
+### workflows
+
+Workflow 是由 task node 組成的 DAG。每個 node 必須明確用 `uses` 指向同一 project 的 task，`needs` 指向同一 workflow 的 node：
+
+~~~yaml
+workflows:
+  nightly-pipeline:
+    concurrency: forbid
+    tasks:
+      extract:
+        uses: extract
+      transform:
+        uses: transform
+        needs: [extract]
+      load:
+        uses: load
+        needs: [transform]
+~~~
+
+所有 `needs` 成功後 node 才會執行；上游失敗或 skipped 時 descendant 會 skipped，獨立分支仍會繼續。workflow `forbid` 會跳過重疊 trigger，`allow` 允許 workflow run 重疊。
+
 ### schedules
+
+Schedule 只負責 cron trigger，可觸發 workflow 或單一 task：
 
 ~~~yaml
 schedules:
-  - name: nightly-job
+  - name: nightly
     cron: "0 2 * * *"
     timezone: Asia/Taipei
-    action: run
-    command: go
-    args: [run, ./examples/one-task, --iterations, "3"]
-    concurrency: forbid
-    timeout: 5m
-    retry:
-      retries: 3
-      delay: 5s
+    target_type: workflow
+    target: nightly-pipeline
+
+  - name: manual-extract
+    cron: "0 * * * *"
+    target_type: task
+    target: extract
 ~~~
 
 | 欄位 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
 | name | 是 | 無 | project 內唯一的 schedule 名稱。 |
-| cron | 是 | 無 | 五欄位 cron：分、時、日、月、星期。 |
-| timezone | 否 | Local | IANA timezone，例如 Asia/Taipei、UTC。 |
-| action | 是 | 無 | run、start、stop 或 restart。 |
-| target | action 非 run 時必填 | 無 | 要操作的 service name。 |
-| command | action=run 時必填 | 無 | 一次性 task executable。 |
-| args | 否 | [] | 一次性 task 的參數陣列。 |
-| working_dir | 否 | defaults 值 | task 工作目錄。 |
-| env | 否 | 繼承環境 | task 環境變數。 |
-| concurrency | 否 | forbid | 可選 forbid 或 allow。 |
-| timeout | 否 | 停用 | `action: run` 任務的最長執行時間；逾時會強制終止 process tree。 |
-| retry | 否 | 不重試 | `retries` 表示初次失敗後的重試次數；`delay` 表示每次重試前的等待時間。 |
+| cron | 是 | 無 | 五欄位 cron。第一版只支援 cron trigger。 |
+| timezone | 否 | Local | IANA timezone。 |
+| target_type | 是 | 無 | 只能是 `workflow` 或 `task`。 |
+| target | 是 | 無 | 同一 project 內的 workflow 或 task 名稱。 |
 
-排程規則：
-
-- daemon 離線期間錯過的排程不補執行。
-- forbid 會跳過上一個相同 schedule 尚未完成的執行。
-- `action: run` 可設定 `timeout`；逾時會以 exit code 124 記錄為失敗，並依 `retry` 設定重試。`start`、`stop` 與 `restart` 不支援 timeout。
-- schedule 執行失敗時，會依 `retry.retries` 與 `retry.delay` 重試；同一次 schedule run 最終只保存一筆 history，並在 `Attempts` 保存每次執行詳情。
-- cron 與 timezone 錯誤會使 config validate／apply 失敗。
-- schedule task 日誌會寫入 service log root 下的 schedule-<name> 目錄。
+daemon 離線期間錯過的排程不補執行。排程執行結果會建立統一 execution record；Workflow／Task history 都從 `state/execution-history.json` 查詢，保留上限沿用 daemon 的 `schedule_history_limit`。
 
 ## Service 狀態與重啟
 
@@ -810,7 +806,7 @@ mango logs demo/one-task --stream all --follow
 ~~~powershell
 mango schedule ls
 mango schedule run demo/nightly-job
-mango schedule history
+mango workflow history demo/nightly-pipeline
 ~~~
 
 開機自啟：

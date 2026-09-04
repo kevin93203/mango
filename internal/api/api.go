@@ -125,14 +125,47 @@ type ScheduleInfo struct {
 	Name            string
 	Cron            string
 	Timezone        string
-	Action          string
+	TargetType      string
 	Target          string
-	Concurrency     string
 	TimeoutSeconds  float64
 	Status          string
 	LastRun         *time.Time
 	NextRun         *time.Time
 	DurationSeconds *float64
+}
+
+type TaskInfo struct {
+	Project         string
+	Name            string
+	Command         string
+	Args            []string
+	WorkingDir      string
+	TimeoutSeconds  float64
+	Concurrency     string
+	RetryCount      int
+	Status          string
+	LastRun         *time.Time
+	DurationSeconds *float64
+}
+
+type WorkflowTaskInfo struct {
+	Node            string
+	Uses            string
+	Needs           []string
+	Status          string
+	LastRun         *time.Time
+	DurationSeconds *float64
+}
+
+type WorkflowInfo struct {
+	Project         string
+	Name            string
+	Concurrency     string
+	Status          string
+	TaskCount       int
+	LastRun         *time.Time
+	DurationSeconds *float64
+	Tasks           []WorkflowTaskInfo
 }
 
 func HealthDisplay(info *HealthInfo) string {

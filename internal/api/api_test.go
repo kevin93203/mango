@@ -59,7 +59,7 @@ func TestScheduleInfoJSONUsesNullableRuntimeFields(t *testing.T) {
 	duration := 1.25
 	items := []ScheduleInfo{
 		{Project: "demo", Name: "idle", Status: "idle"},
-		{Project: "demo", Name: "job", Status: "success", TimeoutSeconds: 2.5, LastRun: &started, DurationSeconds: &duration},
+		{Project: "demo", Name: "job", TargetType: "task", Target: "extract", Status: "success", TimeoutSeconds: 2.5, LastRun: &started, DurationSeconds: &duration},
 	}
 
 	data, err := json.Marshal(items)
@@ -73,7 +73,7 @@ func TestScheduleInfoJSONUsesNullableRuntimeFields(t *testing.T) {
 	if decoded[0]["LastRun"] != nil || decoded[0]["NextRun"] != nil || decoded[0]["DurationSeconds"] != nil {
 		t.Fatalf("nullable fields = %+v, want null values", decoded[0])
 	}
-	if decoded[1]["Status"] != "success" || decoded[1]["TimeoutSeconds"] != 2.5 || decoded[1]["LastRun"] != started.Format(time.RFC3339) || decoded[1]["DurationSeconds"] != duration {
+	if decoded[1]["Status"] != "success" || decoded[1]["TargetType"] != "task" || decoded[1]["Target"] != "extract" || decoded[1]["TimeoutSeconds"] != 2.5 || decoded[1]["LastRun"] != started.Format(time.RFC3339) || decoded[1]["DurationSeconds"] != duration {
 		t.Fatalf("runtime fields = %+v, want populated values", decoded[1])
 	}
 }
