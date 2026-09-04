@@ -107,8 +107,8 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	layout := testLayout(root)
 	alphaPath := filepath.Join(root, "alpha.yaml")
 	betaPath := filepath.Join(root, "beta.yaml")
-	writeTestConfig(t, alphaPath, "alpha", "api")
-	writeTestConfig(t, betaPath, "beta", "worker")
+	writeTestConfig(t, alphaPath, "api")
+	writeTestConfig(t, betaPath, "worker")
 	if err := registry.Save(layout.Registry, registry.File{
 		Version: 2,
 		Projects: map[string]registry.Project{
@@ -216,7 +216,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 		t.Fatalf("log after clear = %q, want empty", cleared)
 	}
 
-	writeTestConfig(t, alphaPath, "alpha", "api", "job")
+	writeTestConfig(t, alphaPath, "api", "job")
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
 	}
@@ -229,11 +229,11 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
 	assertProcessID(t, d.ListProcesses(""), "alpha/job", 2)
 
-	writeTestConfig(t, alphaPath, "alpha", "job")
+	writeTestConfig(t, alphaPath, "job")
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
 	}
-	writeTestConfig(t, alphaPath, "alpha", "api")
+	writeTestConfig(t, alphaPath, "api")
 	if err := d.ApplyProject("alpha"); err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,6 @@ func TestPlanBulkServicesExpandsProjectsInDependencyOrderAndDeduplicates(t *test
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "alpha.yaml")
 	content := `version: 2
-project: alpha
 
 services:
   db:
@@ -317,7 +316,7 @@ func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "alpha.yaml")
-	writeTestConfig(t, configPath, "alpha", "api", "worker")
+	writeTestConfig(t, configPath, "api", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
 		Version: 2,
 		Projects: map[string]registry.Project{
@@ -365,8 +364,8 @@ func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	layout := testLayout(root)
 	alphaPath := filepath.Join(root, "alpha.yaml")
 	betaPath := filepath.Join(root, "beta.yaml")
-	writeTestConfig(t, alphaPath, "alpha", "api")
-	writeTestConfig(t, betaPath, "beta", "worker")
+	writeTestConfig(t, alphaPath, "api")
+	writeTestConfig(t, betaPath, "worker")
 	if err := registry.Save(layout.Registry, registry.File{
 		Version:       1,
 		NextProcessID: 21,
@@ -507,7 +506,6 @@ func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	configPath := filepath.Join(root, "demo.yaml")
 	readyPath := filepath.Join(root, "ready")
 	content := `version: 2
-project: demo
 
 defaults:
   working_dir: .
@@ -596,7 +594,6 @@ func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 	configPath := filepath.Join(root, "demo.yaml")
 	writeDependentConfig := func(argument string) {
 		content := fmt.Sprintf(`version: 2
-project: demo
 
 services:
   db:
@@ -665,7 +662,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
-	writeTestScheduleConfig(t, configPath, "demo", "nightly-job")
+	writeTestScheduleConfig(t, configPath, "nightly-job")
 	if err := registry.Save(layout.Registry, registry.File{
 		Version: 2,
 		Projects: map[string]registry.Project{
@@ -760,8 +757,8 @@ func testLayout(root string) paths.Layout {
 	}
 }
 
-func writeTestConfig(t *testing.T, path, project string, processNames ...string) {
-	lines := []string{"version: 2", fmt.Sprintf("project: %s", project), "", "services:"}
+func writeTestConfig(t *testing.T, path string, processNames ...string) {
+	lines := []string{"version: 2", "", "services:"}
 	for _, processName := range processNames {
 		lines = append(lines,
 			fmt.Sprintf("  %s:", processName),
@@ -775,10 +772,9 @@ func writeTestConfig(t *testing.T, path, project string, processNames ...string)
 	}
 }
 
-func writeTestScheduleConfig(t *testing.T, path, project, scheduleName string) {
+func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 	content := strings.Join([]string{
 		"version: 2",
-		fmt.Sprintf("project: %s", project),
 		"",
 		"schedules:",
 		fmt.Sprintf("  - name: %s", scheduleName),

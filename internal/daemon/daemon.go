@@ -286,6 +286,18 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	d.registry = reg
 	d.configErrors = map[string]string{}
 	d.mu.Unlock()
+	var removed []string
+	d.mu.RLock()
+	for name := range d.projects {
+		if _, ok := reg.Projects[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	d.mu.RUnlock()
+	sort.Strings(removed)
+	for _, name := range removed {
+		d.removeProject(name)
+	}
 	projectNames := make([]string, 0, len(reg.Projects))
 	for name := range reg.Projects {
 		projectNames = append(projectNames, name)
@@ -301,17 +313,6 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 			d.recordConfigError(name, err)
 			fmt.Fprintf(os.Stderr, "project %s skipped: %v\n", name, err)
 		}
-	}
-	var removed []string
-	d.mu.RLock()
-	for name := range d.projects {
-		if _, ok := reg.Projects[name]; !ok {
-			removed = append(removed, name)
-		}
-	}
-	d.mu.RUnlock()
-	for _, name := range removed {
-		d.removeProject(name)
 	}
 	return nil
 }
@@ -348,18 +349,18 @@ func (d *Daemon) clearConfigError(project string) {
 }
 
 func (d *Daemon) applyProject(name, path string) error {
+	if err := config.ValidateProjectName(name); err != nil {
+		return fmt.Errorf("project %s: %w", name, err)
+	}
 	file, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("project %s: %w", name, err)
 	}
-	if file.Project != name {
-		return fmt.Errorf("project registry name %q does not match YAML project %q", name, file.Project)
-	}
-	specs, err := file.ServicesEffective()
+	specs, err := file.ServicesEffective(name)
 	if err != nil {
 		return err
 	}
-	schedules, err := file.SchedulesEffective()
+	schedules, err := file.SchedulesEffective(name)
 	if err != nil {
 		return err
 	}
@@ -592,7 +593,7 @@ func (d *Daemon) allSchedulesWith(schedules []config.EffectiveSchedule, projectN
 			result = append(result, schedules...)
 			continue
 		}
-		items, err := project.file.SchedulesEffective()
+		items, err := project.file.SchedulesEffective(name)
 		if err == nil {
 			result = append(result, items...)
 		}

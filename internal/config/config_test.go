@@ -11,7 +11,6 @@ func TestLoadNestedHealthcheckAndDependsOn(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
 	content := `version: 2
-project: demo
 
 services:
   db:
@@ -43,11 +42,11 @@ services:
 	if err != nil {
 		t.Fatal(err)
 	}
-	services, err := file.ServicesEffective()
+	services, err := file.ServicesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(services) != 2 || services[0].Name != "db" || services[1].Name != "web" {
+	if len(services) != 2 || services[0].Project != "demo" || services[0].Name != "db" || services[1].Name != "web" {
 		t.Fatalf("services = %+v", services)
 	}
 	if services[0].HealthCheck == nil || len(services[0].HealthCheck.Checks) != 2 || services[0].HealthCheck.Retries != 2 {
@@ -67,7 +66,7 @@ services:
 
 func TestValidateRejectsHealthDependencyWithoutEnabledCheck(t *testing.T) {
 	file := File{
-		Version: 2, Project: "demo", Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"db":  {Command: "db", HealthCheck: &HealthCheck{Test: []string{"NONE"}}},
 			"web": {Command: "web", DependsOn: map[string]Dependency{"db": {Condition: "service_healthy"}}},
@@ -80,7 +79,7 @@ func TestValidateRejectsHealthDependencyWithoutEnabledCheck(t *testing.T) {
 
 func TestValidateRejectsCompletedDependencyWithRestart(t *testing.T) {
 	file := File{
-		Version: 2, Project: "demo", Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"job": {Command: "job"},
 			"web": {Command: "web", DependsOn: map[string]Dependency{"job": {Condition: "service_completed_successfully"}}},
@@ -93,7 +92,7 @@ func TestValidateRejectsCompletedDependencyWithRestart(t *testing.T) {
 
 func TestValidateRejectsDependencyCycle(t *testing.T) {
 	file := File{
-		Version: 2, Project: "demo", Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"a": {Command: "a", DependsOn: map[string]Dependency{"b": {}}},
 			"b": {Command: "b", DependsOn: map[string]Dependency{"a": {}}},
@@ -109,7 +108,6 @@ func TestLoadAndEffectiveProcesses(t *testing.T) {
 	path := filepath.Join(dir, "mango.yaml")
 	content := strings.Join([]string{
 		"version: 2",
-		"project: demo",
 		"",
 		"defaults:",
 		"  working_dir: .",
@@ -130,12 +128,15 @@ func TestLoadAndEffectiveProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := file.ProcessesEffective()
+	items, err := file.ProcessesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(items) != 1 || items[0].Name != "api" || items[0].StopTimeout.String() != "2s" {
 		t.Fatalf("unexpected effective process: %+v", items)
+	}
+	if items[0].Project != "demo" {
+		t.Fatalf("effective process project = %q, want demo", items[0].Project)
 	}
 	if items[0].WorkingDir != dir {
 		t.Fatalf("working dir = %q, want %q", items[0].WorkingDir, dir)
@@ -148,7 +149,6 @@ func TestLoadAndEffectiveProcesses(t *testing.T) {
 func TestValidateRejectsInvalidServiceName(t *testing.T) {
 	file := File{
 		Version:  2,
-		Project:  "demo",
 		Path:     filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{"bad name": {Command: "one"}},
 	}
@@ -160,11 +160,7 @@ func TestValidateRejectsInvalidServiceName(t *testing.T) {
 func TestValidateProjectNameMustStartWithLetter(t *testing.T) {
 	for _, project := range []string{"1demo", "123", "9-prod"} {
 		t.Run(project, func(t *testing.T) {
-			file := File{
-				Version: 2, Project: project, Path: filepath.Join(t.TempDir(), "x.yaml"),
-				Services: map[string]Service{"1service": {Command: "one"}},
-			}
-			err := Validate(file)
+			err := ValidateProjectName(project)
 			if err == nil || !strings.Contains(err.Error(), "project name must start with an ASCII letter") {
 				t.Fatalf("error = %v, want project name validation error", err)
 			}
@@ -173,20 +169,14 @@ func TestValidateProjectNameMustStartWithLetter(t *testing.T) {
 }
 
 func TestValidateProjectNameAllowsDigitsAfterFirstLetter(t *testing.T) {
-	file := File{
-		Version: 2, Project: "demo1-prod_v2.0", Path: filepath.Join(t.TempDir(), "x.yaml"),
-		Services:  map[string]Service{"1service": {Command: "one"}},
-		Schedules: []Schedule{{Name: "1schedule", Cron: "0 0 * * *", Action: "run", Command: "one"}},
-	}
-	if err := Validate(file); err != nil {
-		t.Fatalf("Validate() error = %v", err)
+	if err := ValidateProjectName("demo1-prod_v2.0"); err != nil {
+		t.Fatalf("ValidateProjectName() error = %v", err)
 	}
 }
 
 func TestValidateSchedule(t *testing.T) {
 	file := File{
 		Version: 2,
-		Project: "demo",
 		Path:    filepath.Join(t.TempDir(), "x.yaml"),
 		Schedules: []Schedule{{
 			Name: "job", Cron: "0 2 * * *", Timezone: "Asia/Taipei",
@@ -203,7 +193,6 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 	external := t.TempDir()
 	file := File{
 		Version: 2,
-		Project: "demo",
 		Path:    filepath.Join(root, "mango.yaml"),
 		Defaults: Defaults{
 			WorkingDir: "defaults",
@@ -216,11 +205,11 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 		}},
 	}
 
-	processes, err := file.ProcessesEffective()
+	processes, err := file.ProcessesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	schedules, err := file.SchedulesEffective()
+	schedules, err := file.SchedulesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +226,7 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 }
 
 func TestVersionOneConfigIsRejected(t *testing.T) {
-	file := File{Version: 1, Project: "demo", Path: filepath.Join(t.TempDir(), "x.yaml"), Services: map[string]Service{"api": {Command: "echo"}}}
+	file := File{Version: 1, Path: filepath.Join(t.TempDir(), "x.yaml"), Services: map[string]Service{"api": {Command: "echo"}}}
 	err := Validate(file)
 	if err == nil || !strings.Contains(err.Error(), "version 2") {
 		t.Fatalf("error = %v, want explicit version 2 error", err)
@@ -247,7 +236,6 @@ func TestVersionOneConfigIsRejected(t *testing.T) {
 func TestLoadRejectsLegacyServiceEnvField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
 	content := `version: 2
-project: demo
 
 services:
   api:
@@ -266,7 +254,6 @@ services:
 func TestLoadRejectsUnknownYAMLField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
 	content := `version: 2
-project: demo
 unknown: true
 services:
   api:
@@ -280,10 +267,25 @@ services:
 	}
 }
 
+func TestLoadRejectsProjectYAMLField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.yaml")
+	content := `version: 2
+project: demo
+services:
+  api:
+    command: echo
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "field project") {
+		t.Fatalf("error = %v, want removed project field error", err)
+	}
+}
+
 func TestLoadRejectsInvalidYAMLType(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
 	content := `version: invalid
-project: demo
 services:
   api:
     command: echo
@@ -310,7 +312,6 @@ func TestLoadRejectsNonYAMLExtension(t *testing.T) {
 func TestLoadRejectsMissingServiceCommand(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
 	content := `version: 2
-project: demo
 services:
   api: {}
 `
@@ -325,7 +326,6 @@ services:
 func TestLoadRejectsEmptyHealthCheckProbe(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
 	content := `version: 2
-project: demo
 services:
   api:
     command: echo

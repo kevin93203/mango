@@ -1,5 +1,4 @@
 version: 2
-project: demo
 
 defaults:
   working_dir: "."

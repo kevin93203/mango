@@ -529,13 +529,13 @@ func TestConfigValidateUsesPositionalPath(t *testing.T) {
 	}
 }
 
-func TestProjectAddAndRemoveUsePositionalArguments(t *testing.T) {
+func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
 	root := t.TempDir()
 	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
 
-	if err := projectCommand(layout, []string{"add", configPath}); err != nil {
-		t.Fatalf("project add PATH = %v", err)
+	if err := projectCommand(layout, []string{"add", "demo", configPath}); err != nil {
+		t.Fatalf("project add NAME PATH = %v", err)
 	}
 	reg, err := registry.Load(layout.Registry)
 	if err != nil {
@@ -550,7 +550,7 @@ func TestProjectAddAndRemoveUsePositionalArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	duplicateConfigPath := writeCLIConfig(t)
-	if err := projectCommand(layout, []string{"add", duplicateConfigPath}); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if err := projectCommand(layout, []string{"add", "demo", duplicateConfigPath}); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("duplicate project add error = %v, want already registered", err)
 	}
 	currentRegistry, err := os.ReadFile(layout.Registry)
@@ -575,6 +575,122 @@ func TestProjectAddAndRemoveUsePositionalArguments(t *testing.T) {
 	}
 	if _, ok := reg.Projects["demo"]; ok {
 		t.Fatal("project demo remains registered after removal")
+	}
+}
+
+func TestProjectRenameReusesConfigPathAndRebuildsEntry(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
+	configPath := writeCLIConfig(t)
+
+	if err := projectCommand(layout, []string{"add", "a_1", configPath}); err != nil {
+		t.Fatalf("project add = %v", err)
+	}
+	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err != nil {
+		t.Fatalf("project rename = %v", err)
+	}
+
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Projects["a_1"]; ok {
+		t.Fatal("old project remains registered after rename")
+	}
+	project, ok := reg.Projects["demo"]
+	if !ok || project.Name != "demo" || project.ConfigPath != configPath || !project.Enabled {
+		t.Fatalf("renamed project = %+v, want demo with path %q", project, configPath)
+	}
+}
+
+func TestProjectRenameRejectsMissingConfigWithoutChangingRegistry(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
+	missingPath := filepath.Join(root, "missing.yaml")
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"a_1": {Name: "a_1", ConfigPath: missingPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err == nil {
+		t.Fatal("project rename unexpectedly succeeded for missing config")
+	}
+	current, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(original) {
+		t.Fatalf("registry changed after failed rename: before=%q after=%q", original, current)
+	}
+}
+
+func TestProjectRenameRejectsRegisteredTargetWithoutChangingRegistry(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
+	oldConfigPath := writeCLIConfig(t)
+	newConfigPath := writeCLIConfig(t)
+	if err := projectCommand(layout, []string{"add", "a_1", oldConfigPath}); err != nil {
+		t.Fatalf("project add old = %v", err)
+	}
+	if err := projectCommand(layout, []string{"add", "demo", newConfigPath}); err != nil {
+		t.Fatalf("project add new = %v", err)
+	}
+	original, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("project rename error = %v, want registered target error", err)
+	}
+	current, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(original) {
+		t.Fatalf("registry changed after failed rename: before=%q after=%q", original, current)
+	}
+}
+
+func TestProjectAddValidatesNameArgument(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
+	configPath := writeCLIConfig(t)
+	if err := projectCommand(layout, []string{"add", "1demo", configPath}); err == nil || !strings.Contains(err.Error(), "project name must start with an ASCII letter") {
+		t.Fatalf("project add error = %v, want project name validation error", err)
+	}
+}
+
+func TestPrintDaemonWarningsIncludesApplyAction(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorAlways})
+
+	if err := printDaemonWarnings(map[string]interface{}{
+		"status":        "degraded",
+		"config_errors": map[string]string{"demo": "read demo.yaml: file not found"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"Warning: daemon is degraded",
+		"demo: read demo.yaml: file not found",
+		"mango project apply demo",
+		"mango daemon status",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("warning output = %q, want %q", text, want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if !strings.HasPrefix(line, "\x1b[33m") || !strings.HasSuffix(line, "\x1b[0m") {
+			t.Fatalf("warning line is not yellow: %q", line)
+		}
 	}
 }
 
@@ -859,7 +975,7 @@ func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
-	content := "version: 2\nproject: demo\n\nservices:\n  api:\n    command: echo\n"
+	content := "version: 2\n\nservices:\n  api:\n    command: echo\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

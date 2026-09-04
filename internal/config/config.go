@@ -26,7 +26,6 @@ var (
 
 type File struct {
 	Version   int                `yaml:"version"`
-	Project   string             `yaml:"project"`
 	Defaults  Defaults           `yaml:"defaults"`
 	Services  map[string]Service `yaml:"services"`
 	Schedules []Schedule         `yaml:"schedules"`
@@ -206,9 +205,6 @@ func Validate(f File) error {
 	if f.Version != CurrentVersion {
 		return fmt.Errorf("unsupported config version %d; version %d is required", f.Version, CurrentVersion)
 	}
-	if !projectNamePattern.MatchString(f.Project) {
-		return errors.New("project name must start with an ASCII letter and contain only letters, digits, '.', '_' or '-'")
-	}
 	if len(f.Services) == 0 && len(f.Schedules) == 0 {
 		return errors.New("config must define at least one service or schedule")
 	}
@@ -325,6 +321,13 @@ func Validate(f File) error {
 	return nil
 }
 
+func ValidateProjectName(name string) error {
+	if !projectNamePattern.MatchString(name) {
+		return errors.New("project name must start with an ASCII letter and contain only letters, digits, '.', '_' or '-'")
+	}
+	return nil
+}
+
 func effectiveRestartPolicy(defaults Defaults, service Service) string {
 	if service.Restart != "" {
 		return service.Restart
@@ -342,7 +345,7 @@ func healthCheckEnabled(health *HealthCheck) bool {
 	return !(len(health.Test) == 1 && strings.EqualFold(health.Test[0], "NONE")) && (len(health.Test) > 0 || len(health.Checks) > 0)
 }
 
-func (f File) ServicesEffective() ([]EffectiveService, error) {
+func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) {
 	if err := Validate(f); err != nil {
 		return nil, err
 	}
@@ -436,7 +439,7 @@ func (f File) ServicesEffective() ([]EffectiveService, error) {
 			dependsOn[dependency] = dependencySpec
 		}
 		result = append(result, EffectiveService{
-			Project: f.Project, Name: name, Command: command, Args: append([]string(nil), p.Args...),
+			Project: projectName, Name: name, Command: command, Args: append([]string(nil), p.Args...),
 			WorkingDir: dir, Env: env, Environment: env, Autostart: p.Autostart, Restart: restartPolicy,
 			StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
@@ -448,11 +451,11 @@ func (f File) ServicesEffective() ([]EffectiveService, error) {
 
 // ProcessesEffective is retained as an internal compatibility alias for code
 // that has not yet migrated its terminology; it reads the v2 services map.
-func (f File) ProcessesEffective() ([]EffectiveProcess, error) {
-	return f.ServicesEffective()
+func (f File) ProcessesEffective(projectName string) ([]EffectiveProcess, error) {
+	return f.ServicesEffective(projectName)
 }
 
-func (f File) SchedulesEffective() ([]EffectiveSchedule, error) {
+func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error) {
 	if err := Validate(f); err != nil {
 		return nil, err
 	}
@@ -480,7 +483,7 @@ func (f File) SchedulesEffective() ([]EffectiveSchedule, error) {
 			command, _ = filepath.Abs(command)
 		}
 		result = append(result, EffectiveSchedule{
-			Project: f.Project, Name: s.Name, Cron: s.Cron, Timezone: loc,
+			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
 			Action: s.Action, Target: s.Target, Command: command, Args: append([]string(nil), s.Args...),
 			WorkingDir: dir, Env: mergeEnv(s.Env), Concurrency: defaultString(s.Concurrency, "forbid"),
 		})
