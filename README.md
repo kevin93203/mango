@@ -87,6 +87,7 @@ mango project add .\mango.example.toml
 ~~~
 
 project add 會把 TOML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 TOML。
+若 registry 已有相同 project name，`project add` 會拒絕此次加入並保留既有註冊內容；如需改用其他設定檔，請先執行 `mango project remove NAME`。
 
 ### 2. 啟動 daemon
 
