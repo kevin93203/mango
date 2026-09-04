@@ -397,6 +397,61 @@ func TestDaemonLogWriterColorsOnlyPrefix(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsStoragePaths(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+	layout := paths.Layout{
+		Root:         "/tmp/mango",
+		State:        "/tmp/mango/state",
+		Registry:     "/tmp/mango/projects.json",
+		Logs:         "/tmp/mango/logs",
+		DaemonLog:    "/tmp/mango/daemon.log",
+		SocketPath:   filepath.Join(t.TempDir(), "missing.sock"),
+		DaemonConfig: "/tmp/mango/daemon.toml",
+	}
+	if err := doctorCommand(layout); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"logs root",
+		layout.Logs,
+		"daemon log",
+		layout.DaemonLog,
+		"schedule history",
+		filepath.Join(layout.State, "schedule-history.json"),
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("doctor output = %q, want %q", text, want)
+		}
+	}
+
+	output.Reset()
+	jsonOutput = true
+	if err := doctorCommand(layout); err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]interface{}
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatalf("doctor JSON = %q: %v", output.String(), err)
+	}
+	for key, want := range map[string]string{
+		"logs":             layout.Logs,
+		"daemon_log":       layout.DaemonLog,
+		"schedule_history": filepath.Join(layout.State, "schedule-history.json"),
+	} {
+		if report[key] != want {
+			t.Fatalf("doctor JSON %s = %v, want %q", key, report[key], want)
+		}
+	}
+}
+
 func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput := cliOutput
