@@ -457,8 +457,8 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		layout.Logs,
 		"daemon log",
 		layout.DaemonLog,
-		"schedule history",
-		filepath.Join(layout.State, "schedule-history.json"),
+		"execution history",
+		filepath.Join(layout.State, "execution-history.json"),
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("doctor output = %q, want %q", text, want)
@@ -475,9 +475,9 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		t.Fatalf("doctor JSON = %q: %v", output.String(), err)
 	}
 	for key, want := range map[string]string{
-		"logs":             layout.Logs,
-		"daemon_log":       layout.DaemonLog,
-		"schedule_history": filepath.Join(layout.State, "schedule-history.json"),
+		"logs":              layout.Logs,
+		"daemon_log":        layout.DaemonLog,
+		"execution_history": filepath.Join(layout.State, "execution-history.json"),
 	} {
 		if report[key] != want {
 			t.Fatalf("doctor JSON %s = %v, want %q", key, report[key], want)
@@ -955,22 +955,19 @@ func TestScheduleHistoryAttemptsUnavailableForLegacyRecord(t *testing.T) {
 	}
 }
 
-func TestPrintScheduleTableIncludesRuntimeColumns(t *testing.T) {
+func TestPrintScheduleTableIncludesTargetColumns(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput := cliOutput
 	defer func() { cliOutput = previousOutput }()
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
 
-	lastRun := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	nextRun := lastRun.Add(time.Hour)
-	duration := 65.4
+	nextRun := time.Date(2026, time.January, 2, 4, 4, 5, 0, time.UTC)
 	printScheduleTable([]api.ScheduleInfo{{
-		Project: "demo", Name: "job", Cron: "0 * * * *", Timezone: "UTC", Action: "run",
-		Concurrency: "forbid", TimeoutSeconds: 2.5, Status: "failed", LastRun: &lastRun, NextRun: &nextRun, DurationSeconds: &duration,
+		Project: "demo", Name: "job", Cron: "0 * * * *", Timezone: "UTC", TargetType: "task", Target: "job", NextRun: &nextRun,
 	}})
 
 	text := output.String()
-	for _, want := range []string{"TIMEOUT", "2s", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION", "failed", "2026-01-02T03:04:05Z", "1m 5s"} {
+	for _, want := range []string{"TARGET_TYPE", "task", "TARGET", "job", "NEXT_RUN", "2026-01-02T04:04:05Z"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("table = %q, want %q", text, want)
 		}
@@ -1100,7 +1097,7 @@ func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
-	content := "version: 2\n\nservices:\n  api:\n    command: echo\n"
+	content := "version: 3\n\nservices:\n  api:\n    command: echo\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

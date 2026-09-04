@@ -17,6 +17,7 @@ import (
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/workflow"
 )
 
 func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
@@ -32,7 +33,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		PIDFile:    filepath.Join(root, "runtime", "daemon.pid"),
 	}
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 2,
+		Version: 3,
 		Projects: map[string]registry.Project{
 			"demo": {
 				Name:       "demo",
@@ -147,6 +148,99 @@ func TestScheduleRunTimeoutForceStopsAndRetries(t *testing.T) {
 	}
 }
 
+func TestV3TaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
+	if os.Getenv("MANGO_TASK_TIMEOUT_HELPER") == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+
+	root := t.TempDir()
+	d := New(testLayout(root))
+	task := config.EffectiveTask{
+		Project: "demo", Name: "slow-task", Command: os.Args[0], WorkingDir: root,
+		Args: []string{"-test.run=TestV3TaskTimeoutUsesIndependentRetryAttempts", "--"},
+		Env:  map[string]string{"MANGO_TASK_TIMEOUT_HELPER": "1"}, Timeout: 40 * time.Millisecond,
+		Concurrency: "forbid", RetryCount: 1, RetryDelay: 5 * time.Millisecond,
+	}
+	d.workflow.Apply(map[string]config.EffectiveTask{"demo/slow-task": task}, nil)
+	started := time.Now()
+	result := d.workflow.RunTask(context.Background(), "demo", "slow-task", "manual")
+	if result.Record == nil || result.Record.Status != workflow.StatusFailed || result.Record.ExitCode != 124 {
+		t.Fatalf("result = %+v, want timeout failure", result)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond || elapsed >= 2*time.Second {
+		t.Fatalf("elapsed = %s, want two independent short timeout attempts", elapsed)
+	}
+	if len(result.Record.Tasks) != 1 || len(result.Record.Tasks[0].Attempts) != 2 {
+		t.Fatalf("task records = %+v, want two attempts", result.Record.Tasks)
+	}
+	for _, attempt := range result.Record.Tasks[0].Attempts {
+		if attempt.ExitCode != 124 || attempt.Error != "task timed out after 40ms" {
+			t.Fatalf("attempt = %+v, want timeout details", attempt)
+		}
+	}
+}
+
+func TestV3SchedulesTriggerTasksAndWorkflows(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.yaml")
+	content := `version: 3
+
+tasks:
+  extract:
+    command: echo
+
+workflows:
+  pipeline:
+    tasks:
+      extract:
+        uses: extract
+
+schedules:
+  - name: direct-task
+    cron: "* * * * *"
+    target_type: task
+    target: extract
+  - name: pipeline-run
+    cron: "* * * * *"
+    target_type: workflow
+    target: pipeline
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 2, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"demo/direct-task", "demo/pipeline-run"} {
+		if err := d.scheduler.RunNow(context.Background(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.scheduler.Wait()
+	history := d.scheduler.History()
+	if len(history) != 2 {
+		t.Fatalf("history = %+v, want two execution records", history)
+	}
+	byTarget := map[string]scheduler.Record{}
+	for _, record := range history {
+		byTarget[record.TargetType+":"+record.Target] = record
+	}
+	if byTarget["task:extract"].Status != workflow.StatusSuccess || byTarget["workflow:pipeline"].Status != workflow.StatusSuccess {
+		t.Fatalf("target records = %+v", byTarget)
+	}
+	if len(byTarget["workflow:pipeline"].Tasks) != 1 || byTarget["workflow:pipeline"].Tasks[0].Task != "extract" {
+		t.Fatalf("workflow task records = %+v", byTarget["workflow:pipeline"].Tasks)
+	}
+}
+
 func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	d.scheduler = scheduler.New(func(context.Context, config.EffectiveSchedule) scheduler.ExecutionResult {
@@ -190,9 +284,6 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	}
 	if items[1].Timezone != "UTC" {
 		t.Fatalf("timezone = %q, want UTC", items[1].Timezone)
-	}
-	if items[1].TimeoutSeconds != 2 {
-		t.Fatalf("timeout = %v, want 2 seconds", items[1].TimeoutSeconds)
 	}
 }
 
@@ -245,7 +336,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	writeTestConfig(t, alphaPath, "api")
 	writeTestConfig(t, betaPath, "worker")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 2,
+		Version: 3,
 		Projects: map[string]registry.Project{
 			"beta":  {Name: "beta", ConfigPath: betaPath, Enabled: true},
 			"alpha": {Name: "alpha", ConfigPath: alphaPath, Enabled: true},
@@ -404,7 +495,7 @@ func TestPlanBulkServicesExpandsProjectsInDependencyOrderAndDeduplicates(t *test
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "alpha.yaml")
-	content := `version: 2
+	content := `version: 3
 
 services:
   db:
@@ -425,7 +516,7 @@ services:
 		t.Fatal(err)
 	}
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 2,
+		Version: 3,
 		Projects: map[string]registry.Project{
 			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
 		},
@@ -453,7 +544,7 @@ func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	configPath := filepath.Join(root, "alpha.yaml")
 	writeTestConfig(t, configPath, "api", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 2,
+		Version: 3,
 		Projects: map[string]registry.Project{
 			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
 		},
@@ -640,7 +731,7 @@ func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
 	readyPath := filepath.Join(root, "ready")
-	content := `version: 2
+	content := `version: 3
 
 defaults:
   working_dir: .
@@ -728,7 +819,7 @@ func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
 	writeDependentConfig := func(argument string) {
-		content := fmt.Sprintf(`version: 2
+		content := fmt.Sprintf(`version: 3
 
 services:
   db:
@@ -799,7 +890,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	configPath := filepath.Join(root, "demo.yaml")
 	writeTestScheduleConfig(t, configPath, "nightly-job")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 2,
+		Version: 3,
 		Projects: map[string]registry.Project{
 			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 		},
@@ -811,7 +902,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatalf("reloadRegistry() error = %v", err)
 	}
-	request, err := ipc.NewRequest("logs.resolve", struct{ Key string }{"demo/nightly-job"})
+	request, err := ipc.NewRequest("logs.resolve", struct{ Key string }{"demo/task/nightly-task"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,8 +914,8 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if err := decodeTestData(response.Data, &resolved); err != nil {
 		t.Fatal(err)
 	}
-	if resolved["key"] != "demo/nightly-job" {
-		t.Fatalf("canonical schedule target = %q, want demo/nightly-job", resolved["key"])
+	if resolved["key"] != "demo/task/nightly-task" {
+		t.Fatalf("canonical task target = %q, want demo/task/nightly-task", resolved["key"])
 	}
 	request, err = ipc.NewRequest("logs.resolve", struct{ Key string }{"demo/missing"})
 	if err != nil {
@@ -834,7 +925,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if response.OK || response.Error == nil || response.Error.Code != "LOG_TARGET_NOT_FOUND" {
 		t.Fatalf("unknown log target response = %+v", response)
 	}
-	writer, _, err := d.logs.Open("demo", scheduleLogName("nightly-job"), "stdout", 1<<20, 2)
+	writer, _, err := d.logs.Open("demo", "task-nightly-task", "stdout", 1<<20, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -849,7 +940,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 		Key    string
 		Stream string
 		Tail   int
-	}{"demo/nightly-job", "all", 10})
+	}{"demo/task/nightly-task", "all", 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +956,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 		t.Fatalf("schedule stdout = %q, want %q", data["stdout"], "schedule output\n")
 	}
 
-	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"demo/nightly-job"})
+	request, err = ipc.NewRequest("logs.clear", struct{ Key string }{"demo/task/nightly-task"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -873,7 +964,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("schedule logs.clear failed: %+v", response.Error)
 	}
-	cleared, err := os.ReadFile(d.logs.Path("demo", scheduleLogName("nightly-job"), "stdout"))
+	cleared, err := os.ReadFile(d.logs.Path("demo", "task-nightly-task", "stdout"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +984,7 @@ func testLayout(root string) paths.Layout {
 }
 
 func writeTestConfig(t *testing.T, path string, processNames ...string) {
-	lines := []string{"version: 2", "", "services:"}
+	lines := []string{"version: 3", "", "services:"}
 	for _, processName := range processNames {
 		lines = append(lines,
 			fmt.Sprintf("  %s:", processName),
@@ -909,13 +1000,17 @@ func writeTestConfig(t *testing.T, path string, processNames ...string) {
 
 func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 	content := strings.Join([]string{
-		"version: 2",
+		"version: 3",
+		"",
+		"tasks:",
+		"  nightly-task:",
+		"    command: echo",
 		"",
 		"schedules:",
 		fmt.Sprintf("  - name: %s", scheduleName),
 		`    cron: "* * * * *"`,
-		"    action: run",
-		"    command: echo",
+		"    target_type: task",
+		"    target: nightly-task",
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

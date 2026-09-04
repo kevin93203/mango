@@ -20,7 +20,7 @@ type HistoryFile struct {
 
 func (s *Scheduler) LoadHistory(path string, limit int) error {
 	if limit < 0 {
-		return fmt.Errorf("schedule history limit must be non-negative")
+		return fmt.Errorf("execution history limit must be non-negative")
 	}
 
 	var (
@@ -31,13 +31,13 @@ func (s *Scheduler) LoadHistory(path string, limit int) error {
 	if errors.Is(err, os.ErrNotExist) {
 		// A missing state file is the normal first-run case.
 	} else if err != nil {
-		loadErr = fmt.Errorf("read schedule history: %w", err)
+		loadErr = fmt.Errorf("read execution history: %w", err)
 	} else {
 		var file HistoryFile
 		if err := json.Unmarshal(data, &file); err != nil {
-			loadErr = fmt.Errorf("decode schedule history: %w", err)
+			loadErr = fmt.Errorf("decode execution history: %w", err)
 		} else if file.Version != historyVersion {
-			loadErr = fmt.Errorf("unsupported schedule history version %d", file.Version)
+			loadErr = fmt.Errorf("unsupported execution history version %d", file.Version)
 		} else {
 			records = file.Records
 		}
@@ -54,7 +54,7 @@ func (s *Scheduler) LoadHistory(path string, limit int) error {
 	s.mu.Unlock()
 	if loadErr == nil && len(records) != loadedCount {
 		if err := saveHistory(path, records); err != nil {
-			return fmt.Errorf("compact schedule history: %w", err)
+			return fmt.Errorf("compact execution history: %w", err)
 		}
 	}
 	return loadErr
@@ -75,7 +75,7 @@ func (s *Scheduler) record(record Record) {
 		return
 	}
 	if err := saveHistory(path, records); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: write schedule history: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: write execution history: %v\n", err)
 	}
 }
 
@@ -88,6 +88,16 @@ func (s *Scheduler) HistoryTail(limit int) []Record {
 	result := make([]Record, limit)
 	copy(result, s.history[len(s.history)-limit:])
 	return result
+}
+
+// RecordExecution persists a completed workflow or task execution in the
+// scheduler's unified history store. Manual executions use the same retention
+// and persistence as cron-triggered executions.
+func (s *Scheduler) RecordExecution(record Record) {
+	if record.Status == "" {
+		record.Status = statusForResult(record.ExitCode, record.Error)
+	}
+	s.record(record)
 }
 
 func trimHistory(records []Record, limit int) []Record {
@@ -106,7 +116,7 @@ func saveHistory(path string, records []Record) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(directory, ".schedule-history-*.tmp")
+	temp, err := os.CreateTemp(directory, ".execution-history-*.tmp")
 	if err != nil {
 		return err
 	}

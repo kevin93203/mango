@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentVersion = 2
+const CurrentVersion = 3
 
 var (
 	namePattern        = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -25,11 +25,13 @@ var (
 )
 
 type File struct {
-	Version   int                `yaml:"version"`
-	Defaults  Defaults           `yaml:"defaults"`
-	Services  map[string]Service `yaml:"services"`
-	Schedules []Schedule         `yaml:"schedules"`
-	Path      string             `yaml:"-"`
+	Version   int                 `yaml:"version"`
+	Defaults  Defaults            `yaml:"defaults"`
+	Services  map[string]Service  `yaml:"services"`
+	Tasks     map[string]Task     `yaml:"tasks"`
+	Workflows map[string]Workflow `yaml:"workflows"`
+	Schedules []Schedule          `yaml:"schedules"`
+	Path      string              `yaml:"-"`
 }
 
 type Defaults struct {
@@ -86,23 +88,51 @@ type HealthProbe struct {
 }
 
 type Schedule struct {
-	Name        string            `yaml:"name"`
-	Cron        string            `yaml:"cron"`
-	Timezone    string            `yaml:"timezone"`
-	Action      string            `yaml:"action"`
-	Target      string            `yaml:"target"`
+	Name       string `yaml:"name"`
+	Cron       string `yaml:"cron"`
+	Timezone   string `yaml:"timezone"`
+	TargetType string `yaml:"target_type"`
+	Target     string `yaml:"target"`
+
+	// Deprecated source-compatibility fields. They are deliberately excluded
+	// from YAML decoding so the breaking v3 schema cannot silently accept the
+	// former schedule action/command model.
+	Action      string         `yaml:"-"`
+	Command     string         `yaml:"-"`
+	Args        []string       `yaml:"-"`
+	WorkingDir  string         `yaml:"-"`
+	Concurrency string         `yaml:"-"`
+	Timeout     string         `yaml:"-"`
+	Retry       *ScheduleRetry `yaml:"-"`
+}
+
+type Task struct {
 	Command     string            `yaml:"command"`
 	Args        []string          `yaml:"args"`
 	WorkingDir  string            `yaml:"working_dir"`
 	Env         map[string]string `yaml:"env"`
-	Concurrency string            `yaml:"concurrency"`
 	Timeout     string            `yaml:"timeout"`
-	Retry       *ScheduleRetry    `yaml:"retry"`
+	Concurrency string            `yaml:"concurrency"`
+	Retry       *TaskRetry        `yaml:"retry"`
 }
 
-type ScheduleRetry struct {
+type TaskRetry struct {
 	Retries int    `yaml:"retries"`
 	Delay   string `yaml:"delay"`
+}
+
+// ScheduleRetry is retained as a source-compatibility alias for embedders;
+// v3 retry settings belong to Task.
+type ScheduleRetry = TaskRetry
+
+type Workflow struct {
+	Concurrency string                  `yaml:"concurrency"`
+	Tasks       map[string]WorkflowTask `yaml:"tasks"`
+}
+
+type WorkflowTask struct {
+	Uses  string   `yaml:"uses"`
+	Needs []string `yaml:"needs"`
 }
 
 type EffectiveProcess struct {
@@ -144,12 +174,16 @@ type EffectiveHealthProbe struct {
 }
 
 type EffectiveSchedule struct {
-	Project     string
-	Name        string
-	Cron        string
-	Timezone    *time.Location
+	Project    string
+	Name       string
+	Cron       string
+	Timezone   *time.Location
+	TargetType string
+	Target     string
+
+	// Deprecated internal fields are retained so package consumers can migrate
+	// independently; v3 configuration never populates them.
 	Action      string
-	Target      string
 	Command     string
 	Args        []string
 	WorkingDir  string
@@ -158,6 +192,32 @@ type EffectiveSchedule struct {
 	Timeout     time.Duration
 	RetryCount  int
 	RetryDelay  time.Duration
+}
+
+type EffectiveTask struct {
+	Project     string
+	Name        string
+	Command     string
+	Args        []string
+	WorkingDir  string
+	Env         map[string]string
+	Timeout     time.Duration
+	Concurrency string
+	RetryCount  int
+	RetryDelay  time.Duration
+}
+
+type EffectiveWorkflowTask struct {
+	Name  string
+	Uses  string
+	Needs []string
+}
+
+type EffectiveWorkflow struct {
+	Project     string
+	Name        string
+	Concurrency string
+	Tasks       map[string]EffectiveWorkflowTask
 }
 
 func Load(path string) (File, error) {
@@ -215,8 +275,8 @@ func Validate(f File) error {
 	if f.Version != CurrentVersion {
 		return fmt.Errorf("unsupported config version %d; version %d is required", f.Version, CurrentVersion)
 	}
-	if len(f.Services) == 0 && len(f.Schedules) == 0 {
-		return errors.New("config must define at least one service or schedule")
+	if len(f.Services) == 0 && len(f.Tasks) == 0 && len(f.Workflows) == 0 && len(f.Schedules) == 0 {
+		return errors.New("config must define at least one service, task, workflow, or schedule")
 	}
 	d := f.Defaults
 	if _, err := parseDuration(d.StopTimeout, 10*time.Second); err != nil {
@@ -290,6 +350,66 @@ func Validate(f File) error {
 	if err := validateDependencyCycles(f.Services); err != nil {
 		return err
 	}
+	for name, task := range f.Tasks {
+		if !namePattern.MatchString(name) {
+			return fmt.Errorf("task name %q is invalid", name)
+		}
+		if strings.TrimSpace(task.Command) == "" {
+			return fmt.Errorf("task %q command is required", name)
+		}
+		if task.Concurrency != "" && !validConcurrency(task.Concurrency) {
+			return fmt.Errorf("task %q concurrency must be forbid or allow", name)
+		}
+		if _, err := parseDuration(task.Timeout, 0); err != nil {
+			return fmt.Errorf("task %q timeout: %w", name, err)
+		}
+		if task.Retry != nil {
+			if task.Retry.Retries < 0 {
+				return fmt.Errorf("task %q retry.retries must be non-negative", name)
+			}
+			if _, err := parseNonNegativeDuration(task.Retry.Delay, 0); err != nil {
+				return fmt.Errorf("task %q retry.delay: %w", name, err)
+			}
+		}
+	}
+	for name, workflow := range f.Workflows {
+		if !namePattern.MatchString(name) {
+			return fmt.Errorf("workflow name %q is invalid", name)
+		}
+		if workflow.Concurrency != "" && !validConcurrency(workflow.Concurrency) {
+			return fmt.Errorf("workflow %q concurrency must be forbid or allow", name)
+		}
+		if len(workflow.Tasks) == 0 {
+			return fmt.Errorf("workflow %q must define at least one task", name)
+		}
+		for nodeName, node := range workflow.Tasks {
+			if !namePattern.MatchString(nodeName) {
+				return fmt.Errorf("workflow %q task node %q is invalid", name, nodeName)
+			}
+			if strings.TrimSpace(node.Uses) == "" {
+				return fmt.Errorf("workflow %q task node %q uses is required", name, nodeName)
+			}
+			if _, ok := f.Tasks[node.Uses]; !ok {
+				return fmt.Errorf("workflow %q task node %q uses unknown task %q", name, nodeName, node.Uses)
+			}
+			seenNeeds := map[string]bool{}
+			for _, dependency := range node.Needs {
+				if dependency == nodeName {
+					return fmt.Errorf("workflow %q task node %q cannot need itself", name, nodeName)
+				}
+				if seenNeeds[dependency] {
+					return fmt.Errorf("workflow %q task node %q has duplicate need %q", name, nodeName, dependency)
+				}
+				seenNeeds[dependency] = true
+				if _, ok := workflow.Tasks[dependency]; !ok {
+					return fmt.Errorf("workflow %q task node %q needs unknown node %q", name, nodeName, dependency)
+				}
+			}
+		}
+		if err := validateWorkflowCycles(workflow.Tasks); err != nil {
+			return fmt.Errorf("workflow %q: %w", name, err)
+		}
+	}
 	seen := map[string]bool{}
 	for i, s := range f.Schedules {
 		if !namePattern.MatchString(s.Name) {
@@ -312,36 +432,18 @@ func Validate(f File) error {
 		if _, err := time.LoadLocation(zone); err != nil {
 			return fmt.Errorf("schedule %q timezone: %w", s.Name, err)
 		}
-		switch s.Action {
-		case "run":
-			if strings.TrimSpace(s.Command) == "" {
-				return fmt.Errorf("schedule %q command is required for action run", s.Name)
-			}
-		case "start", "stop", "restart":
-			if _, ok := f.Services[s.Target]; !ok {
-				return fmt.Errorf("schedule %q target service %q does not exist", s.Name, s.Target)
-			}
-		default:
-			return fmt.Errorf("schedule %q action must be run, start, stop, or restart", s.Name)
+		if s.TargetType != "workflow" && s.TargetType != "task" {
+			return fmt.Errorf("schedule %q target_type must be workflow or task", s.Name)
 		}
-		if s.Timeout != "" {
-			if s.Action != "run" {
-				return fmt.Errorf("schedule %q timeout is only supported for action run", s.Name)
-			}
-			if _, err := parseDuration(s.Timeout, 0); err != nil {
-				return fmt.Errorf("schedule %q timeout: %w", s.Name, err)
-			}
+		if strings.TrimSpace(s.Target) == "" {
+			return fmt.Errorf("schedule %q target is required", s.Name)
 		}
-		if s.Concurrency != "" && s.Concurrency != "forbid" && s.Concurrency != "allow" {
-			return fmt.Errorf("schedule %q concurrency must be forbid or allow", s.Name)
-		}
-		if s.Retry != nil {
-			if s.Retry.Retries < 0 {
-				return fmt.Errorf("schedule %q retry.retries must be non-negative", s.Name)
+		if s.TargetType == "workflow" {
+			if _, ok := f.Workflows[s.Target]; !ok {
+				return fmt.Errorf("schedule %q target workflow %q does not exist", s.Name, s.Target)
 			}
-			if _, err := parseNonNegativeDuration(s.Retry.Delay, 0); err != nil {
-				return fmt.Errorf("schedule %q retry.delay: %w", s.Name, err)
-			}
+		} else if _, ok := f.Tasks[s.Target]; !ok {
+			return fmt.Errorf("schedule %q target task %q does not exist", s.Name, s.Target)
 		}
 	}
 	return nil
@@ -476,24 +578,29 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 }
 
 // ProcessesEffective is retained as an internal compatibility alias for code
-// that has not yet migrated its terminology; it reads the v2 services map.
+// that has not yet migrated its terminology; it reads the services map.
 func (f File) ProcessesEffective(projectName string) ([]EffectiveProcess, error) {
 	return f.ServicesEffective(projectName)
 }
 
-func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error) {
+func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, error) {
 	if err := Validate(f); err != nil {
 		return nil, err
 	}
 	base := filepath.Dir(f.Path)
-	result := make([]EffectiveSchedule, 0, len(f.Schedules))
-	for _, s := range f.Schedules {
-		zone := s.Timezone
-		if zone == "" {
-			zone = "Local"
-		}
-		loc, _ := time.LoadLocation(zone)
-		dir := s.WorkingDir
+	result := make(map[string]EffectiveTask, len(f.Tasks))
+	inheritEnv := true
+	if f.Defaults.InheritEnv != nil {
+		inheritEnv = *f.Defaults.InheritEnv
+	}
+	names := make([]string, 0, len(f.Tasks))
+	for name := range f.Tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		task := f.Tasks[name]
+		dir := task.WorkingDir
 		if dir == "" {
 			dir = f.Defaults.WorkingDir
 		}
@@ -501,36 +608,82 @@ func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error
 			dir = "."
 		}
 		dir = resolveWorkingDir(base, dir)
-		command := s.Command
+		command := task.Command
 		if strings.ContainsAny(command, "/\\") {
 			if !filepath.IsAbs(command) {
 				command = filepath.Join(dir, command)
 			}
 			command, _ = filepath.Abs(command)
 		}
+		timeout, _ := parseDuration(task.Timeout, 0)
 		retryCount := 0
 		retryDelay := time.Duration(0)
-		if s.Retry != nil {
-			retryCount = s.Retry.Retries
-			retryDelay, _ = parseNonNegativeDuration(s.Retry.Delay, 0)
+		if task.Retry != nil {
+			retryCount = task.Retry.Retries
+			retryDelay, _ = parseNonNegativeDuration(task.Retry.Delay, 0)
 		}
-		timeout, _ := parseDuration(s.Timeout, 0)
+		result[name] = EffectiveTask{
+			Project: projectName, Name: name, Command: command, Args: append([]string(nil), task.Args...),
+			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), Timeout: timeout,
+			Concurrency: defaultString(task.Concurrency, "forbid"), RetryCount: retryCount, RetryDelay: retryDelay,
+		}
+	}
+	return result, nil
+}
+
+func (f File) WorkflowsEffective(projectName string) (map[string]EffectiveWorkflow, error) {
+	if err := Validate(f); err != nil {
+		return nil, err
+	}
+	result := make(map[string]EffectiveWorkflow, len(f.Workflows))
+	names := make([]string, 0, len(f.Workflows))
+	for name := range f.Workflows {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		workflow := f.Workflows[name]
+		nodes := make(map[string]EffectiveWorkflowTask, len(workflow.Tasks))
+		for nodeName, node := range workflow.Tasks {
+			nodes[nodeName] = EffectiveWorkflowTask{
+				Name: nodeName, Uses: node.Uses, Needs: append([]string(nil), node.Needs...),
+			}
+		}
+		result[name] = EffectiveWorkflow{
+			Project: projectName, Name: name,
+			Concurrency: defaultString(workflow.Concurrency, "forbid"), Tasks: nodes,
+		}
+	}
+	return result, nil
+}
+
+func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error) {
+	if err := Validate(f); err != nil {
+		return nil, err
+	}
+	result := make([]EffectiveSchedule, 0, len(f.Schedules))
+	for _, s := range f.Schedules {
+		zone := s.Timezone
+		if zone == "" {
+			zone = "Local"
+		}
+		loc, _ := time.LoadLocation(zone)
 		result = append(result, EffectiveSchedule{
 			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
-			Action: s.Action, Target: s.Target, Command: command, Args: append([]string(nil), s.Args...),
-			WorkingDir: dir, Env: mergeEnv(s.Env), Concurrency: defaultString(s.Concurrency, "forbid"),
-			Timeout: timeout, RetryCount: retryCount, RetryDelay: retryDelay,
+			TargetType: s.TargetType, Target: s.Target,
 		})
 	}
 	return result, nil
 }
 
-func mergeEnv(extra map[string]string) map[string]string {
+func taskEnvironment(extra map[string]string, inherit bool) map[string]string {
 	result := map[string]string{}
-	for _, value := range os.Environ() {
-		parts := strings.SplitN(value, "=", 2)
-		if len(parts) == 2 {
-			result[parts[0]] = parts[1]
+	if inherit {
+		for _, value := range os.Environ() {
+			parts := strings.SplitN(value, "=", 2)
+			if len(parts) == 2 {
+				result[parts[0]] = parts[1]
+			}
 		}
 	}
 	for k, v := range extra {
@@ -701,8 +854,48 @@ func validateDependencyCycles(services map[string]Service) error {
 	return nil
 }
 
+func validateWorkflowCycles(tasks map[string]WorkflowTask) error {
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(name string) error {
+		if visiting[name] {
+			return fmt.Errorf("task dependency cycle includes %q", name)
+		}
+		if visited[name] {
+			return nil
+		}
+		visiting[name] = true
+		dependencies := append([]string(nil), tasks[name].Needs...)
+		sort.Strings(dependencies)
+		for _, dependency := range dependencies {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		delete(visiting, name)
+		visited[name] = true
+		return nil
+	}
+	names := make([]string, 0, len(tasks))
+	for name := range tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validRestart(value string) bool {
 	return value == "never" || value == "on-failure" || value == "always"
+}
+
+func validConcurrency(value string) bool {
+	return value == "forbid" || value == "allow"
 }
 
 func defaultString(value, fallback string) string {

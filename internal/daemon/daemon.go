@@ -25,6 +25,7 @@ import (
 	"github.com/kevin93203/mango/internal/process"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/workflow"
 )
 
 const (
@@ -46,6 +47,7 @@ type Daemon struct {
 	logs      *logging.Manager
 	metrics   *metrics.Collector
 	scheduler *scheduler.Scheduler
+	workflow  *workflow.Executor
 
 	mu                    sync.RWMutex
 	registry              registry.File
@@ -114,6 +116,20 @@ type scheduleHistoryRequest struct {
 	Tail int `json:"tail"`
 }
 
+type executionHistoryRequest struct {
+	Key     string `json:"key"`
+	Project string `json:"project"`
+	Name    string `json:"name"`
+	Tail    int    `json:"tail"`
+	Tasks   bool   `json:"tasks"`
+}
+
+type executionTargetRequest struct {
+	Key     string `json:"key"`
+	Project string `json:"project"`
+	Name    string `json:"name"`
+}
+
 type serviceBulkRequest struct {
 	Action  string   `json:"action"`
 	Targets []string `json:"targets"`
@@ -132,6 +148,7 @@ func New(layout paths.Layout) *Daemon {
 		configErrors: map[string]string{},
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
+	d.workflow = workflow.New(d.runTaskAttempt, d.scheduler.RecordExecution)
 	return d
 }
 
@@ -169,7 +186,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.reloadRegistryForStart(); err != nil {
 		return err
 	}
-	historyPath := filepath.Join(d.layout.State, "schedule-history.json")
+	historyPath := filepath.Join(d.layout.State, "execution-history.json")
 	if err := d.scheduler.LoadHistory(historyPath, daemonConfig.ScheduleHistoryLimit); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
@@ -218,6 +235,9 @@ func (d *Daemon) shutdown() {
 		stopped := d.scheduler.Stop()
 		<-stopped.Done()
 		d.scheduler.Wait()
+	}
+	if d.workflow != nil {
+		d.workflow.Wait()
 	}
 	d.mu.Lock()
 	type shutdownTarget struct {
@@ -360,6 +380,14 @@ func (d *Daemon) applyProject(name, path string) error {
 	if err != nil {
 		return err
 	}
+	tasks, err := file.TasksEffective(name)
+	if err != nil {
+		return err
+	}
+	workflows, err := file.WorkflowsEffective(name)
+	if err != nil {
+		return err
+	}
 	schedules, err := file.SchedulesEffective(name)
 	if err != nil {
 		return err
@@ -444,6 +472,7 @@ func (d *Daemon) applyProject(name, path string) error {
 		_ = d.startService(name, target.managed)
 	}
 	d.ensureReconciler(name)
+	d.workflow.Apply(d.allTasksWith(tasks, name), d.allWorkflowsWith(workflows, name))
 	if err := d.scheduler.Apply(d.allSchedulesWith(schedules, name)); err != nil {
 		return err
 	}
@@ -601,6 +630,50 @@ func (d *Daemon) allSchedulesWith(schedules []config.EffectiveSchedule, projectN
 	return result
 }
 
+func (d *Daemon) allTasksWith(tasks map[string]config.EffectiveTask, projectName string) map[string]config.EffectiveTask {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make(map[string]config.EffectiveTask)
+	for name, project := range d.projects {
+		if name == projectName {
+			for taskName, task := range tasks {
+				result[name+"/"+taskName] = task
+			}
+			continue
+		}
+		items, err := project.file.TasksEffective(name)
+		if err != nil {
+			continue
+		}
+		for taskName, task := range items {
+			result[name+"/"+taskName] = task
+		}
+	}
+	return result
+}
+
+func (d *Daemon) allWorkflowsWith(workflows map[string]config.EffectiveWorkflow, projectName string) map[string]config.EffectiveWorkflow {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make(map[string]config.EffectiveWorkflow)
+	for name, project := range d.projects {
+		if name == projectName {
+			for workflowName, item := range workflows {
+				result[name+"/"+workflowName] = item
+			}
+			continue
+		}
+		items, err := project.file.WorkflowsEffective(name)
+		if err != nil {
+			continue
+		}
+		for workflowName, item := range items {
+			result[name+"/"+workflowName] = item
+		}
+	}
+	return result
+}
+
 func (d *Daemon) removeProject(name string) {
 	d.mu.Lock()
 	project := d.projects[name]
@@ -612,6 +685,32 @@ func (d *Daemon) removeProject(name string) {
 	for _, managed := range project.processes {
 		_ = d.stopManaged(managed)
 	}
+	d.reapplyExecutionDefinitions()
+}
+
+func (d *Daemon) reapplyExecutionDefinitions() {
+	d.mu.RLock()
+	tasks := make(map[string]config.EffectiveTask)
+	workflows := make(map[string]config.EffectiveWorkflow)
+	schedules := make([]config.EffectiveSchedule, 0)
+	for name, project := range d.projects {
+		if items, err := project.file.TasksEffective(name); err == nil {
+			for taskName, task := range items {
+				tasks[name+"/"+taskName] = task
+			}
+		}
+		if items, err := project.file.WorkflowsEffective(name); err == nil {
+			for workflowName, item := range items {
+				workflows[name+"/"+workflowName] = item
+			}
+		}
+		if items, err := project.file.SchedulesEffective(name); err == nil {
+			schedules = append(schedules, items...)
+		}
+	}
+	d.mu.RUnlock()
+	d.workflow.Apply(tasks, workflows)
+	_ = d.scheduler.Apply(schedules)
 }
 
 func (d *Daemon) startManaged(projectName string, managed *managedProcess) error {
@@ -1621,22 +1720,23 @@ func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
 }
 
 func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) scheduler.ExecutionResult {
-	if schedule.Action == "start" || schedule.Action == "stop" || schedule.Action == "restart" {
-		key := schedule.Project + "/" + schedule.Target
-		var err error
-		switch schedule.Action {
-		case "start":
-			err = d.StartProcess(key)
-		case "stop":
-			err = d.StopProcess(key, false)
-		case "restart":
-			err = d.RestartProcess(key)
-		}
-		if err != nil {
-			return scheduler.ExecutionResult{ExitCode: 1, Err: err}
-		}
-		return scheduler.ExecutionResult{ExitCode: 0}
+	// Keep direct callers that construct the old EffectiveSchedule shape
+	// working while the YAML schema itself remains strictly v3. Loaded v3
+	// schedules always take the target-based branches below.
+	if schedule.TargetType == "" && schedule.Action == "run" {
+		return d.runLegacyScheduleTask(ctx, schedule)
 	}
+	switch schedule.TargetType {
+	case "workflow":
+		return d.workflow.Run(ctx, schedule.Project, schedule.Target, schedule.Name)
+	case "task":
+		return d.workflow.RunTask(ctx, schedule.Project, schedule.Target, schedule.Name)
+	default:
+		return scheduler.ExecutionResult{ExitCode: 1, Err: fmt.Errorf("schedule %s has invalid target type %q", schedule.Name, schedule.TargetType)}
+	}
+}
+
+func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.EffectiveSchedule) scheduler.ExecutionResult {
 	stdout, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stdout", 100<<20, 10)
 	if err != nil {
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
@@ -1647,10 +1747,7 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
 	capture := logging.NewCaptureWriter(stderr, 64<<10)
-	handle, err := process.Start(process.Spec{
-		Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir,
-		Env: schedule.Env, Stdout: stdout, Stderr: capture,
-	})
+	handle, err := process.Start(process.Spec{Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir, Env: schedule.Env, Stdout: stdout, Stderr: capture})
 	if err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -1669,8 +1766,62 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 	case <-ctx.Done():
 		_ = handle.Stop(10 * time.Second)
 	case <-timeout:
-		timedOut = true
-		_ = handle.ForceStop()
+		if ctx.Err() != nil {
+			_ = handle.Stop(10 * time.Second)
+		} else {
+			timedOut = true
+			_ = handle.ForceStop()
+		}
+	}
+	result := handle.Wait()
+	_ = stdout.Close()
+	_ = stderr.Close()
+	if timedOut {
+		return scheduler.ExecutionResult{ExitCode: 124, Err: fmt.Errorf("schedule timed out after %s", schedule.Timeout), Stderr: capture.String()}
+	}
+	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
+}
+
+func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, invocation workflow.Invocation) scheduler.ExecutionResult {
+	logName := taskLogName(invocation, task.Name)
+	stdout, _, err := d.logs.Open(task.Project, logName, "stdout", 100<<20, 10)
+	if err != nil {
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+	}
+	stderr, _, err := d.logs.Open(task.Project, logName, "stderr", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+	}
+	capture := logging.NewCaptureWriter(stderr, 64<<10)
+	handle, err := process.Start(process.Spec{
+		Command: task.Command, Args: task.Args, WorkingDir: task.WorkingDir,
+		Env: task.Env, Stdout: stdout, Stderr: capture,
+	})
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+	}
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if task.Timeout > 0 {
+		timer = time.NewTimer(task.Timeout)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+	timedOut := false
+	select {
+	case <-handle.Done():
+	case <-ctx.Done():
+		_ = handle.Stop(10 * time.Second)
+	case <-timeout:
+		if ctx.Err() != nil {
+			_ = handle.Stop(10 * time.Second)
+		} else {
+			timedOut = true
+			_ = handle.ForceStop()
+		}
 	}
 	result := handle.Wait()
 	_ = stdout.Close()
@@ -1678,11 +1829,18 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 	if timedOut {
 		return scheduler.ExecutionResult{
 			ExitCode: 124,
-			Err:      fmt.Errorf("schedule timed out after %s", schedule.Timeout),
+			Err:      fmt.Errorf("task timed out after %s", task.Timeout),
 			Stderr:   capture.String(),
 		}
 	}
 	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
+}
+
+func taskLogName(invocation workflow.Invocation, taskName string) string {
+	if invocation.Workflow != "" {
+		return "workflow-" + invocation.Workflow + "-" + invocation.Node
+	}
+	return "task-" + taskName
 }
 
 func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
@@ -1816,8 +1974,8 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, processReferenceErrorCode(p.Key, "LOG_TARGET_NOT_FOUND"), err)
 		}
 		canonicalName := name
-		if strings.Contains(p.Key, "/") {
-			_, canonicalName, _ = splitKey(p.Key)
+		if parts := strings.Split(p.Key, "/"); len(parts) >= 2 {
+			canonicalName = strings.Join(parts[1:], "/")
 		}
 		return success(request, map[string]string{"key": project + "/" + canonicalName})
 	case "logs.clear":
@@ -1842,10 +2000,8 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 				Name:            item.Name,
 				Cron:            item.Cron,
 				Timezone:        location.String(),
-				Action:          item.Action,
+				TargetType:      item.TargetType,
 				Target:          item.Target,
-				Concurrency:     item.Concurrency,
-				TimeoutSeconds:  item.Timeout.Seconds(),
 				Status:          snapshot.Status,
 				LastRun:         scheduleTimeIn(snapshot.LastRun, location),
 				NextRun:         scheduleTimeIn(snapshot.NextRun, location),
@@ -1853,17 +2009,6 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			})
 		}
 		return success(request, result)
-	case "schedule.history":
-		var p scheduleHistoryRequest
-		if len(request.Params) > 0 && string(request.Params) != "null" {
-			if err := json.Unmarshal(request.Params, &p); err != nil {
-				return failure(request, "BAD_PARAMS", err)
-			}
-		}
-		if p.Tail < 0 {
-			return failure(request, "BAD_PARAMS", errors.New("schedule history tail must be non-negative"))
-		}
-		return success(request, d.scheduler.HistoryTail(p.Tail))
 	case "schedule.run":
 		var p struct{ Key string }
 		if err := json.Unmarshal(request.Params, &p); err != nil {
@@ -1873,9 +2018,268 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "SCHEDULE_RUN_FAILED", err)
 		}
 		return success(request, map[string]string{"key": p.Key, "status": "started"})
+	case "schedule.history":
+		// Compatibility alias. New clients should query workflow.history or
+		// task.history so the target type can be filtered explicitly.
+		var p scheduleHistoryRequest
+		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.Tail < 0 {
+			return failure(request, "BAD_PARAMS", errors.New("schedule history tail must be non-negative"))
+		}
+		return success(request, d.scheduler.HistoryTail(p.Tail))
+	case "workflow.ls":
+		var p struct{ Project string }
+		_ = json.Unmarshal(request.Params, &p)
+		result := make([]api.WorkflowInfo, 0)
+		for _, snapshot := range d.workflow.ListWorkflows(p.Project) {
+			if info, err := d.getWorkflowInfo(snapshot.Workflow.Project, snapshot.Workflow.Name); err == nil {
+				result = append(result, info)
+			} else {
+				result = append(result, workflowInfo(snapshot))
+			}
+		}
+		return success(request, result)
+	case "workflow.run":
+		var p executionTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if err := d.workflow.RunNowWorkflow(d.executionContext(), project, name, "manual"); err != nil {
+			return failure(request, "WORKFLOW_RUN_FAILED", err)
+		}
+		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
+	case "workflow.status":
+		var p executionTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		info, err := d.getWorkflowInfo(project, name)
+		if err != nil {
+			return failure(request, "WORKFLOW_NOT_FOUND", err)
+		}
+		return success(request, info)
+	case "workflow.history":
+		var p executionHistoryRequest
+		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.Tail < 0 {
+			return failure(request, "BAD_PARAMS", errors.New("workflow history tail must be non-negative"))
+		}
+		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		return success(request, filterWorkflowHistory(d.scheduler.HistoryTail(0), project, name, p.Tail))
+	case "task.ls":
+		var p struct{ Project string }
+		_ = json.Unmarshal(request.Params, &p)
+		result := make([]api.TaskInfo, 0)
+		for _, snapshot := range d.workflow.ListTasks(p.Project) {
+			result = append(result, d.taskInfoWithHistory(snapshot))
+		}
+		return success(request, result)
+	case "task.run":
+		var p executionTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if err := d.workflow.RunNowTask(d.executionContext(), project, name, "manual"); err != nil {
+			return failure(request, "TASK_RUN_FAILED", err)
+		}
+		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
+	case "task.history":
+		var p executionHistoryRequest
+		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.Tail < 0 {
+			return failure(request, "BAD_PARAMS", errors.New("task history tail must be non-negative"))
+		}
+		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		return success(request, filterTaskHistory(d.scheduler.HistoryTail(0), project, name, p.Tail))
 	default:
 		return failure(request, "METHOD_NOT_FOUND", fmt.Errorf("unknown method %q", request.Method))
 	}
+}
+
+func (d *Daemon) executionContext() context.Context {
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func unmarshalOptionalParams(data json.RawMessage, target interface{}) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	return json.Unmarshal(data, target)
+}
+
+func taskInfo(snapshot workflow.TaskSnapshot) api.TaskInfo {
+	task := snapshot.Task
+	return api.TaskInfo{
+		Project: task.Project, Name: task.Name, Command: task.Command, Args: task.Args,
+		WorkingDir: task.WorkingDir, TimeoutSeconds: task.Timeout.Seconds(), Concurrency: task.Concurrency,
+		RetryCount: task.RetryCount, Status: snapshot.Status, LastRun: snapshot.LastRun,
+		DurationSeconds: snapshot.DurationSeconds,
+	}
+}
+
+func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInfo {
+	info := taskInfo(snapshot)
+	latest := scheduler.TaskRecord{}
+	hasLatest := false
+	for _, record := range d.scheduler.HistoryTail(0) {
+		if record.Project != snapshot.Task.Project {
+			continue
+		}
+		if record.TargetType == "task" && record.Target == snapshot.Task.Name {
+			if len(record.Tasks) > 0 && (!hasLatest || record.Tasks[0].Started.After(latest.Started)) {
+				latest, hasLatest = record.Tasks[0], true
+			}
+			continue
+		}
+		if record.TargetType != "workflow" {
+			continue
+		}
+		for _, task := range record.Tasks {
+			if task.Task == snapshot.Task.Name && (!hasLatest || task.Started.After(latest.Started)) {
+				latest, hasLatest = task, true
+			}
+		}
+	}
+	if hasLatest {
+		info.Status = latest.Status
+		info.LastRun = &latest.Started
+		duration := latest.DurationSeconds
+		info.DurationSeconds = &duration
+	}
+	return info
+}
+
+func workflowInfo(snapshot workflow.WorkflowSnapshot) api.WorkflowInfo {
+	wf := snapshot.Workflow
+	names := make([]string, 0, len(wf.Tasks))
+	for name := range wf.Tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tasks := make([]api.WorkflowTaskInfo, 0, len(names))
+	for _, name := range names {
+		node := wf.Tasks[name]
+		tasks = append(tasks, api.WorkflowTaskInfo{Node: name, Uses: node.Uses, Needs: node.Needs})
+	}
+	return api.WorkflowInfo{
+		Project: wf.Project, Name: wf.Name, Concurrency: wf.Concurrency, Status: snapshot.Status,
+		TaskCount: len(tasks), LastRun: snapshot.LastRun, DurationSeconds: snapshot.DurationSeconds, Tasks: tasks,
+	}
+}
+
+func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error) {
+	for _, snapshot := range d.workflow.ListWorkflows(project) {
+		if snapshot.Workflow.Name == name {
+			info := workflowInfo(snapshot)
+			var latest *scheduler.Record
+			for _, record := range d.scheduler.HistoryTail(0) {
+				if record.Project == project && record.TargetType == "workflow" && record.Target == name && (latest == nil || record.Started.After(latest.Started)) {
+					copyRecord := record
+					latest = &copyRecord
+				}
+			}
+			if latest != nil {
+				if latest.Status != workflow.StatusSkipped {
+					info.Status = latest.Status
+					info.LastRun = &latest.Started
+					duration := latest.Finished.Sub(latest.Started).Seconds()
+					if duration < 0 {
+						duration = 0
+					}
+					info.DurationSeconds = &duration
+				}
+				byNode := make(map[string]scheduler.TaskRecord, len(latest.Tasks))
+				for _, task := range latest.Tasks {
+					byNode[task.Node] = task
+				}
+				for index := range info.Tasks {
+					if task, ok := byNode[info.Tasks[index].Node]; ok {
+						info.Tasks[index].Status = task.Status
+						info.Tasks[index].LastRun = &task.Started
+						taskDuration := task.DurationSeconds
+						info.Tasks[index].DurationSeconds = &taskDuration
+					}
+				}
+			}
+			return info, nil
+		}
+	}
+	return api.WorkflowInfo{}, fmt.Errorf("workflow %s/%s not found", project, name)
+}
+
+func filterWorkflowHistory(history []scheduler.Record, project, workflowName string, tail int) []scheduler.Record {
+	result := make([]scheduler.Record, 0)
+	for _, record := range history {
+		if record.Project == project && record.TargetType == "workflow" && record.Target == workflowName {
+			result = append(result, record)
+		}
+	}
+	return tailRecords(result, tail)
+}
+
+func filterTaskHistory(history []scheduler.Record, project, taskName string, tail int) []scheduler.Record {
+	result := make([]scheduler.Record, 0)
+	for _, record := range history {
+		if record.Project != project {
+			continue
+		}
+		if record.TargetType == "task" && record.Target == taskName {
+			result = append(result, record)
+			continue
+		}
+		if record.TargetType != "workflow" {
+			continue
+		}
+		for _, task := range record.Tasks {
+			if task.Task != taskName {
+				continue
+			}
+			result = append(result, scheduler.Record{
+				Project: record.Project, Name: taskName, TargetType: "task", Target: taskName,
+				Trigger: record.Trigger, Status: task.Status, Started: task.Started, Finished: task.Finished,
+				ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr, Attempts: task.Attempts,
+				Tasks: []scheduler.TaskRecord{task},
+			})
+		}
+	}
+	return tailRecords(result, tail)
+}
+
+func tailRecords(records []scheduler.Record, tail int) []scheduler.Record {
+	if tail <= 0 || tail >= len(records) {
+		return records
+	}
+	return records[len(records)-tail:]
 }
 
 func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lines int, includeOffset bool) ipc.Response {
@@ -1907,15 +2311,20 @@ func (d *Daemon) resolveLogRef(ref string) (string, string, error) {
 	if !strings.Contains(ref, "/") {
 		return d.resolveProcessRef(ref)
 	}
+	parts := strings.Split(ref, "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "task" && parts[2] != "" {
+		if d.workflow.HasTask(parts[0] + "/" + parts[2]) {
+			return parts[0], "task-" + parts[2], nil
+		}
+	}
+	if len(parts) == 4 && parts[0] != "" && parts[1] == "workflow" && parts[2] != "" && parts[3] != "" {
+		if d.workflow.HasWorkflowNode(parts[0], parts[2], parts[3]) {
+			return parts[0], "workflow-" + parts[2] + "-" + parts[3], nil
+		}
+	}
 	project, name, err := splitKey(ref)
-	if err != nil {
-		return "", "", err
-	}
-	if d.processExists(project, name) {
+	if err == nil && d.processExists(project, name) {
 		return project, name, nil
-	}
-	if d.scheduler.Has(project + "/" + name) {
-		return project, scheduleLogName(name), nil
 	}
 	return "", "", fmt.Errorf("log target %q not found", ref)
 }
@@ -1931,9 +2340,9 @@ func (d *Daemon) processExists(project, name string) bool {
 	return ok
 }
 
-func scheduleLogName(name string) string {
-	return "schedule-" + name
-}
+// scheduleLogName is retained for source compatibility with older embedders.
+// v3 executions use taskLogName and do not create schedule-owned logs.
+func scheduleLogName(name string) string { return "schedule-" + name }
 
 func scheduleTimeIn(value *time.Time, location *time.Location) *time.Time {
 	if value == nil {
@@ -1949,6 +2358,16 @@ func success(request ipc.Request, data interface{}) ipc.Response {
 
 func failure(request ipc.Request, code string, err error) ipc.Response {
 	return ipc.Response{Version: 1, ID: request.ID, OK: false, Error: &ipc.Error{Code: code, Message: err.Error()}}
+}
+
+func splitExecutionTarget(key, project, name string) (string, string, error) {
+	if key != "" {
+		return splitKey(key)
+	}
+	if project == "" || name == "" {
+		return "", "", errors.New("target requires PROJECT/NAME or project and name")
+	}
+	return project, name, nil
 }
 
 func splitKey(key string) (string, string, error) {
