@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kevin93203/mango/internal/api"
@@ -106,7 +107,7 @@ func usage() {
 		"  ls",
 		"  status PROJECT/SERVICE|ID",
 		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]",
-		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
+		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
 		"  schedule ls|history [--tail N]|run PROJECT/SCHEDULE",
@@ -486,6 +487,36 @@ func rejectJSON(command string) error {
 }
 
 func logsCommand(args []string) error {
+	return logsCommandWithCaller(args, logsCall)
+}
+
+type logsOptions struct {
+	stream string
+	tail   int
+	follow bool
+}
+
+type logsCaller func(context.Context, string, interface{}) (ipc.Response, error)
+
+type resolvedLogTarget struct {
+	input     string
+	canonical string
+}
+
+type logStream struct {
+	targetIndex int
+	target      string
+	stream      string
+	offset      int64
+}
+
+type logEvent struct {
+	stream *logStream
+	data   string
+	offset int64
+}
+
+func logsCommandWithCaller(args []string, caller logsCaller) error {
 	if err := rejectJSON("logs"); err != nil {
 		return err
 	}
@@ -495,40 +526,200 @@ func logsCommand(args []string) error {
 	if args[0] == "clear" {
 		return clearLogsCommand(args[1:])
 	}
-	key := args[0]
-	fs := newFlagSet("logs")
-	stream := fs.String("stream", "all", "stdout, stderr, or all")
-	tail := fs.Int("tail", 15, "number of lines")
-	follow := fs.Bool("follow", false, "follow new output")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if *follow {
-		return followLogs(key, *stream, *tail)
-	}
-	response, err := call("logs.read", struct {
-		Key    string
-		Stream string
-		Tail   int
-	}{key, *stream, *tail})
+	targets, options, err := parseLogsArgs(args)
 	if err != nil {
 		return err
 	}
-	var data map[string]string
-	if err := decodeData(response.Data, &data); err != nil {
+	if len(targets) == 0 {
+		return errors.New("logs requires PROJECT/SERVICE, PROJECT/SCHEDULE, or ID")
+	}
+	resolved, err := resolveLogTargets(targets, caller)
+	if err != nil {
 		return err
 	}
-	if *stream == "all" {
-		if data["stdout"] != "" {
-			printLogBlock("stdout", data["stdout"])
+	if options.follow {
+		return followLogsTargets(resolved, options.stream, options.tail, caller)
+	}
+	return readLogsTargets(resolved, options.stream, options.tail, caller)
+}
+
+func parseLogsArgs(args []string) ([]string, logsOptions, error) {
+	options := logsOptions{stream: "all", tail: 15}
+	fs := newFlagSet("logs")
+	stream := fs.String("stream", options.stream, "stdout, stderr, or all")
+	tail := fs.Int("tail", options.tail, "number of lines")
+	follow := fs.Bool("follow", false, "follow new output")
+
+	flagArgs := make([]string, 0, len(args))
+	targets := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			targets = append(targets, args[i+1:]...)
+			break
 		}
-		if data["stderr"] != "" {
-			printLogBlock("stderr", data["stderr"])
+		if isLogsFlag(arg, "follow") {
+			flagArgs = append(flagArgs, arg)
+			continue
 		}
-	} else {
-		printLogBlock(*stream, data["data"])
+		if isLogsFlag(arg, "stream") || isLogsFlag(arg, "tail") {
+			flagArgs = append(flagArgs, arg)
+			if !strings.Contains(arg, "=") {
+				if i+1 >= len(args) {
+					return nil, logsOptions{}, fmt.Errorf("%s requires a value", arg)
+				}
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			return nil, logsOptions{}, fmt.Errorf("flag provided but not defined: %s", arg)
+		}
+		targets = append(targets, arg)
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return nil, logsOptions{}, err
+	}
+	if len(fs.Args()) != 0 {
+		targets = append(targets, fs.Args()...)
+	}
+	return targets, logsOptions{stream: *stream, tail: *tail, follow: *follow}, nil
+}
+
+func isLogsFlag(arg, name string) bool {
+	return arg == "--"+name || arg == "-"+name || strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"=")
+}
+
+func resolveLogTargets(targets []string, caller logsCaller) ([]resolvedLogTarget, error) {
+	resolved := make([]resolvedLogTarget, len(targets))
+	errs := make([]error, len(targets))
+	for i, target := range targets {
+		response, err := caller(context.Background(), "logs.resolve", struct{ Key string }{target})
+		if err != nil {
+			errs[i] = fmt.Errorf("logs target %q: %w", target, err)
+			continue
+		}
+		var data struct {
+			Key string `json:"key"`
+		}
+		if err := decodeData(response.Data, &data); err != nil {
+			errs[i] = fmt.Errorf("logs target %q: decode response: %w", target, err)
+			continue
+		}
+		if data.Key == "" {
+			errs[i] = fmt.Errorf("logs target %q: resolver returned an empty canonical target", target)
+			continue
+		}
+		resolved[i] = resolvedLogTarget{input: target, canonical: data.Key}
+	}
+	var joined error
+	for _, err := range errs {
+		if err != nil {
+			joined = errors.Join(joined, err)
+		}
+	}
+	if joined != nil {
+		return nil, joined
+	}
+	return resolved, nil
+}
+
+func logStreams(targets []resolvedLogTarget, stream string) []*logStream {
+	streams := []string{stream}
+	if stream == "all" {
+		streams = []string{"stdout", "stderr"}
+	}
+	result := make([]*logStream, 0, len(targets)*len(streams))
+	for targetIndex, target := range targets {
+		for _, item := range streams {
+			result = append(result, &logStream{targetIndex: targetIndex, target: target.canonical, stream: item})
+		}
+	}
+	return result
+}
+
+func readLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
+	streams := logStreams(targets, stream)
+	events, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
+		return caller(context.Background(), "logs.read", struct {
+			Key    string
+			Stream string
+			Tail   int
+		}{targets[item.targetIndex].canonical, item.stream, tail})
+	}, func(response ipc.Response) (string, int64, error) {
+		var data struct {
+			Data string `json:"data"`
+		}
+		if err := decodeData(response.Data, &data); err != nil {
+			return "", 0, err
+		}
+		return data.Data, 0, nil
+	})
+	if err := joinLogErrors(errs); err != nil {
+		return err
+	}
+
+	writer := newLogWriter()
+	buffers := make(map[*logStream]*logLineBuffer, len(streams))
+	for _, item := range streams {
+		buffers[item] = &logLineBuffer{}
+	}
+	for _, event := range events {
+		buffers[event.stream].write(event.data, func(line string) {
+			writer.write(event.stream.target, event.stream.stream, line)
+		})
+		// Each one-shot read is the final chunk for this stream. Flush here so
+		// an unterminated line keeps the response arrival order as well.
+		buffers[event.stream].flush(func(line string) {
+			writer.write(event.stream.target, event.stream.stream, line)
+		})
 	}
 	return nil
+}
+
+func readLogEvents(streams []*logStream, read func(*logStream) (ipc.Response, error), decode func(ipc.Response) (string, int64, error)) ([]logEvent, []error) {
+	events := make(chan logEvent, len(streams))
+	errs := make(chan error, len(streams))
+	var wait sync.WaitGroup
+	for _, item := range streams {
+		item := item
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			response, err := read(item)
+			if err != nil {
+				errs <- fmt.Errorf("logs target %s %s stream: %w", item.target, item.stream, err)
+				return
+			}
+			data, offset, err := decode(response)
+			if err != nil {
+				errs <- fmt.Errorf("logs target %s %s stream: decode response: %w", item.target, item.stream, err)
+				return
+			}
+			events <- logEvent{stream: item, data: data, offset: offset}
+		}()
+	}
+	wait.Wait()
+	close(events)
+	close(errs)
+	result := make([]logEvent, 0, len(streams))
+	for event := range events {
+		result = append(result, event)
+	}
+	resultErrs := make([]error, 0)
+	for err := range errs {
+		resultErrs = append(resultErrs, err)
+	}
+	return result, resultErrs
+}
+
+func joinLogErrors(errs []error) error {
+	var joined error
+	for _, err := range errs {
+		joined = errors.Join(joined, err)
+	}
+	return joined
 }
 
 func clearLogsCommand(args []string) error {
@@ -548,61 +739,155 @@ func clearLogsCommand(args []string) error {
 }
 
 func followLogs(key, stream string, tail int) error {
-	streams := []string{stream}
-	if stream == "all" {
-		streams = []string{"stdout", "stderr"}
+	resolved, err := resolveLogTargets([]string{key}, logsCall)
+	if err != nil {
+		return err
 	}
-	offsets := map[string]int64{}
-	first := true
+	return followLogsTargets(resolved, stream, tail, logsCall)
+}
+
+func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
+	streams := logStreams(targets, stream)
+	initialEvents, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
+		return caller(context.Background(), "logs.read", struct {
+			Key           string
+			Stream        string
+			Tail          int
+			IncludeOffset bool
+		}{item.target, item.stream, tail, true})
+	}, func(response ipc.Response) (string, int64, error) {
+		var data followLogResponse
+		if err := decodeData(response.Data, &data); err != nil {
+			return "", 0, err
+		}
+		return data.Data, data.NextOffset, nil
+	})
+	if err := joinLogErrors(errs); err != nil {
+		return err
+	}
+
+	writer := newLogWriter()
+	buffers := make(map[*logStream]*logLineBuffer, len(streams))
+	for _, item := range streams {
+		buffers[item] = &logLineBuffer{}
+	}
+	for _, event := range initialEvents {
+		event.stream.offset = event.offset
+		buffers[event.stream].write(event.data, func(line string) {
+			writer.write(event.stream.target, event.stream.stream, line)
+		})
+	}
+
 	for {
-		for _, item := range streams {
-			if first {
-				response, err := call("logs.read", struct {
-					Key           string
-					Stream        string
-					Tail          int
-					IncludeOffset bool
-				}{key, item, tail, true})
-				if err != nil {
-					return err
-				}
-				var data followLogResponse
-				if err := decodeData(response.Data, &data); err != nil {
-					return err
-				}
-				if data.Data != "" {
-					if stream == "all" {
-						printLogLabel(item)
-					}
-					printLogContent(item, data.Data)
-				}
-				offsets[item] = data.NextOffset
-				continue
-			}
-			response, err := call("logs.read", struct {
+		errs := readLogEventsLive(streams, func(item *logStream) (ipc.Response, error) {
+			return caller(context.Background(), "logs.read", struct {
 				Key      string
 				Stream   string
 				Offset   int64
 				MaxBytes int
-			}{key, item, offsets[item], 64 << 10})
-			if err != nil {
-				return err
-			}
+			}{item.target, item.stream, item.offset, 64 << 10})
+		}, func(response ipc.Response) (string, int64, error) {
 			var data followLogResponse
 			if err := decodeData(response.Data, &data); err != nil {
-				return err
+				return "", 0, err
 			}
-			if data.Data != "" {
-				if stream == "all" {
-					printLogLabel(item)
-				}
-				printLogContent(item, data.Data)
+			return data.Data, data.NextOffset, nil
+		}, func(event logEvent) {
+			event.stream.offset = event.offset
+			buffers[event.stream].write(event.data, func(line string) {
+				writer.write(event.stream.target, event.stream.stream, line)
+			})
+		})
+		if err := joinLogErrors(errs); err != nil {
+			for _, item := range streams {
+				buffers[item].flush(func(line string) {
+					writer.write(item.target, item.stream, line)
+				})
 			}
-			offsets[item] = data.NextOffset
+			return err
 		}
-		first = false
 		time.Sleep(time.Second)
 	}
+}
+
+type logEventResult struct {
+	event logEvent
+	err   error
+}
+
+func readLogEventsLive(streams []*logStream, read func(*logStream) (ipc.Response, error), decode func(ipc.Response) (string, int64, error), emit func(logEvent)) []error {
+	results := make(chan logEventResult, len(streams))
+	for _, item := range streams {
+		item := item
+		go func() {
+			response, err := read(item)
+			if err != nil {
+				results <- logEventResult{err: fmt.Errorf("logs target %s %s stream: %w", item.target, item.stream, err)}
+				return
+			}
+			data, offset, err := decode(response)
+			if err != nil {
+				results <- logEventResult{err: fmt.Errorf("logs target %s %s stream: decode response: %w", item.target, item.stream, err)}
+				return
+			}
+			results <- logEventResult{event: logEvent{stream: item, data: data, offset: offset}}
+		}()
+	}
+	errs := make([]error, 0)
+	for range streams {
+		result := <-results
+		if result.err != nil {
+			errs = append(errs, result.err)
+			continue
+		}
+		emit(result.event)
+	}
+	return errs
+}
+
+type logWriter struct {
+	mu sync.Mutex
+}
+
+func newLogWriter() *logWriter { return &logWriter{} }
+
+func (w *logWriter) write(target, stream, line string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	style := cliui.StyleLogStdout
+	if stream == "stderr" {
+		style = cliui.StyleStderr
+	}
+	prefix := cliOutput.Text(style, "｜"+target+"｜")
+	cliOutput.Printf("%s %s\n", prefix, line)
+}
+
+type logLineBuffer struct {
+	data string
+}
+
+func (b *logLineBuffer) write(data string, emit func(string)) {
+	if data == "" {
+		return
+	}
+	b.data += data
+	for {
+		index := strings.IndexByte(b.data, '\n')
+		if index < 0 {
+			return
+		}
+		line := strings.TrimSuffix(b.data[:index], "\r")
+		emit(line)
+		b.data = b.data[index+1:]
+	}
+}
+
+func (b *logLineBuffer) flush(emit func(string)) {
+	if b.data == "" {
+		return
+	}
+	emit(strings.TrimSuffix(b.data, "\r"))
+	b.data = ""
 }
 
 type followLogResponse struct {
@@ -782,12 +1067,22 @@ func call(method string, params interface{}) (ipc.Response, error) {
 }
 
 func callWithTimeout(method string, params interface{}, timeout time.Duration) (ipc.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return callWithContext(ctx, method, params)
+}
+
+func logsCall(ctx context.Context, method string, params interface{}) (ipc.Response, error) {
+	callContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return callWithContext(callContext, method, params)
+}
+
+func callWithContext(ctx context.Context, method string, params interface{}) (ipc.Response, error) {
 	request, err := ipc.NewRequest(method, params)
 	if err != nil {
 		return ipc.Response{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	return ipc.Call(ctx, request)
 }
 

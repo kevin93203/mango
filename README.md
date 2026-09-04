@@ -115,6 +115,7 @@ mango status demo/api
 ~~~powershell
 mango logs demo/api --stream all --tail 50
 mango logs demo/api --stream stdout --follow
+mango logs demo/api demo/nightly-job 2 --stream all
 mango monitor
 ~~~
 
@@ -369,7 +370,7 @@ Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Wi
 查看 service 的 stdout／stderr。
 
 ~~~text
-mango logs TARGET [--stream STREAM] [--tail N] [--follow]
+mango logs TARGET [TARGET ...] [--stream STREAM] [--tail N] [--follow]
 mango logs clear TARGET
 ~~~
 
@@ -377,10 +378,13 @@ mango logs clear TARGET
 
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
-| TARGET | 無 | service key、schedule key 或全域整數 service id。 |
-| --stream | stdout | 可選 stdout、stderr 或 all。 |
-| --tail | 100 | 顯示最後幾行；必須是整數。 |
+| TARGET | 無 | 一個以上的 service key、schedule key 或全域整數 service id。 |
+| --stream | all | 可選 stdout、stderr 或 all。 |
+| --tail | 15 | 顯示最後幾行；必須是整數。 |
 | --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
+
+指定多個 target 時，各 target 的 stdout／stderr 會並行追蹤並依事件抵達順序交錯輸出；每個完整輸出行都會使用解析後的 canonical target 前綴，例如
+`｜demo/api｜ log content`。互動式 TTY 會將 stdout 前綴顯示為綠色、stderr 前綴顯示為紅色，其他輸出環境不加入 ANSI 色碼。
 
 `mango logs clear TARGET` 會清除指定 service 或 schedule 的 stdout／stderr
 目前日誌與所有輪替檔。若 service 仍在執行，會保留開啟中的 writer，清除後的
