@@ -26,7 +26,7 @@ func Default() (Layout, error) {
 		return Layout{
 			Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 			State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-			DaemonConfig: filepath.Join(root, "daemon.toml"),
+			DaemonConfig: filepath.Join(root, "daemon.yaml"),
 			SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 			DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 		}, nil
@@ -45,7 +45,7 @@ func Default() (Layout, error) {
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),
 		State: filepath.Join(data, "state"), Registry: filepath.Join(root, "projects.json"),
-		DaemonConfig: filepath.Join(root, "daemon.toml"),
+		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(runtime, "mango.sock"),
 		DaemonLog:    filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),
 	}, nil

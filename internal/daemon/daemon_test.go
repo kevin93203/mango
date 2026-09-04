@@ -34,7 +34,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		Projects: map[string]registry.Project{
 			"demo": {
 				Name:       "demo",
-				ConfigPath: filepath.Join(root, "missing.toml"),
+				ConfigPath: filepath.Join(root, "missing.yaml"),
 				Enabled:    true,
 			},
 		},
@@ -105,8 +105,8 @@ func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
 func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	alphaPath := filepath.Join(root, "alpha.toml")
-	betaPath := filepath.Join(root, "beta.toml")
+	alphaPath := filepath.Join(root, "alpha.yaml")
+	betaPath := filepath.Join(root, "beta.yaml")
 	writeTestConfig(t, alphaPath, "alpha", "api")
 	writeTestConfig(t, betaPath, "beta", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
@@ -268,8 +268,8 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	alphaPath := filepath.Join(root, "alpha.toml")
-	betaPath := filepath.Join(root, "beta.toml")
+	alphaPath := filepath.Join(root, "alpha.yaml")
+	betaPath := filepath.Join(root, "beta.yaml")
 	writeTestConfig(t, alphaPath, "alpha", "api")
 	writeTestConfig(t, betaPath, "beta", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
@@ -409,34 +409,33 @@ func TestAggregatePortsIncludesDescendantsWithoutDuplicates(t *testing.T) {
 func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	configPath := filepath.Join(root, "demo.toml")
+	configPath := filepath.Join(root, "demo.yaml")
 	readyPath := filepath.Join(root, "ready")
-	content := `version = 2
-project = "demo"
+	content := `version: 2
+project: demo
 
-[defaults]
-working_dir = "."
+defaults:
+  working_dir: .
 
-[services.db]
-command = "sh"
-args = ["-c", "sleep 2"]
-autostart = true
-restart = "never"
-
-[services.db.healthcheck]
-test = ["CMD", "test", "-f", "ready"]
-interval = "5ms"
-timeout = "100ms"
-retries = 1
-
-[services.web]
-command = "sh"
-args = ["-c", "sleep 2"]
-autostart = true
-restart = "never"
-
-[services.web.depends_on.db]
-condition = "service_healthy"
+services:
+  db:
+    command: sh
+    args: ["-c", "sleep 2"]
+    autostart: true
+    restart: never
+    healthcheck:
+      test: [CMD, test, -f, ready]
+      interval: 5ms
+      timeout: 100ms
+      retries: 1
+  web:
+    command: sh
+    args: ["-c", "sleep 2"]
+    autostart: true
+    restart: never
+    depends_on:
+      db:
+        condition: service_healthy
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -499,26 +498,26 @@ func TestTopologicalSpecsPlaceDependenciesFirst(t *testing.T) {
 func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	configPath := filepath.Join(root, "demo.toml")
+	configPath := filepath.Join(root, "demo.yaml")
 	writeDependentConfig := func(argument string) {
-		content := fmt.Sprintf(`version = 2
-project = "demo"
+		content := fmt.Sprintf(`version: 2
+project: demo
 
-[services.db]
-command = "sh"
-args = ["-c", "sleep %s"]
-autostart = true
-restart = "never"
-
-[services.web]
-command = "sh"
-args = ["-c", "sleep 3"]
-autostart = true
-restart = "never"
-
-[services.web.depends_on.db]
-condition = "service_started"
-restart = true
+services:
+  db:
+    command: sh
+    args: ["-c", "sleep %s"]
+    autostart: true
+    restart: never
+  web:
+    command: sh
+    args: ["-c", "sleep 3"]
+    autostart: true
+    restart: never
+    depends_on:
+      db:
+        condition: service_started
+        restart: true
 `, argument)
 		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -570,7 +569,7 @@ restart = true
 func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	configPath := filepath.Join(root, "demo.toml")
+	configPath := filepath.Join(root, "demo.yaml")
 	writeTestScheduleConfig(t, configPath, "demo", "nightly-job")
 	if err := registry.Save(layout.Registry, registry.File{
 		Version: 2,
@@ -660,19 +659,19 @@ func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 		State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-		DaemonConfig: filepath.Join(root, "daemon.toml"),
+		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 	}
 }
 
 func writeTestConfig(t *testing.T, path, project string, processNames ...string) {
-	lines := []string{"version = 2", fmt.Sprintf("project = %q", project), ""}
+	lines := []string{"version: 2", fmt.Sprintf("project: %s", project), "", "services:"}
 	for _, processName := range processNames {
 		lines = append(lines,
-			fmt.Sprintf("[services.%s]", processName),
-			`command = "echo"`,
-			"autostart = false",
+			fmt.Sprintf("  %s:", processName),
+			"    command: echo",
+			"    autostart: false",
 			"",
 		)
 	}
@@ -683,14 +682,14 @@ func writeTestConfig(t *testing.T, path, project string, processNames ...string)
 
 func writeTestScheduleConfig(t *testing.T, path, project, scheduleName string) {
 	content := strings.Join([]string{
-		"version = 2",
-		fmt.Sprintf("project = %q", project),
+		"version: 2",
+		fmt.Sprintf("project: %s", project),
 		"",
-		"[[schedules]]",
-		fmt.Sprintf("name = %q", scheduleName),
-		`cron = "* * * * *"`,
-		`action = "run"`,
-		`command = "echo"`,
+		"schedules:",
+		fmt.Sprintf("  - name: %s", scheduleName),
+		`    cron: "* * * * *"`,
+		"    action: run",
+		"    command: echo",
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

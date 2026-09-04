@@ -1,0 +1,79 @@
+version: 2
+project: demo
+
+defaults:
+  working_dir: "."
+  restart: on-failure
+  stop_timeout: 10s
+  log_max_size: 100MiB
+  log_max_files: 10
+  metrics_interval: 1s
+
+services:
+  api:
+    command: go
+    args:
+      - run
+      - ./examples/api
+      - --port
+      - "8080"
+      - --interval
+      - 3s
+    autostart: true
+    restart: always
+    environment:
+      APP_ENV: development
+    healthcheck:
+      test: [CMD, curl, -f, "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 3s
+
+  api2:
+    command: ./examples/run_api.sh
+    autostart: true
+    restart: always
+    environment:
+      APP_ENV: development
+    healthcheck:
+      policy: all
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      checks:
+        - test: [CMD, curl, -f, "http://127.0.0.1:9000/"]
+        - test: [CMD, curl, -f, "http://127.0.0.1:9090/"]
+
+  one-task:
+    command: go
+    args:
+      - run
+      - ./examples/one-task
+      - --iterations
+      - "5"
+      - --interval
+      - 500ms
+    autostart: false
+    restart: never
+
+schedules:
+  - name: nightly-job
+    cron: "0 2 * * *"
+    timezone: Asia/Taipei
+    action: run
+    command: go
+    args:
+      - run
+      - ./examples/one-task
+      - --iterations
+      - "3"
+      - --interval
+      - 300ms
+    concurrency: forbid
+
+  - name: refresh-api
+    cron: "*/30 * * * *"
+    timezone: Asia/Taipei
+    action: restart
+    target: api

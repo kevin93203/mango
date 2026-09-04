@@ -13,7 +13,7 @@ func TestLoadLegacyRegistryWithoutProcessIDs(t *testing.T) {
   "projects": {
     "demo": {
       "name": "demo",
-      "config_path": "C:/demo.toml",
+      "config_path": "C:/demo.yaml",
       "enabled": true,
       "config_version": 1
     }
