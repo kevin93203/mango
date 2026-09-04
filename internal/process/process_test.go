@@ -71,3 +71,26 @@ func TestStopDoesNotWaitForUnsupportedGracefulSignal(t *testing.T) {
 		t.Fatalf("stop took %s; expected force stop to happen before the graceful timeout", elapsed)
 	}
 }
+
+func TestForceStopTerminatesProcessTreeImmediately(t *testing.T) {
+	handle, err := Start(Spec{
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestHelperProcess", "--"},
+		Env: map[string]string{
+			"GO_WANT_HELPER_PROCESS": "1",
+			"GO_STOP_HELPER_PROCESS": "parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	started := time.Now()
+	if err := handle.ForceStop(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("force stop took %s; expected immediate process-tree termination", elapsed)
+	}
+}

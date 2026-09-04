@@ -1624,6 +1624,10 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 		if schedule.DurationSeconds != nil {
 			duration = formatScheduleDuration(*schedule.DurationSeconds)
 		}
+		timeout := "-"
+		if schedule.TimeoutSeconds > 0 {
+			timeout = formatScheduleDuration(schedule.TimeoutSeconds)
+		}
 		rows = append(rows, []cliui.Cell{
 			{Text: schedule.Project + "/" + schedule.Name},
 			{Text: schedule.Cron},
@@ -1631,13 +1635,14 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 			{Text: schedule.Action},
 			{Text: schedule.Target, Style: zeroStyle(schedule.Target)},
 			{Text: schedule.Concurrency},
+			{Text: timeout, Style: zeroStyle(timeout)},
 			{Text: schedule.Status, Style: cliui.StateStyle(schedule.Status)},
 			{Text: lastRun, Style: zeroStyle(lastRun)},
 			{Text: nextRun, Style: zeroStyle(nextRun)},
 			{Text: duration, Style: zeroStyle(duration)},
 		})
 	}
-	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
+	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY", "TIMEOUT", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
 func printScheduleHistory(history []scheduler.Record, showAttempts bool) {

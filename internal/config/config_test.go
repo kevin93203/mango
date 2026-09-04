@@ -198,6 +198,7 @@ schedules:
     cron: "0 2 * * *"
     action: run
     command: echo
+    timeout: 250ms
     retry:
       retries: 3
       delay: 250ms
@@ -214,8 +215,60 @@ schedules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(schedules) != 1 || schedules[0].RetryCount != 3 || schedules[0].RetryDelay.String() != "250ms" {
-		t.Fatalf("effective retry = %+v, want 3 retries and 250ms delay", schedules[0])
+	if len(schedules) != 1 || schedules[0].Timeout.String() != "250ms" || schedules[0].RetryCount != 3 || schedules[0].RetryDelay.String() != "250ms" {
+		t.Fatalf("effective schedule = %+v, want 250ms timeout and retry settings", schedules[0])
+	}
+}
+
+func TestEffectiveScheduleTimeoutDefaultsToDisabled(t *testing.T) {
+	file := File{
+		Version: 2,
+		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
+		Schedules: []Schedule{{
+			Name: "job", Cron: "0 2 * * *", Action: "run", Command: "echo",
+		}},
+	}
+	schedules, err := file.SchedulesEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(schedules) != 1 || schedules[0].Timeout != 0 {
+		t.Fatalf("effective timeout = %+v, want disabled timeout", schedules)
+	}
+}
+
+func TestValidateRejectsInvalidScheduleTimeout(t *testing.T) {
+	for _, timeout := range []string{"not-a-duration", "0s", "-1s"} {
+		t.Run(timeout, func(t *testing.T) {
+			file := File{
+				Version: 2,
+				Path:    filepath.Join(t.TempDir(), "mango.yaml"),
+				Schedules: []Schedule{{
+					Name: "job", Cron: "0 2 * * *", Action: "run", Command: "echo", Timeout: timeout,
+				}},
+			}
+			err := Validate(file)
+			if err == nil || !strings.Contains(err.Error(), "timeout") {
+				t.Fatalf("error = %v, want timeout validation error", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsScheduleTimeoutForNonRunAction(t *testing.T) {
+	file := File{
+		Version: 2,
+		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
+		Services: map[string]Service{
+			"api": {Command: "api"},
+		},
+		Schedules: []Schedule{{
+			Name: "restart-api", Cron: "0 2 * * *", Action: "restart", Target: "api", Timeout: "1s",
+		}},
+	}
+	err := Validate(file)
+	if err == nil || !strings.Contains(err.Error(), "only supported for action run") {
+		t.Fatalf("error = %v, want non-run timeout validation error", err)
 	}
 }
 

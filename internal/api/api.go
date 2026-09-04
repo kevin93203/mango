@@ -128,6 +128,7 @@ type ScheduleInfo struct {
 	Action          string
 	Target          string
 	Concurrency     string
+	TimeoutSeconds  float64
 	Status          string
 	LastRun         *time.Time
 	NextRun         *time.Time

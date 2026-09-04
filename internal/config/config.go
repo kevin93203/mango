@@ -96,6 +96,7 @@ type Schedule struct {
 	WorkingDir  string            `yaml:"working_dir"`
 	Env         map[string]string `yaml:"env"`
 	Concurrency string            `yaml:"concurrency"`
+	Timeout     string            `yaml:"timeout"`
 	Retry       *ScheduleRetry    `yaml:"retry"`
 }
 
@@ -154,6 +155,7 @@ type EffectiveSchedule struct {
 	WorkingDir  string
 	Env         map[string]string
 	Concurrency string
+	Timeout     time.Duration
 	RetryCount  int
 	RetryDelay  time.Duration
 }
@@ -321,6 +323,14 @@ func Validate(f File) error {
 			}
 		default:
 			return fmt.Errorf("schedule %q action must be run, start, stop, or restart", s.Name)
+		}
+		if s.Timeout != "" {
+			if s.Action != "run" {
+				return fmt.Errorf("schedule %q timeout is only supported for action run", s.Name)
+			}
+			if _, err := parseDuration(s.Timeout, 0); err != nil {
+				return fmt.Errorf("schedule %q timeout: %w", s.Name, err)
+			}
 		}
 		if s.Concurrency != "" && s.Concurrency != "forbid" && s.Concurrency != "allow" {
 			return fmt.Errorf("schedule %q concurrency must be forbid or allow", s.Name)
@@ -504,11 +514,12 @@ func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error
 			retryCount = s.Retry.Retries
 			retryDelay, _ = parseNonNegativeDuration(s.Retry.Delay, 0)
 		}
+		timeout, _ := parseDuration(s.Timeout, 0)
 		result = append(result, EffectiveSchedule{
 			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
 			Action: s.Action, Target: s.Target, Command: command, Args: append([]string(nil), s.Args...),
 			WorkingDir: dir, Env: mergeEnv(s.Env), Concurrency: defaultString(s.Concurrency, "forbid"),
-			RetryCount: retryCount, RetryDelay: retryDelay,
+			Timeout: timeout, RetryCount: retryCount, RetryDelay: retryDelay,
 		})
 	}
 	return result, nil

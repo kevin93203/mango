@@ -131,6 +131,22 @@ func (h *Handle) Stop(timeout time.Duration) error {
 	}
 }
 
+// ForceStop immediately terminates the process tree managed by the handle and
+// waits until its result has been collected.
+func (h *Handle) ForceStop() error {
+	if h == nil || h.cmd == nil || h.cmd.Process == nil {
+		return nil
+	}
+	select {
+	case <-h.done:
+		return nil
+	default:
+	}
+	err := forceStop(h)
+	<-h.done
+	return err
+}
+
 func (h *Handle) CommandLine() string {
 	if h == nil || h.cmd == nil {
 		return ""

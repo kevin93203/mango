@@ -966,11 +966,11 @@ func TestPrintScheduleTableIncludesRuntimeColumns(t *testing.T) {
 	duration := 65.4
 	printScheduleTable([]api.ScheduleInfo{{
 		Project: "demo", Name: "job", Cron: "0 * * * *", Timezone: "UTC", Action: "run",
-		Concurrency: "forbid", Status: "failed", LastRun: &lastRun, NextRun: &nextRun, DurationSeconds: &duration,
+		Concurrency: "forbid", TimeoutSeconds: 2.5, Status: "failed", LastRun: &lastRun, NextRun: &nextRun, DurationSeconds: &duration,
 	}})
 
 	text := output.String()
-	for _, want := range []string{"STATUS", "LAST_RUN", "NEXT_RUN", "DURATION", "failed", "2026-01-02T03:04:05Z", "1m 5s"} {
+	for _, want := range []string{"TIMEOUT", "2s", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION", "failed", "2026-01-02T03:04:05Z", "1m 5s"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("table = %q, want %q", text, want)
 		}

@@ -455,15 +455,16 @@ mango schedule run PROJECT/SCHEDULE
 
 | 指令 | 說明 |
 | --- | --- |
-| ls | 列出 schedule、cron、timezone、action、concurrency 與執行狀態。 |
+| ls | 列出 schedule、cron、timezone、action、concurrency、timeout 與執行狀態。 |
 | history | 顯示已保存的排程執行紀錄。 |
 | run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
 
-`mango schedule ls` 會在基本設定欄位後顯示 `STATUS`、`LAST_RUN`、`NEXT_RUN` 與 `DURATION`：
+`mango schedule ls` 會在基本設定欄位後顯示 `TIMEOUT`、`STATUS`、`LAST_RUN`、`NEXT_RUN` 與 `DURATION`：
 
 - `STATUS` 為 `idle`、`running`、`success` 或 `failed`；執行中狀態優先顯示。
 - `LAST_RUN` 是最近一次實際執行的開始時間，包含手動執行；`NEXT_RUN` 是下一次 cron 觸發時間。
 - `DURATION` 是最近一次執行耗時；執行中則顯示目前已耗時。尚未有值時顯示 `-`。
+- `TIMEOUT` 是 `action: run` 的設定上限；未設定時顯示 `-`。`--json` 會以 `TimeoutSeconds: 0` 表示停用。
 - 時間依 schedule 的 timezone 顯示。`--json` 會以 RFC3339 時間、秒數 duration 與 `null` 空值回傳這些欄位。
 
 schedule run 的 key 格式為 PROJECT/SCHEDULE。
@@ -670,6 +671,7 @@ schedules:
     command: go
     args: [run, ./examples/one-task, --iterations, "3"]
     concurrency: forbid
+    timeout: 5m
     retry:
       retries: 3
       delay: 5s
@@ -687,12 +689,14 @@ schedules:
 | working_dir | 否 | defaults 值 | task 工作目錄。 |
 | env | 否 | 繼承環境 | task 環境變數。 |
 | concurrency | 否 | forbid | 可選 forbid 或 allow。 |
+| timeout | 否 | 停用 | `action: run` 任務的最長執行時間；逾時會強制終止 process tree。 |
 | retry | 否 | 不重試 | `retries` 表示初次失敗後的重試次數；`delay` 表示每次重試前的等待時間。 |
 
 排程規則：
 
 - daemon 離線期間錯過的排程不補執行。
 - forbid 會跳過上一個相同 schedule 尚未完成的執行。
+- `action: run` 可設定 `timeout`；逾時會以 exit code 124 記錄為失敗，並依 `retry` 設定重試。`start`、`stop` 與 `restart` 不支援 timeout。
 - schedule 執行失敗時，會依 `retry.retries` 與 `retry.delay` 重試；同一次 schedule run 最終只保存一筆 history，並在 `Attempts` 保存每次執行詳情。
 - cron 與 timezone 錯誤會使 config validate／apply 失敗。
 - schedule task 日誌會寫入 service log root 下的 schedule-<name> 目錄。
