@@ -114,7 +114,7 @@ func usage() {
 		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
-		"  schedule ls|history [--tail N]|run PROJECT/SCHEDULE",
+		"  schedule ls|history [--tail N] [--attempts]|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
@@ -1221,6 +1221,7 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 	}
 	var method string
 	var params interface{}
+	showAttempts := false
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
@@ -1231,6 +1232,7 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 		method = "schedule.history"
 		fs := newFlagSet("schedule history")
 		tail := fs.Int("tail", 100, "number of history records")
+		attempts := fs.Bool("attempts", false, "show attempt details")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -1243,6 +1245,7 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 		params = struct {
 			Tail int `json:"tail"`
 		}{*tail}
+		showAttempts = *attempts
 	case "run":
 		if len(args) != 2 {
 			return errors.New("schedule run requires PROJECT/SCHEDULE")
@@ -1271,7 +1274,7 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 		if err := decodeData(response.Data, &history); err != nil {
 			return err
 		}
-		printScheduleHistory(history)
+		printScheduleHistory(history, showAttempts)
 	case "schedule.run":
 		var result map[string]string
 		if err := decodeData(response.Data, &result); err != nil {
@@ -1637,9 +1640,13 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
-func printScheduleHistory(history []scheduler.Record) {
+func printScheduleHistory(history []scheduler.Record, showAttempts bool) {
 	if len(history) == 0 {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No schedule history."))
+		return
+	}
+	if showAttempts {
+		printScheduleAttemptTable(history)
 		return
 	}
 	rows := make([][]cliui.Cell, 0, len(history))
@@ -1671,6 +1678,94 @@ func printScheduleHistory(history []scheduler.Record) {
 		})
 	}
 	cliOutput.Table([]string{"SCHEDULE", "STARTED", "FINISHED", "EXIT", "RESULT", "ERROR"}, rows)
+}
+
+func printScheduleAttemptTable(history []scheduler.Record) {
+	rows := make([][]cliui.Cell, 0, len(history))
+	for _, record := range history {
+		if record.Attempts == nil {
+			rows = append(rows, legacyScheduleAttemptRow(record))
+			continue
+		}
+		if len(record.Attempts) == 0 {
+			rows = append(rows, emptyScheduleAttemptRow(record))
+			continue
+		}
+		for _, attempt := range record.Attempts {
+			rows = append(rows, scheduleAttemptRow(record, attempt))
+		}
+	}
+	cliOutput.Table([]string{"SCHEDULE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
+}
+
+func scheduleAttemptRow(record scheduler.Record, attempt scheduler.Attempt) []cliui.Cell {
+	result := "success"
+	style := cliui.StyleSuccess
+	if attempt.Error != "" || attempt.ExitCode != 0 {
+		result = "failed"
+		style = cliui.StyleError
+	}
+	errorText := compactScheduleText(attempt.Error)
+	if errorText == "" {
+		errorText = "-"
+	}
+	errStyle := errorStyle(attempt.Error)
+	stderrText := compactScheduleText(attempt.Stderr)
+	if stderrText == "" {
+		stderrText = "-"
+	}
+	stderrStyle := cliui.StyleStderr
+	if attempt.Stderr == "" {
+		stderrStyle = cliui.StyleMuted
+	}
+	durationText := formatScheduleDuration(attempt.DurationSeconds)
+	return []cliui.Cell{
+		{Text: record.Project + "/" + record.Name},
+		{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
+		{Text: formatTime(attempt.Started)},
+		{Text: formatTime(attempt.Finished)},
+		{Text: durationText, Style: zeroStyle(durationText)},
+		{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: style, Align: cliui.AlignRight},
+		{Text: result, Style: style},
+		{Text: errorText, Style: errStyle},
+		{Text: stderrText, Style: stderrStyle},
+	}
+}
+
+func legacyScheduleAttemptRow(record scheduler.Record) []cliui.Cell {
+	result := "success"
+	style := cliui.StyleSuccess
+	if record.Error != "" || record.ExitCode != 0 {
+		result = "failed"
+		style = cliui.StyleError
+	}
+	errorText := compactScheduleText(record.Error)
+	if errorText == "" {
+		errorText = "-"
+	}
+	return []cliui.Cell{
+		{Text: record.Project + "/" + record.Name},
+		{Text: "-", Style: cliui.StyleMuted, Align: cliui.AlignRight},
+		{Text: formatTime(record.Started)},
+		{Text: formatTime(record.Finished)},
+		{Text: "-", Style: cliui.StyleMuted},
+		{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
+		{Text: result, Style: style},
+		{Text: errorText, Style: errorStyle(record.Error)},
+		{Text: "attempt details unavailable", Style: cliui.StyleMuted},
+	}
+}
+
+func emptyScheduleAttemptRow(record scheduler.Record) []cliui.Cell {
+	row := legacyScheduleAttemptRow(record)
+	row[len(row)-1] = cliui.Cell{Text: "no attempts recorded", Style: cliui.StyleMuted}
+	return row
+}
+
+func compactScheduleText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "↵")
+	value = strings.ReplaceAll(value, "\n", "↵")
+	return strings.ReplaceAll(value, "\r", "↵")
 }
 
 func lastNonEmptyLine(value string) string {

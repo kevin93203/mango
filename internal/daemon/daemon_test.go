@@ -150,6 +150,47 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestScheduleHistoryIncludesAttempts(t *testing.T) {
+	var runs int
+	d := New(testLayout(t.TempDir()))
+	d.scheduler = scheduler.New(func(context.Context, config.EffectiveSchedule) scheduler.ExecutionResult {
+		runs++
+		if runs == 1 {
+			return scheduler.ExecutionResult{ExitCode: 1, Err: fmt.Errorf("temporary failure"), Stderr: "retry\n"}
+		}
+		return scheduler.ExecutionResult{}
+	})
+	if err := d.scheduler.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		RetryCount: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.scheduler.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.Wait()
+
+	request, err := ipc.NewRequest("schedule.history", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule.history failed: %+v", response.Error)
+	}
+	var records []scheduler.Record
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 2 || len(records) != 1 || len(records[0].Attempts) != 2 {
+		t.Fatalf("runs = %d, records = %+v, want one record with two attempts", runs, records)
+	}
+	if records[0].Attempts[0].Error != "temporary failure" || records[0].Attempts[1].ExitCode != 0 {
+		t.Fatalf("attempts = %+v, want failed then successful attempt", records[0].Attempts)
+	}
+}
+
 func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
