@@ -1609,6 +1609,18 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 	}
 	rows := make([][]cliui.Cell, 0, len(schedules))
 	for _, schedule := range schedules {
+		lastRun := "-"
+		if schedule.LastRun != nil {
+			lastRun = formatTime(*schedule.LastRun)
+		}
+		nextRun := "-"
+		if schedule.NextRun != nil {
+			nextRun = formatTime(*schedule.NextRun)
+		}
+		duration := "-"
+		if schedule.DurationSeconds != nil {
+			duration = formatScheduleDuration(*schedule.DurationSeconds)
+		}
 		rows = append(rows, []cliui.Cell{
 			{Text: schedule.Project + "/" + schedule.Name},
 			{Text: schedule.Cron},
@@ -1616,9 +1628,13 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 			{Text: schedule.Action},
 			{Text: schedule.Target, Style: zeroStyle(schedule.Target)},
 			{Text: schedule.Concurrency},
+			{Text: schedule.Status, Style: cliui.StateStyle(schedule.Status)},
+			{Text: lastRun, Style: zeroStyle(lastRun)},
+			{Text: nextRun, Style: zeroStyle(nextRun)},
+			{Text: duration, Style: zeroStyle(duration)},
 		})
 	}
-	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY"}, rows)
+	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "ACTION", "TARGET", "CONCURRENCY", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
 func printScheduleHistory(history []scheduler.Record) {
@@ -1734,6 +1750,13 @@ func formatTime(value time.Time) string {
 		return "-"
 	}
 	return value.Format(time.RFC3339)
+}
+
+func formatScheduleDuration(seconds float64) string {
+	if seconds <= 0 {
+		return "0s"
+	}
+	return cliui.FormatDuration(seconds)
 }
 
 func zeroStyle(value interface{}) cliui.Style {

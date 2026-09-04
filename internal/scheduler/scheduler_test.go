@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,205 @@ func TestRunNowRecordsHistory(t *testing.T) {
 	}
 	if len(s.History()) != 1 {
 		t.Fatalf("history = %+v", s.History())
+	}
+}
+
+func TestListSnapshotsReportsIdleAndNextRun(t *testing.T) {
+	s := New(nil)
+	schedule := config.EffectiveSchedule{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		Action: "run", Command: "noop", Concurrency: "forbid",
+	}
+	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots := s.ListSnapshots()
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %+v, want one snapshot", snapshots)
+	}
+	snapshot := snapshots[0]
+	if snapshot.Status != StatusIdle {
+		t.Fatalf("status = %q, want %q", snapshot.Status, StatusIdle)
+	}
+	if snapshot.LastRun != nil || snapshot.DurationSeconds != nil {
+		t.Fatalf("snapshot = %+v, want nil last run and duration", snapshot)
+	}
+	if snapshot.NextRun != nil {
+		t.Fatalf("next run = %v, want nil before scheduler start", snapshot.NextRun)
+	}
+	s.Start()
+	startedSnapshot := s.ListSnapshots()[0]
+	if startedSnapshot.NextRun == nil || startedSnapshot.NextRun.Before(time.Now()) {
+		t.Fatalf("next run = %v, want a future time after scheduler start", startedSnapshot.NextRun)
+	}
+	stopped := s.Stop()
+	<-stopped.Done()
+}
+
+func TestListSnapshotsReportsRunningAndCompletedOutcome(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		close(started)
+		<-release
+		return ExecutionResult{}
+	})
+	schedule := config.EffectiveSchedule{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid"}
+	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("schedule did not start")
+	}
+
+	running := s.ListSnapshots()[0]
+	if running.Status != StatusRunning || running.LastRun == nil || running.DurationSeconds == nil {
+		t.Fatalf("running snapshot = %+v, want running state and timing", running)
+	}
+	close(release)
+	s.Wait()
+
+	completed := s.ListSnapshots()[0]
+	if completed.Status != StatusSuccess || completed.LastRun == nil || completed.DurationSeconds == nil {
+		t.Fatalf("completed snapshot = %+v, want successful result and timing", completed)
+	}
+}
+
+func TestListSnapshotsReportsFailedOutcome(t *testing.T) {
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		return ExecutionResult{ExitCode: 1, Err: errors.New("exit status 1")}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+
+	snapshot := s.ListSnapshots()[0]
+	if snapshot.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", snapshot.Status, StatusFailed)
+	}
+	if snapshot.LastRun == nil || snapshot.DurationSeconds == nil {
+		t.Fatalf("snapshot = %+v, want timing", snapshot)
+	}
+}
+
+func TestListSnapshotsRestoresLastRunFromHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "schedule-history.json")
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	finished := started.Add(1250 * time.Millisecond)
+	data, err := json.Marshal(HistoryFile{Version: historyVersion, Records: []Record{{
+		Project: "demo", Name: "job", Started: started, Finished: finished,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(nil)
+	if err := s.LoadHistory(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := s.ListSnapshots()[0]
+	if snapshot.Status != StatusSuccess || snapshot.LastRun == nil || !snapshot.LastRun.Equal(started) {
+		t.Fatalf("snapshot = %+v, want restored successful run", snapshot)
+	}
+	if snapshot.DurationSeconds == nil || *snapshot.DurationSeconds < 1.249 || *snapshot.DurationSeconds > 1.251 {
+		t.Fatalf("duration = %v, want about 1.25 seconds", snapshot.DurationSeconds)
+	}
+}
+
+func TestListSnapshotsHonorsConcurrencyForbid(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var runs atomic.Int32
+	var startOnce sync.Once
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		runs.Add(1)
+		startOnce.Do(func() { close(started) })
+		<-release
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first schedule did not start")
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	s.Wait()
+	if runs.Load() != 1 {
+		t.Fatalf("runs = %d, want one execution with forbid concurrency", runs.Load())
+	}
+}
+
+func TestListSnapshotsHonorsConcurrencyAllow(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var runs atomic.Int32
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		runs.Add(1)
+		started <- struct{}{}
+		<-release
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "allow",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("schedule did not start")
+		}
+	}
+	running := s.ListSnapshots()[0]
+	if running.Status != StatusRunning || running.LastRun == nil || running.DurationSeconds == nil {
+		t.Fatalf("running snapshot = %+v, want concurrent running state", running)
+	}
+	close(release)
+	s.Wait()
+	if runs.Load() != 2 {
+		t.Fatalf("runs = %d, want two executions with allow concurrency", runs.Load())
 	}
 }
 

@@ -121,13 +121,17 @@ type ServiceListRow struct {
 type ProcessListRow = ServiceListRow
 
 type ScheduleInfo struct {
-	Project     string
-	Name        string
-	Cron        string
-	Timezone    string
-	Action      string
-	Target      string
-	Concurrency string
+	Project         string
+	Name            string
+	Cron            string
+	Timezone        string
+	Action          string
+	Target          string
+	Concurrency     string
+	Status          string
+	LastRun         *time.Time
+	NextRun         *time.Time
+	DurationSeconds *float64
 }
 
 func HealthDisplay(info *HealthInfo) string {

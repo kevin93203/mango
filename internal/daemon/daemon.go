@@ -1813,10 +1813,24 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		return success(request, map[string]string{"key": p.Key, "status": "cleared"})
 	case "schedule.ls":
 		result := make([]ScheduleInfo, 0)
-		for _, item := range d.scheduler.List() {
+		for _, snapshot := range d.scheduler.ListSnapshots() {
+			item := snapshot.Schedule
+			location := item.Timezone
+			if location == nil {
+				location = time.Local
+			}
 			result = append(result, ScheduleInfo{
-				Project: item.Project, Name: item.Name, Cron: item.Cron, Timezone: item.Timezone.String(),
-				Action: item.Action, Target: item.Target, Concurrency: item.Concurrency,
+				Project:         item.Project,
+				Name:            item.Name,
+				Cron:            item.Cron,
+				Timezone:        location.String(),
+				Action:          item.Action,
+				Target:          item.Target,
+				Concurrency:     item.Concurrency,
+				Status:          snapshot.Status,
+				LastRun:         scheduleTimeIn(snapshot.LastRun, location),
+				NextRun:         scheduleTimeIn(snapshot.NextRun, location),
+				DurationSeconds: snapshot.DurationSeconds,
 			})
 		}
 		return success(request, result)
@@ -1900,6 +1914,14 @@ func (d *Daemon) processExists(project, name string) bool {
 
 func scheduleLogName(name string) string {
 	return "schedule-" + name
+}
+
+func scheduleTimeIn(value *time.Time, location *time.Location) *time.Time {
+	if value == nil {
+		return nil
+	}
+	normalized := value.In(location)
+	return &normalized
 }
 
 func success(request ipc.Request, data interface{}) ipc.Response {
