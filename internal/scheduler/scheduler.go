@@ -192,7 +192,7 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		}
 		s.mu.Unlock()
 	}()
-	execution := s.runner(ctx, schedule)
+	execution := s.executeWithRetry(ctx, schedule)
 	record := Record{
 		Project: schedule.Project, Name: schedule.Name, Started: started, Finished: time.Now(),
 		ExitCode: execution.ExitCode, Stderr: execution.Stderr,
@@ -201,6 +201,45 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		record.Error = execution.Err.Error()
 	}
 	s.record(record)
+}
+
+func (s *Scheduler) executeWithRetry(ctx context.Context, schedule config.EffectiveSchedule) ExecutionResult {
+	retries := schedule.RetryCount
+	if retries < 0 {
+		retries = 0
+	}
+	var result ExecutionResult
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 && !waitForRetry(ctx, schedule.RetryDelay) {
+			return result
+		}
+		result = s.runner(ctx, schedule)
+		if result.Err == nil && result.ExitCode == 0 {
+			return result
+		}
+		if ctx.Err() != nil || attempt >= retries {
+			return result
+		}
+	}
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *Scheduler) History() []Record {

@@ -96,6 +96,12 @@ type Schedule struct {
 	WorkingDir  string            `yaml:"working_dir"`
 	Env         map[string]string `yaml:"env"`
 	Concurrency string            `yaml:"concurrency"`
+	Retry       *ScheduleRetry    `yaml:"retry"`
+}
+
+type ScheduleRetry struct {
+	Retries int    `yaml:"retries"`
+	Delay   string `yaml:"delay"`
 }
 
 type EffectiveProcess struct {
@@ -148,6 +154,8 @@ type EffectiveSchedule struct {
 	WorkingDir  string
 	Env         map[string]string
 	Concurrency string
+	RetryCount  int
+	RetryDelay  time.Duration
 }
 
 func Load(path string) (File, error) {
@@ -317,6 +325,14 @@ func Validate(f File) error {
 		if s.Concurrency != "" && s.Concurrency != "forbid" && s.Concurrency != "allow" {
 			return fmt.Errorf("schedule %q concurrency must be forbid or allow", s.Name)
 		}
+		if s.Retry != nil {
+			if s.Retry.Retries < 0 {
+				return fmt.Errorf("schedule %q retry.retries must be non-negative", s.Name)
+			}
+			if _, err := parseNonNegativeDuration(s.Retry.Delay, 0); err != nil {
+				return fmt.Errorf("schedule %q retry.delay: %w", s.Name, err)
+			}
+		}
 	}
 	return nil
 }
@@ -482,10 +498,17 @@ func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error
 			}
 			command, _ = filepath.Abs(command)
 		}
+		retryCount := 0
+		retryDelay := time.Duration(0)
+		if s.Retry != nil {
+			retryCount = s.Retry.Retries
+			retryDelay, _ = parseNonNegativeDuration(s.Retry.Delay, 0)
+		}
 		result = append(result, EffectiveSchedule{
 			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
 			Action: s.Action, Target: s.Target, Command: command, Args: append([]string(nil), s.Args...),
 			WorkingDir: dir, Env: mergeEnv(s.Env), Concurrency: defaultString(s.Concurrency, "forbid"),
+			RetryCount: retryCount, RetryDelay: retryDelay,
 		})
 	}
 	return result, nil
