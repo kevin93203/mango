@@ -290,10 +290,11 @@ func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 
 func TestFlattenProcessListPreservesHierarchyAndParentIndex(t *testing.T) {
 	items := []ProcessInfo{{
-		ID:      0,
-		Project: "demo",
-		Name:    "api",
-		PID:     100,
+		ID:          0,
+		Project:     "demo",
+		Name:        "api",
+		ProcessName: "api.exe",
+		PID:         100,
 		Children: []ChildProcessInfo{{
 			PID: 200, ParentPID: 100, Depth: 1, Name: "worker",
 			Children: []ChildProcessInfo{{PID: 300, ParentPID: 200, Depth: 2, Name: "helper"}},
@@ -304,13 +305,13 @@ func TestFlattenProcessListPreservesHierarchyAndParentIndex(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("flattened rows = %d, want 3", len(rows))
 	}
-	if !rows[0].Managed || rows[0].ID != 0 || rows[0].ParentIndex != 0 || rows[0].Depth != 0 {
+	if !rows[0].Managed || rows[0].ID != 0 || rows[0].ParentIndex != 0 || rows[0].Depth != 0 || rows[0].Service != "demo/api" || rows[0].Process != "api.exe" {
 		t.Fatalf("parent row = %+v", rows[0])
 	}
-	if rows[1].Managed || rows[1].PID != 200 || rows[1].ParentIndex != 0 || rows[1].Depth != 1 {
+	if rows[1].Managed || rows[1].PID != 200 || rows[1].ParentIndex != 0 || rows[1].Depth != 1 || rows[1].Service != "" || rows[1].Process != "worker" {
 		t.Fatalf("child row = %+v", rows[1])
 	}
-	if rows[2].Managed || rows[2].PID != 300 || rows[2].ParentIndex != 0 || rows[2].Depth != 2 {
+	if rows[2].Managed || rows[2].PID != 300 || rows[2].ParentIndex != 0 || rows[2].Depth != 2 || rows[2].Service != "" || rows[2].Process != "helper" {
 		t.Fatalf("grandchild row = %+v", rows[2])
 	}
 

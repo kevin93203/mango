@@ -265,14 +265,16 @@ func printTable(output *cliui.Renderer, items []api.ServiceInfo, selected int) {
 			idStyle = cliui.StyleNone
 			restartCount = fmt.Sprintf("%d", item.RestartCount)
 		}
-		processName := item.Project + "/" + item.Name
+		serviceName := displayString(item.Service)
+		processName := displayString(item.Process)
 		if !item.Managed {
-			processName = strings.Repeat("  ", item.Depth-1) + "└─ " + item.Name
+			processName = strings.Repeat("  ", item.Depth-1) + "└─ " + processName
 		}
 		ports := formatPorts(item.Ports)
 		rows = append(rows, []cliui.Cell{
 			{Text: marker, Style: cliui.StyleHeader},
 			{Text: id, Style: idStyle, Align: cliui.AlignRight},
+			{Text: serviceName},
 			{Text: processName},
 			{Text: displayString(item.State), Style: cliui.StateStyle(item.State)},
 			{Text: displayString(item.Health), Style: cliui.StateStyle(item.Health)},
@@ -285,7 +287,7 @@ func printTable(output *cliui.Renderer, items []api.ServiceInfo, selected int) {
 			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
-	output.Table([]string{"", "ID", "SERVICE", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	output.Table([]string{"", "ID", "SERVICE", "PROCESS", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func displayString(value string) string {

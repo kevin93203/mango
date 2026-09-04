@@ -1226,6 +1226,7 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 			info.PID = pid
 			info.UptimeSeconds = time.Since(startedAt).Seconds()
 			if snapshot, ok := d.metrics.Snapshot(pid, every); ok {
+				info.ProcessName = snapshot.Name
 				info.Ports = aggregatePorts(snapshot)
 				info.OSState = snapshot.OSState
 				if info.OSState == "" {
@@ -1354,6 +1355,8 @@ func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
 			Managed:       true,
 			ID:            item.ID,
 			Project:       item.Project,
+			Service:       item.Project + "/" + item.Name,
+			Process:       item.ProcessName,
 			Name:          item.Name,
 			Depth:         0,
 			PID:           item.PID,
@@ -1378,6 +1381,7 @@ func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project str
 		*rows = append(*rows, ProcessListRow{
 			ParentIndex:   parentIndex,
 			Project:       project,
+			Process:       child.Name,
 			Name:          child.Name,
 			Depth:         child.Depth,
 			PID:           child.PID,

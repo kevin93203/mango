@@ -23,6 +23,7 @@ type ServiceInfo struct {
 	ID            int
 	Project       string
 	Name          string
+	ProcessName   string
 	State         string
 	PID           int
 	Ports         []string
@@ -90,6 +91,8 @@ type ServiceListRow struct {
 	Managed       bool
 	ID            int
 	Project       string
+	Service       string
+	Process       string
 	Name          string
 	Depth         int
 	PID           int
@@ -132,6 +135,8 @@ func FlattenServiceList(items []ServiceInfo) []ServiceListRow {
 			Managed:       true,
 			ID:            item.ID,
 			Project:       item.Project,
+			Service:       item.Project + "/" + item.Name,
+			Process:       item.ProcessName,
 			Name:          item.Name,
 			Depth:         0,
 			PID:           item.PID,
@@ -154,6 +159,7 @@ func appendChildRows(rows *[]ServiceListRow, parentIndex int, project string, ch
 		*rows = append(*rows, ServiceListRow{
 			ParentIndex:   parentIndex,
 			Project:       project,
+			Process:       child.Name,
 			Name:          child.Name,
 			Depth:         child.Depth,
 			PID:           child.PID,
