@@ -108,7 +108,7 @@ func usage() {
 		"  config validate PATH",
 		"  ls",
 		"  status PROJECT/SERVICE|ID",
-		"  start|stop|restart|enable|disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]",
+		"  start|stop|restart|enable|disable PROJECT|PROJECT/SERVICE|ID [TARGET ...]",
 		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
@@ -542,14 +542,85 @@ func statusCommand(args []string) error {
 
 func processCommand(command string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("%s requires at least one PROJECT/SERVICE or ID", command)
+		return fmt.Errorf("%s requires at least one PROJECT, PROJECT/SERVICE, or ID", command)
 	}
 	if containsArgument(args, "--follow") {
 		return fmt.Errorf("--follow is only supported by logs; try: mango logs %s --follow", args[0])
 	}
+	if containsProjectTarget(args) {
+		return processBulkCommand(command, args)
+	}
 	return processCommandWithCaller(command, args, func(key string) (ipc.Response, error) {
 		return callWithTimeout("service."+command, struct{ Key string }{key}, processOperationTimeout)
 	})
+}
+
+func containsProjectTarget(args []string) bool {
+	for _, target := range args {
+		if !strings.Contains(target, "/") && !isNonNegativeIntegerTarget(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNonNegativeIntegerTarget(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func processBulkCommand(command string, args []string) error {
+	return processBulkCommandWithCaller(command, args, func(method string, params interface{}) (ipc.Response, error) {
+		return callWithTimeout(method, params, processOperationTimeout)
+	})
+}
+
+func processBulkCommandWithCaller(command string, args []string, caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("service.bulk", struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}{Action: command, Targets: args})
+	if err != nil {
+		return err
+	}
+	var results []api.ServiceOperationResult
+	if err := decodeData(response.Data, &results); err != nil {
+		return fmt.Errorf("%s bulk: decode response: %w", command, err)
+	}
+	if jsonOutput {
+		if err := cliOutput.JSON(results); err != nil {
+			return err
+		}
+	}
+	var errs []error
+	action := map[string]string{
+		"start": "started", "stop": "stopped", "restart": "restarted",
+		"enable": "enabled", "disable": "disabled",
+	}[command]
+	for _, result := range results {
+		if result.Status == "ok" {
+			if !jsonOutput {
+				cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result.Key, action)))
+			}
+			continue
+		}
+		message := result.Error
+		if message == "" {
+			message = "operation failed"
+		}
+		errs = append(errs, fmt.Errorf("%s %s: %s", command, result.Key, message))
+		if !jsonOutput {
+			cliOutput.Errorf("Service %s failed to %s: %s", result.Key, action, message)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func processCommandWithCaller(command string, args []string, caller func(string) (ipc.Response, error)) error {

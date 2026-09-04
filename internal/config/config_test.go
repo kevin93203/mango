@@ -157,6 +157,32 @@ func TestValidateRejectsInvalidServiceName(t *testing.T) {
 	}
 }
 
+func TestValidateProjectNameMustStartWithLetter(t *testing.T) {
+	for _, project := range []string{"1demo", "123", "9-prod"} {
+		t.Run(project, func(t *testing.T) {
+			file := File{
+				Version: 2, Project: project, Path: filepath.Join(t.TempDir(), "x.yaml"),
+				Services: map[string]Service{"1service": {Command: "one"}},
+			}
+			err := Validate(file)
+			if err == nil || !strings.Contains(err.Error(), "project name must start with an ASCII letter") {
+				t.Fatalf("error = %v, want project name validation error", err)
+			}
+		})
+	}
+}
+
+func TestValidateProjectNameAllowsDigitsAfterFirstLetter(t *testing.T) {
+	file := File{
+		Version: 2, Project: "demo1-prod_v2.0", Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Services:  map[string]Service{"1service": {Command: "one"}},
+		Schedules: []Schedule{{Name: "1schedule", Cron: "0 0 * * *", Action: "run", Command: "one"}},
+	}
+	if err := Validate(file); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestValidateSchedule(t *testing.T) {
 	file := File{
 		Version: 2,

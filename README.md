@@ -182,7 +182,7 @@ mango daemon logs --follow
 
 `mango daemon logs` 預設顯示最後 15 行；`--tail 0` 顯示完整 `daemon.log`，`--follow` 先顯示目前內容後追蹤新增內容。daemon.log 不存在時視為空 log；每行以 `｜daemon｜` 前綴輸出，互動式 TTY 下前綴為青色。
 
-daemon IPC 的 service lifecycle method 為 `service.ls`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
+daemon IPC 的 service lifecycle method 為 `service.ls`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable`、`service.disable` 與 `service.bulk`；舊的 `process.*` method 不再接受。
 
 daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
 
@@ -215,7 +215,7 @@ daemon is not running; start it with: mango daemon start
 mango logs demo/api --follow
 ~~~
 
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
+`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；service lifecycle 另外支援直接指定 `PROJECT` 以操作該 project 的全部 service，`logs` 另外支援 `PROJECT/SCHEDULE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
 
 ### project
 
@@ -233,7 +233,7 @@ mango project add PATH
 | --- | --- | --- | --- |
 | PATH | 是 | 無 | YAML 設定檔路徑，可使用相對路徑。project 名稱取自 YAML 的 `project` 欄位。 |
 
-project name 只能使用英數字、.、_、-，且第一個字元必須是英數字。
+project name 必須以英文字母開頭，後續只能使用英數字、.、_、-；數字開頭的 project name 不允許，裸數字 target 保留給 service ID。
 
 範例：
 
@@ -354,11 +354,11 @@ mango status PROJECT/SERVICE|ID
 以下指令都使用相同語法：
 
 ~~~text
-mango start PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
-mango stop PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
-mango restart PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
-mango enable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
-mango disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
+mango start PROJECT|PROJECT/SERVICE|ID [TARGET ...]
+mango stop PROJECT|PROJECT/SERVICE|ID [TARGET ...]
+mango restart PROJECT|PROJECT/SERVICE|ID [TARGET ...]
+mango enable PROJECT|PROJECT/SERVICE|ID [TARGET ...]
+mango disable PROJECT|PROJECT/SERVICE|ID [TARGET ...]
 ~~~
 
 | 指令 | 說明 |
@@ -369,7 +369,9 @@ mango disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
 | enable | 清除 disabled 狀態並啟動 service。 |
 | disable | 設為 disabled 並停止 service；直到 enable 或重新套用設定前不會 autostart。 |
 
-service lifecycle 可一次指定多個 target，例如 `mango stop demo/api 2 other/web`；成功時預設逐筆輸出簡短訊息，例如 `Service demo/api stopped`，使用 id 操作時仍會輸出 canonical key。加上 `--json` 可取得結構化結果；單一 target 輸出物件，多個 target 輸出陣列。
+service lifecycle 可一次指定多個 target，例如 `mango stop demo/api 2 other/web`；成功時預設逐筆輸出簡短訊息，例如 `Service demo/api stopped`，使用 id 操作時仍會輸出 canonical key。加上 `--json` 可取得結構化結果；純 service 或 ID target 的單一操作輸出物件，多個 target 輸出陣列；project target 會依展開後的每個 service 輸出結果陣列。
+
+也可以直接指定 project，例如 `mango restart demo`，daemon 會依 dependency order 操作該 project 的全部 service。`start` 與 `enable` 使用 dependency-first 順序；`stop` 與 `disable` 使用 dependent-first 順序；`restart` 先反向停止，再依 dependency-first 順序啟動。批次操作會繼續處理其他 service，最後彙整錯誤並以 non-zero status 結束；`--json` 會回傳每個 service 的結果陣列。
 
 Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
 

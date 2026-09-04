@@ -19,7 +19,10 @@ import (
 
 const CurrentVersion = 2
 
-var namePattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+var (
+	namePattern        = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+	projectNamePattern = regexp.MustCompile("^[A-Za-z][A-Za-z0-9._-]*$")
+)
 
 type File struct {
 	Version   int                `yaml:"version"`
@@ -203,8 +206,8 @@ func Validate(f File) error {
 	if f.Version != CurrentVersion {
 		return fmt.Errorf("unsupported config version %d; version %d is required", f.Version, CurrentVersion)
 	}
-	if !namePattern.MatchString(f.Project) {
-		return fmt.Errorf("project must match %s", namePattern)
+	if !projectNamePattern.MatchString(f.Project) {
+		return errors.New("project name must start with an ASCII letter and contain only letters, digits, '.', '_' or '-'")
 	}
 	if len(f.Services) == 0 && len(f.Schedules) == 0 {
 		return errors.New("config must define at least one service or schedule")
