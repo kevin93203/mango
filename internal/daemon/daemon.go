@@ -1656,14 +1656,32 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 		_ = stderr.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if schedule.Timeout > 0 {
+		timer = time.NewTimer(schedule.Timeout)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+	timedOut := false
 	select {
 	case <-handle.Done():
 	case <-ctx.Done():
 		_ = handle.Stop(10 * time.Second)
+	case <-timeout:
+		timedOut = true
+		_ = handle.ForceStop()
 	}
 	result := handle.Wait()
 	_ = stdout.Close()
 	_ = stderr.Close()
+	if timedOut {
+		return scheduler.ExecutionResult{
+			ExitCode: 124,
+			Err:      fmt.Errorf("schedule timed out after %s", schedule.Timeout),
+			Stderr:   capture.String(),
+		}
+	}
 	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
 }
 
@@ -1827,6 +1845,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 				Action:          item.Action,
 				Target:          item.Target,
 				Concurrency:     item.Concurrency,
+				TimeoutSeconds:  item.Timeout.Seconds(),
 				Status:          snapshot.Status,
 				LastRun:         scheduleTimeIn(snapshot.LastRun, location),
 				NextRun:         scheduleTimeIn(snapshot.NextRun, location),

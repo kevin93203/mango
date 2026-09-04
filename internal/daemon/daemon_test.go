@@ -104,6 +104,49 @@ func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
 	}
 }
 
+func TestScheduleRunTimeoutForceStopsAndRetries(t *testing.T) {
+	if os.Getenv("MANGO_SCHEDULE_TIMEOUT_HELPER") == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+
+	d := New(testLayout(t.TempDir()))
+	schedule := config.EffectiveSchedule{
+		Project: "demo", Name: "slow-job", Cron: "* * * * *", Timezone: time.UTC,
+		Action: "run", Command: os.Args[0],
+		Args:       []string{"-test.run=TestScheduleRunTimeoutForceStopsAndRetries", "--"},
+		WorkingDir: t.TempDir(), Env: map[string]string{"MANGO_SCHEDULE_TIMEOUT_HELPER": "1"},
+		Timeout: 40 * time.Millisecond, RetryCount: 1, RetryDelay: 5 * time.Millisecond,
+	}
+	if err := d.scheduler.Apply([]config.EffectiveSchedule{schedule}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := d.scheduler.RunNow(context.Background(), "demo/slow-job"); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.Wait()
+
+	history := d.scheduler.History()
+	if len(history) != 1 || len(history[0].Attempts) != 2 {
+		t.Fatalf("history = %+v, want one record with two timeout attempts", history)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond || elapsed >= 2*time.Second {
+		t.Fatalf("elapsed = %s, want two independent short timeout attempts", elapsed)
+	}
+	if history[0].ExitCode != 124 || history[0].Error != "schedule timed out after 40ms" {
+		t.Fatalf("record = %+v, want timeout result", history[0])
+	}
+	for _, attempt := range history[0].Attempts {
+		if attempt.ExitCode != 124 || attempt.Error != "schedule timed out after 40ms" {
+			t.Fatalf("attempt = %+v, want timeout result", attempt)
+		}
+		if attempt.DurationSeconds < 0.03 || attempt.DurationSeconds >= 1 {
+			t.Fatalf("attempt duration = %v, want about timeout duration", attempt.DurationSeconds)
+		}
+	}
+}
+
 func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	d.scheduler = scheduler.New(func(context.Context, config.EffectiveSchedule) scheduler.ExecutionResult {
@@ -111,7 +154,7 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	})
 	schedules := []config.EffectiveSchedule{
 		{Project: "demo", Name: "idle", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid"},
-		{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid"},
+		{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid", Timeout: 2 * time.Second},
 	}
 	if err := d.scheduler.Apply(schedules); err != nil {
 		t.Fatal(err)
@@ -147,6 +190,9 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	}
 	if items[1].Timezone != "UTC" {
 		t.Fatalf("timezone = %q, want UTC", items[1].Timezone)
+	}
+	if items[1].TimeoutSeconds != 2 {
+		t.Fatalf("timeout = %v, want 2 seconds", items[1].TimeoutSeconds)
 	}
 }
 

@@ -70,6 +70,7 @@ schedules:
       - --interval
       - 300ms
     concurrency: forbid
+    timeout: 5m
     retry:
       retries: 3
       delay: 5s
