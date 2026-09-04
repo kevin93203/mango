@@ -19,6 +19,7 @@ import (
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
@@ -98,7 +99,8 @@ func usage() {
 		"Global options: --color=auto|always|never, --json (where supported)",
 		"",
 		"Commands:",
-		"  daemon start|stop|restart|status",
+		"  daemon start|stop|restart|status|logs",
+		"  daemon logs [--tail N] [--follow]",
 		"  project add PATH",
 		"  project remove NAME",
 		"  project apply NAME",
@@ -118,7 +120,7 @@ func usage() {
 
 func daemonCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
-		return errors.New("daemon requires start, stop, restart, or status")
+		return errors.New("daemon requires start, stop, restart, status, or logs")
 	}
 	switch args[0] {
 	case "start":
@@ -155,9 +157,129 @@ func daemonCommand(layout paths.Layout, args []string) error {
 			return cliOutput.JSON(response.Data)
 		}
 		return printDaemonStatus(response.Data)
+	case "logs":
+		return daemonLogsCommand(layout, args[1:])
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
+}
+
+func daemonLogsCommand(layout paths.Layout, args []string) error {
+	if err := rejectJSON("daemon logs"); err != nil {
+		return err
+	}
+	flags := newFlagSet("daemon logs")
+	tail := flags.Int("tail", 15, "number of lines")
+	follow := flags.Bool("follow", false, "follow new output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if len(flags.Args()) != 0 {
+		return errors.New("daemon logs does not accept positional arguments")
+	}
+	if *tail < 0 {
+		return errors.New("daemon logs tail must be non-negative")
+	}
+	if *follow {
+		return followDaemonLogs(layout.DaemonLog, *tail)
+	}
+
+	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, *tail)
+	if err != nil {
+		return fmt.Errorf("read daemon log: %w", err)
+	}
+	writer := newDaemonLogWriter()
+	for _, line := range lines {
+		writer.write(line)
+	}
+	return nil
+}
+
+func readDaemonLogSnapshot(path string, tail int) ([]string, int64, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	offset := int64(len(data))
+	if tail > 0 {
+		data = tailDaemonLogData(data, tail)
+	}
+	return splitDaemonLogLines(string(data)), offset, nil
+}
+
+func tailDaemonLogData(data []byte, lines int) []byte {
+	if lines <= 0 || len(data) == 0 {
+		return data
+	}
+	starts := []int{0}
+	for i, value := range data {
+		if value == '\n' && i+1 < len(data) {
+			starts = append(starts, i+1)
+		}
+	}
+	if len(starts) <= lines {
+		return data
+	}
+	return data[starts[len(starts)-lines]:]
+}
+
+func splitDaemonLogLines(data string) []string {
+	lines := make([]string, 0)
+	var buffer logLineBuffer
+	buffer.write(data, func(line string) {
+		lines = append(lines, line)
+	})
+	buffer.flush(func(line string) {
+		lines = append(lines, line)
+	})
+	return lines
+}
+
+type daemonLogReader func(path string, offset int64, maxBytes int) (string, int64, error)
+
+func followDaemonLogs(path string, tail int) error {
+	writer := newDaemonLogWriter()
+	return followDaemonLogsWithReader(path, tail, logging.ReadSince, writer.write, func() {
+		time.Sleep(time.Second)
+	})
+}
+
+func followDaemonLogsWithReader(path string, tail int, read daemonLogReader, emit func(string), wait func()) error {
+	lines, offset, err := readDaemonLogSnapshot(path, tail)
+	if err != nil {
+		return fmt.Errorf("read daemon log: %w", err)
+	}
+	for _, line := range lines {
+		emit(line)
+	}
+
+	var buffer logLineBuffer
+	for {
+		data, nextOffset, err := read(path, offset, 64<<10)
+		if err != nil {
+			buffer.flush(emit)
+			return fmt.Errorf("read daemon log: %w", err)
+		}
+		offset = nextOffset
+		buffer.write(data, emit)
+		wait()
+	}
+}
+
+type daemonLogWriter struct {
+	mu sync.Mutex
+}
+
+func newDaemonLogWriter() *daemonLogWriter { return &daemonLogWriter{} }
+
+func (w *daemonLogWriter) write(line string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	prefix := cliOutput.Text(cliui.StyleHeader, "｜daemon｜")
+	cliOutput.Printf("%s %s\n", prefix, line)
 }
 
 func startDaemon(layout paths.Layout) error {

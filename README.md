@@ -162,6 +162,8 @@ mango daemon start
 mango daemon stop
 mango daemon restart
 mango daemon status
+mango daemon logs [--tail 50]
+mango daemon logs --follow
 ~~~
 
 | 指令 | 說明 |
@@ -171,8 +173,11 @@ mango daemon status
 | stop | 透過本機 IPC 要求 daemon 停止。 |
 | restart | 停止目前 daemon，等待 IPC endpoint 關閉後重新背景啟動。 |
 | status | 顯示 daemon PID、API version 與狀態；daemon 未執行時顯示 stopped。若個別 project 設定無法載入，會顯示 degraded 與 config_errors，但 daemon 仍會繼續服務其他 project。 |
+| logs | 直接讀取本機 `daemon.log`；daemon 未執行時仍可查看既有內容。 |
 
-`mangod` 目前只有 `run` 入口，沒有其他參數。`mango daemon` 只負責控制與查詢 daemon。
+`mangod` 目前只有 `run` 入口，沒有其他參數。`mango daemon` 負責控制、查詢 daemon，以及直接查看本機 daemon log。
+
+`mango daemon logs` 預設顯示最後 15 行；`--tail 0` 顯示完整 `daemon.log`，`--follow` 先顯示目前內容後追蹤新增內容。daemon.log 不存在時視為空 log；每行以 `｜daemon｜` 前綴輸出，互動式 TTY 下前綴為青色。
 
 daemon IPC 的 service lifecycle method 為 `service.ls`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable` 與 `service.disable`；舊的 `process.*` method 不再接受。
 
@@ -195,13 +200,13 @@ api version | 1
 mango daemon status --json
 ~~~
 
-需要 daemon 提供服務的指令（例如 `list`、`status`、service action 與 `logs`）若無法連線，會提示：
+需要 daemon 提供服務的指令（例如 `list`、`status`、service action 與 service `logs`）若無法連線，會提示：
 
 ~~~text
 daemon is not running; start it with: mango daemon start
 ~~~
 
-請先啟動 daemon，再執行這些指令。`--follow` 只適用於 `logs`，例如：
+請先啟動 daemon，再執行上述需要 IPC 的指令。`mango daemon logs` 直接讀取本機檔案，不需要 daemon 執行；`--follow` 可用於兩種 `logs` 指令，例如：
 
 ~~~powershell
 mango logs demo/api --follow
