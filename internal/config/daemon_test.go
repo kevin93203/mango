@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadDaemonConfigDefaultsWhenMissing(t *testing.T) {
-	config, err := LoadDaemonConfig(filepath.Join(t.TempDir(), "daemon.toml"))
+	config, err := LoadDaemonConfig(filepath.Join(t.TempDir(), "daemon.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,8 +18,8 @@ func TestLoadDaemonConfigDefaultsWhenMissing(t *testing.T) {
 }
 
 func TestLoadDaemonConfig(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.toml")
-	if err := os.WriteFile(path, []byte("schedule_history_limit = 25\n"), 0o600); err != nil {
+	path := filepath.Join(t.TempDir(), "daemon.yaml")
+	if err := os.WriteFile(path, []byte("schedule_history_limit: 25\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := LoadDaemonConfig(path)
@@ -37,12 +37,12 @@ func TestLoadDaemonConfigRejectsInvalidValues(t *testing.T) {
 		content string
 		want    string
 	}{
-		{name: "negative", content: "schedule_history_limit = -1\n", want: "non-negative"},
-		{name: "unknown", content: "history_limit = 10\n", want: "unsupported daemon config field"},
+		{name: "negative", content: "schedule_history_limit: -1\n", want: "non-negative"},
+		{name: "unknown", content: "history_limit: 10\n", want: "field history_limit"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "daemon.toml")
+			path := filepath.Join(t.TempDir(), "daemon.yaml")
 			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -50,5 +50,24 @@ func TestLoadDaemonConfigRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestLoadDaemonConfigRejectsNonYAMLExtension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.toml")
+	if _, err := LoadDaemonConfig(path); err == nil || !strings.Contains(err.Error(), "only .yaml files are supported") {
+		t.Fatalf("error = %v, want YAML extension error", err)
+	}
+}
+
+func TestLoadDaemonConfigReportsLegacyTOMLFile(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "daemon.yaml")
+	tomlPath := filepath.Join(dir, "daemon.toml")
+	if err := os.WriteFile(tomlPath, []byte("schedule_history_limit = 25\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDaemonConfig(yamlPath); err == nil || !strings.Contains(err.Error(), "legacy TOML daemon config") {
+		t.Fatalf("error = %v, want legacy TOML migration error", err)
 	}
 }

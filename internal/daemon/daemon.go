@@ -141,7 +141,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	daemonConfigPath := d.layout.DaemonConfig
 	if daemonConfigPath == "" {
-		daemonConfigPath = filepath.Join(d.layout.Root, "daemon.toml")
+		daemonConfigPath = filepath.Join(d.layout.Root, "daemon.yaml")
 	}
 	daemonConfig, err := config.LoadDaemonConfig(daemonConfigPath)
 	if err != nil {
@@ -344,7 +344,7 @@ func (d *Daemon) applyProject(name, path string) error {
 		return fmt.Errorf("project %s: %w", name, err)
 	}
 	if file.Project != name {
-		return fmt.Errorf("project registry name %q does not match TOML project %q", name, file.Project)
+		return fmt.Errorf("project registry name %q does not match YAML project %q", name, file.Project)
 	}
 	specs, err := file.ServicesEffective()
 	if err != nil {
@@ -688,10 +688,9 @@ func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess,
 	d.mu.Unlock()
 
 	checks := make([]health.Check, 0, len(cfg.Checks))
-	for name, probe := range cfg.Checks {
-		checks = append(checks, health.Check{Name: name, Test: probe.Test})
+	for index, probe := range cfg.Checks {
+		checks = append(checks, health.Check{Name: healthCheckName(index), Test: probe.Test})
 	}
-	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
 	d.mu.RLock()
 	factory := d.healthExecutorFactory
 	d.mu.RUnlock()
@@ -779,16 +778,15 @@ func initialHealthInfo(cfg *config.EffectiveHealthCheck) HealthInfo {
 	if len(cfg.Checks) == 0 {
 		checks = append(checks, HealthCheckInfo{Name: "default", Status: health.Starting})
 	} else {
-		names := make([]string, 0, len(cfg.Checks))
-		for name := range cfg.Checks {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			checks = append(checks, HealthCheckInfo{Name: name, Status: health.Starting})
+		for index := range cfg.Checks {
+			checks = append(checks, HealthCheckInfo{Name: healthCheckName(index), Status: health.Starting})
 		}
 	}
 	return HealthInfo{Status: health.Starting, Policy: cfg.Policy, Checks: checks}
+}
+
+func healthCheckName(index int) string {
+	return fmt.Sprintf("check-%d", index+1)
 }
 
 func (d *Daemon) startService(projectName string, managed *managedProcess) error {

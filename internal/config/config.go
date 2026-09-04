@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/robfig/cron/v3"
+	"gopkg.in/yaml.v3"
 )
 
 const CurrentVersion = 2
@@ -20,41 +22,41 @@ const CurrentVersion = 2
 var namePattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 type File struct {
-	Version   int                `toml:"version"`
-	Project   string             `toml:"project"`
-	Defaults  Defaults           `toml:"defaults"`
-	Services  map[string]Service `toml:"services"`
-	Schedules []Schedule         `toml:"schedules"`
-	Path      string             `toml:"-"`
+	Version   int                `yaml:"version"`
+	Project   string             `yaml:"project"`
+	Defaults  Defaults           `yaml:"defaults"`
+	Services  map[string]Service `yaml:"services"`
+	Schedules []Schedule         `yaml:"schedules"`
+	Path      string             `yaml:"-"`
 }
 
 type Defaults struct {
-	WorkingDir      string `toml:"working_dir"`
-	Restart         string `toml:"restart"`
-	StopTimeout     string `toml:"stop_timeout"`
-	LogMaxSize      string `toml:"log_max_size"`
-	LogMaxFiles     int    `toml:"log_max_files"`
-	MetricsInterval string `toml:"metrics_interval"`
-	MaxRestarts     int    `toml:"max_restarts"`
-	RestartWindow   string `toml:"restart_window"`
-	StableAfter     string `toml:"stable_after"`
-	InheritEnv      *bool  `toml:"inherit_env"`
+	WorkingDir      string `yaml:"working_dir"`
+	Restart         string `yaml:"restart"`
+	StopTimeout     string `yaml:"stop_timeout"`
+	LogMaxSize      string `yaml:"log_max_size"`
+	LogMaxFiles     int    `yaml:"log_max_files"`
+	MetricsInterval string `yaml:"metrics_interval"`
+	MaxRestarts     int    `yaml:"max_restarts"`
+	RestartWindow   string `yaml:"restart_window"`
+	StableAfter     string `yaml:"stable_after"`
+	InheritEnv      *bool  `yaml:"inherit_env"`
 }
 
 type Service struct {
-	Name          string                `toml:"-"`
-	Command       string                `toml:"command"`
-	Args          []string              `toml:"args"`
-	WorkingDir    string                `toml:"working_dir"`
-	Environment   map[string]string     `toml:"environment"`
-	Autostart     bool                  `toml:"autostart"`
-	Restart       string                `toml:"restart"`
-	StopTimeout   string                `toml:"stop_timeout"`
-	MaxRestarts   *int                  `toml:"max_restarts"`
-	RestartWindow string                `toml:"restart_window"`
-	StableAfter   string                `toml:"stable_after"`
-	HealthCheck   *HealthCheck          `toml:"healthcheck"`
-	DependsOn     map[string]Dependency `toml:"depends_on"`
+	Name          string                `yaml:"-"`
+	Command       string                `yaml:"command"`
+	Args          []string              `yaml:"args"`
+	WorkingDir    string                `yaml:"working_dir"`
+	Environment   map[string]string     `yaml:"environment"`
+	Autostart     bool                  `yaml:"autostart"`
+	Restart       string                `yaml:"restart"`
+	StopTimeout   string                `yaml:"stop_timeout"`
+	MaxRestarts   *int                  `yaml:"max_restarts"`
+	RestartWindow string                `yaml:"restart_window"`
+	StableAfter   string                `yaml:"stable_after"`
+	HealthCheck   *HealthCheck          `yaml:"healthcheck"`
+	DependsOn     map[string]Dependency `yaml:"depends_on"`
 }
 
 // Process is retained as an internal compatibility alias while the public
@@ -62,36 +64,36 @@ type Service struct {
 type Process = Service
 
 type Dependency struct {
-	Condition string `toml:"condition"`
-	Restart   bool   `toml:"restart"`
+	Condition string `yaml:"condition"`
+	Restart   bool   `yaml:"restart"`
 }
 
 type HealthCheck struct {
-	Test          []string               `toml:"test"`
-	Policy        string                 `toml:"policy"`
-	Checks        map[string]HealthProbe `toml:"checks"`
-	Interval      string                 `toml:"interval"`
-	Timeout       string                 `toml:"timeout"`
-	Retries       int                    `toml:"retries"`
-	StartPeriod   string                 `toml:"start_period"`
-	StartInterval string                 `toml:"start_interval"`
+	Test          []string      `yaml:"test"`
+	Policy        string        `yaml:"policy"`
+	Checks        []HealthProbe `yaml:"checks"`
+	Interval      string        `yaml:"interval"`
+	Timeout       string        `yaml:"timeout"`
+	Retries       int           `yaml:"retries"`
+	StartPeriod   string        `yaml:"start_period"`
+	StartInterval string        `yaml:"start_interval"`
 }
 
 type HealthProbe struct {
-	Test []string `toml:"test"`
+	Test []string `yaml:"test"`
 }
 
 type Schedule struct {
-	Name        string            `toml:"name"`
-	Cron        string            `toml:"cron"`
-	Timezone    string            `toml:"timezone"`
-	Action      string            `toml:"action"`
-	Target      string            `toml:"target"`
-	Command     string            `toml:"command"`
-	Args        []string          `toml:"args"`
-	WorkingDir  string            `toml:"working_dir"`
-	Env         map[string]string `toml:"env"`
-	Concurrency string            `toml:"concurrency"`
+	Name        string            `yaml:"name"`
+	Cron        string            `yaml:"cron"`
+	Timezone    string            `yaml:"timezone"`
+	Action      string            `yaml:"action"`
+	Target      string            `yaml:"target"`
+	Command     string            `yaml:"command"`
+	Args        []string          `yaml:"args"`
+	WorkingDir  string            `yaml:"working_dir"`
+	Env         map[string]string `yaml:"env"`
+	Concurrency string            `yaml:"concurrency"`
 }
 
 type EffectiveProcess struct {
@@ -120,7 +122,7 @@ type EffectiveService = EffectiveProcess
 type EffectiveHealthCheck struct {
 	Test          []string
 	Policy        string
-	Checks        map[string]EffectiveHealthProbe
+	Checks        []EffectiveHealthProbe
 	Interval      time.Duration
 	Timeout       time.Duration
 	Retries       int
@@ -151,26 +153,22 @@ func Load(path string) (File, error) {
 	if err != nil {
 		return File{}, fmt.Errorf("resolve config path: %w", err)
 	}
-	var f File
-	meta, err := toml.DecodeFile(abs, &f)
+	if err := validateYAMLPath(abs); err != nil {
+		return File{}, err
+	}
+	data, err := os.ReadFile(abs)
 	if err != nil {
+		return File{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	var f File
+	if err := decodeYAML(data, &f); err != nil {
 		return File{}, fmt.Errorf("decode %s: %w", path, err)
 	}
 	f.Path = abs
-	// Version errors are reported before unknown fields so a v1 file receives
-	// the actionable migration message even though its [[processes]] table is
-	// no longer part of the v2 schema.
+	// Version errors are reported before schema validation so an older file
+	// receives the actionable version message first.
 	if f.Version != CurrentVersion {
 		return File{}, Validate(f)
-	}
-	for _, key := range meta.Undecoded() {
-		if len(key) > 0 && key[0] == "processes" {
-			return File{}, fmt.Errorf("unsupported legacy [[processes]] table; convert it to [services.<name>]")
-		}
-		if len(key) >= 3 && key[0] == "services" && key[2] == "env" {
-			return File{}, fmt.Errorf("service %q uses legacy env; use environment instead", key[1])
-		}
-		return File{}, fmt.Errorf("unsupported config field %s", strings.Join(key, "."))
 	}
 	if err := Validate(f); err != nil {
 		return File{}, err
@@ -178,9 +176,32 @@ func Load(path string) (File, error) {
 	return f, nil
 }
 
+func validateYAMLPath(path string) error {
+	if !strings.EqualFold(filepath.Ext(path), ".yaml") {
+		return fmt.Errorf("unsupported config file %q: only .yaml files are supported; convert TOML configuration to YAML", path)
+	}
+	return nil
+}
+
+func decodeYAML(data []byte, target interface{}) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple YAML documents are not supported")
+		}
+		return err
+	}
+	return nil
+}
+
 func Validate(f File) error {
 	if f.Version != CurrentVersion {
-		return fmt.Errorf("unsupported config version %d; version %d is required (convert [[processes]] to [services.<name>])", f.Version, CurrentVersion)
+		return fmt.Errorf("unsupported config version %d; version %d is required", f.Version, CurrentVersion)
 	}
 	if !namePattern.MatchString(f.Project) {
 		return fmt.Errorf("project must match %s", namePattern)
@@ -508,17 +529,15 @@ func validateHealthCheck(service string, health *HealthCheck) error {
 	if err := validateTest(service, "test", health.Test); err != nil {
 		return err
 	}
-	for name, probe := range health.Checks {
-		if !namePattern.MatchString(name) {
-			return fmt.Errorf("service %q healthcheck check name %q is invalid", service, name)
-		}
+	for index, probe := range health.Checks {
+		field := fmt.Sprintf("checks[%d].test", index)
 		if len(probe.Test) == 0 {
-			return fmt.Errorf("service %q healthcheck checks.%s.test is required", service, name)
+			return fmt.Errorf("service %q healthcheck %s is required", service, field)
 		}
 		if len(probe.Test) == 1 && strings.EqualFold(probe.Test[0], "NONE") {
-			return fmt.Errorf("service %q healthcheck checks.%s cannot use NONE", service, name)
+			return fmt.Errorf("service %q healthcheck checks[%d] cannot use NONE", service, index)
 		}
-		if err := validateTest(service, "checks."+name+".test", probe.Test); err != nil {
+		if err := validateTest(service, field, probe.Test); err != nil {
 			return err
 		}
 	}
@@ -594,11 +613,11 @@ func effectiveHealthCheck(health *HealthCheck) (*EffectiveHealthCheck, error) {
 	}
 	result := &EffectiveHealthCheck{
 		Test: append([]string(nil), health.Test...), Policy: policy,
-		Checks: map[string]EffectiveHealthProbe{}, Interval: interval, Timeout: timeout,
+		Checks: make([]EffectiveHealthProbe, 0, len(health.Checks)), Interval: interval, Timeout: timeout,
 		Retries: retries, StartPeriod: startPeriod, StartInterval: startInterval,
 	}
-	for name, probe := range health.Checks {
-		result.Checks[name] = EffectiveHealthProbe{Test: append([]string(nil), probe.Test...)}
+	for _, probe := range health.Checks {
+		result.Checks = append(result.Checks, EffectiveHealthProbe{Test: append([]string(nil), probe.Test...)})
 	}
 	return result, nil
 }

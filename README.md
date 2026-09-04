@@ -67,7 +67,7 @@ $env:MANGO_HOME = "C:\temp\mango-test"
 ~~~text
 MANGO_HOME/
 ├─ projects.json
-├─ daemon.toml           # daemon 全域設定（可選）
+├─ daemon.yaml           # daemon 全域設定（可選）
 ├─ runtime/
 │  ├─ daemon.pid
 │  └─ mango.sock       # Unix；Windows 使用 Named Pipe
@@ -82,12 +82,14 @@ MANGO_HOME/
 ### 1. 驗證設定並註冊 project
 
 ~~~powershell
-mango config validate .\mango.example.toml
-mango project add .\mango.example.toml
+mango config validate .\mango.example.yaml
+mango project add .\mango.example.yaml
 ~~~
 
-project add 會把 TOML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 TOML。
+project add 會把 YAML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 YAML。
 若 registry 已有相同 project name，`project add` 會拒絕此次加入並保留既有註冊內容；如需改用其他設定檔，請先執行 `mango project remove NAME`。
+
+設定檔目前僅支援 `.yaml`。舊 `.toml` 設定不會自動轉換；請手動轉換後重新執行 `project remove` 與 `project add`。
 
 ### 2. 啟動 daemon
 
@@ -229,15 +231,15 @@ mango project add PATH
 
 | 參數 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| PATH | 是 | 無 | TOML 設定檔路徑，可使用相對路徑。project 名稱取自 TOML 的 `project` 欄位。 |
+| PATH | 是 | 無 | YAML 設定檔路徑，可使用相對路徑。project 名稱取自 YAML 的 `project` 欄位。 |
 
 project name 只能使用英數字、.、_、-，且第一個字元必須是英數字。
 
 範例：
 
 ~~~powershell
-mango project add .\mango.example.toml
-mango project add C:\apps\demo\mango.toml
+mango project add .\mango.example.yaml
+mango project add C:\apps\demo\mango.yaml
 ~~~
 
 #### project remove
@@ -250,7 +252,7 @@ mango project remove NAME
 | --- | --- | --- |
 | NAME | 是 | 要從 registry 移除的 project 名稱。 |
 
-此指令不會刪除 TOML、日誌或應用程式檔案。
+此指令不會刪除 YAML、日誌或應用程式檔案。
 
 #### project ls
 
@@ -264,7 +266,7 @@ mango project ls
 
 #### project apply
 
-重新讀取 project TOML 並套用變更。
+重新讀取 project YAML 並套用變更。
 
 ~~~text
 mango project apply NAME
@@ -278,7 +280,7 @@ mango project apply NAME
 
 ### config validate
 
-只解析與驗證 TOML，不啟動或停止 service。
+只解析與驗證 YAML，不啟動或停止 service。
 
 ~~~text
 mango config validate PATH
@@ -286,7 +288,7 @@ mango config validate PATH
 
 | 參數 | 必填 | 說明 |
 | --- | --- | --- |
-| PATH | 是 | 要驗證的 TOML 設定檔。 |
+| PATH | 是 | 要驗證的 YAML 設定檔。 |
 
 驗證項目包括：
 
@@ -309,7 +311,7 @@ mango ls
 顯示：
 
 - service id
-- `SERVICE`：project/service，也就是 TOML 定義的 managed service
+- `SERVICE`：project/service，也就是 YAML 定義的 managed service
 - `PROCESS`：root process 的作業系統程序名稱
 - mango lifecycle state
 - health
@@ -362,7 +364,7 @@ mango disable PROJECT/SERVICE|ID [PROJECT/SERVICE|ID ...]
 | 指令 | 說明 |
 | --- | --- |
 | start | 啟動 service，並清除本次 crash-loop 計數。若 dependency 尚未滿足，會先進入 waiting。 |
-| stop | 暫時停止 service，不修改 TOML 的 autostart。 |
+| stop | 暫時停止 service，不修改 YAML 的 autostart。 |
 | restart | 先停止再啟動 service；depends_on.restart=true 的 dependent 也會依序重啟。 |
 | enable | 清除 disabled 狀態並啟動 service。 |
 | disable | 設為 disabled 並停止 service；直到 enable 或重新套用設定前不會 autostart。 |
@@ -403,7 +405,7 @@ mango logs clear TARGET
 <logs>/<project>/<service>/stderr.log
 ~~~
 
-預設單檔大小為 100MiB，保留 10 個輪替檔；可在 TOML 的 defaults 或 service 欄位調整。
+預設單檔大小為 100MiB，保留 10 個輪替檔；可在 YAML 的 defaults 或 service 欄位調整。
 
 ### monitor
 
@@ -449,10 +451,10 @@ schedule run 的 key 格式為 PROJECT/SCHEDULE。
 
 `mango schedule history --tail N` 只限制本次輸出的筆數，預設為最近 100 筆；`--tail 0` 顯示所有已保留紀錄，不會修改 daemon 的保留設定。
 
-排程 history 會保存於 `state/schedule-history.json`，daemon 重啟後仍可查詢。可在 `daemon.toml` 設定全域保留筆數：
+排程 history 會保存於 `state/schedule-history.json`，daemon 重啟後仍可查詢。可在 `daemon.yaml` 設定全域保留筆數：
 
-~~~toml
-schedule_history_limit = 1000
+~~~yaml
+schedule_history_limit: 1000
 ~~~
 
 預設值 `0` 代表不限制。正數只保留最新 N 筆；高頻率排程建議設定正數以控制 state 檔案大小。
@@ -484,7 +486,7 @@ mango startup status
 | uninstall | 移除 mango task | 停用並移除 user service | unload 並移除 LaunchAgent |
 | status | 查詢 task | 檢查 user service 檔案 | 檢查 plist 檔案 |
 
-startup service 只會啟動 daemon；service 是否啟動仍由 TOML 的 autostart 決定。
+startup service 只會啟動 daemon；service 是否啟動仍由 YAML 的 autostart 決定。
 
 ### doctor
 
@@ -505,15 +507,15 @@ mango --help
 
 顯示 CLI 指令總覽。
 
-## TOML 設定參考
+## YAML 設定參考
 
-完整範例請參考 [mango.example.toml](mango.example.toml)。
+完整範例請參考 [mango.example.yaml](mango.example.yaml)。
 
 ### 根欄位
 
-~~~toml
-version = 2
-project = "demo"
+~~~yaml
+version: 2
+project: demo
 ~~~
 
 | 欄位 | 必填 | 說明 |
@@ -523,23 +525,23 @@ project = "demo"
 
 ### defaults
 
-~~~toml
-[defaults]
-working_dir = "."
-restart = "on-failure"
-stop_timeout = "10s"
-log_max_size = "100MiB"
-log_max_files = 10
-metrics_interval = "1s"
-max_restarts = 10
-restart_window = "5m"
-stable_after = "1m"
-inherit_env = true
+~~~yaml
+defaults:
+  working_dir: "."
+  restart: on-failure
+  stop_timeout: 10s
+  log_max_size: 100MiB
+  log_max_files: 10
+  metrics_interval: 1s
+  max_restarts: 10
+  restart_window: 5m
+  stable_after: 1m
+  inherit_env: true
 ~~~
 
 | 欄位 | 預設值 | 說明 |
 | --- | --- | --- |
-| working_dir | . | 相對 TOML 所在目錄解析。 |
+| working_dir | . | 相對 YAML 所在目錄解析。 |
 | restart | on-failure | 可選 never、on-failure、always。 |
 | stop_timeout | 10s | graceful stop 等待時間，逾時後強制終止。 |
 | log_max_size | 100MiB | 單一 stdout／stderr 日誌檔的最大大小。 |
@@ -556,22 +558,22 @@ size 支援 bytes、KB／MB／GB 與 KiB／MiB／GiB，例如 100MiB。
 
 ### services
 
-~~~toml
-[services.api]
-command = "go"
-args = ["run", "./examples/api", "--port", "8080"]
-working_dir = "."
-autostart = true
-restart = "always"
-stop_timeout = "10s"
-
-[services.api.environment]
-APP_ENV = "development"
+~~~yaml
+services:
+  api:
+    command: go
+    args: [run, ./examples/api, --port, "8080"]
+    working_dir: "."
+    autostart: true
+    restart: always
+    stop_timeout: 10s
+    environment:
+      APP_ENV: development
 ~~~
 
 | 欄位 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| service table key | 是 | 無 | project 內唯一的 service 名稱。 |
+| service mapping key | 是 | 無 | project 內唯一的 service 名稱。 |
 | command | 是 | 無 | executable 名稱或路徑，不經 shell。 |
 | args | 否 | [] | 傳給 executable 的參數陣列。 |
 | working_dir | 否 | defaults 值 | service 的工作目錄。 |
@@ -594,55 +596,59 @@ command 執行規則：
 
 healthcheck 綁定 service，而不是 process tree。單一 probe 使用 Compose 風格的 `test`：
 
-~~~toml
-[services.db.healthcheck]
-test = ["CMD-SHELL", "pg_isready -U postgres"]
-interval = "10s"
-timeout = "5s"
-retries = 5
-start_period = "30s"
-start_interval = "5s"
+~~~yaml
+services:
+  db:
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 5s
 ~~~
 
-腳本若提供多個應用，可使用 named checks；`policy` 可為 `all`（預設）或 `any`：
+腳本若提供多個應用，可使用多個 checks；`policy` 可為 `all`（預設）或 `any`：
 
-~~~toml
-[services.stack.healthcheck]
-policy = "all"
-interval = "10s"
-timeout = "2s"
-retries = 3
-
-[services.stack.healthcheck.checks.api]
-test = ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
-
-[services.stack.healthcheck.checks.metrics]
-test = ["CMD", "curl", "-f", "http://127.0.0.1:9090/metrics"]
+~~~yaml
+services:
+  stack:
+    healthcheck:
+      policy: all
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      checks:
+        - test: [CMD, curl, -f, "http://127.0.0.1:8080/health"]
+        - test: [CMD, curl, -f, "http://127.0.0.1:9090/metrics"]
 ~~~
 
-`test` 與 `checks` 互斥；`["NONE"]` 會停用 healthcheck。probe 在 host 執行，沿用 service 的 working directory 與 environment。健康度只影響 `HEALTH`，不會自動改變 lifecycle 或觸發 restart。
+`test` 與 `checks` 互斥；`checks` 會依 YAML 順序執行，並在 health API 中依序命名為 `check-1`、`check-2` 等；`["NONE"]` 會停用 healthcheck。probe 在 host 執行，沿用 service 的 working directory 與 environment。健康度只影響 `HEALTH`，不會自動改變 lifecycle 或觸發 restart。
 
-service 啟動依賴使用巢狀 table：
+service 啟動依賴使用巢狀 mapping：
 
-~~~toml
-[services.web.depends_on.db]
-condition = "service_healthy"
-restart = true
+~~~yaml
+services:
+  web:
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
 ~~~
 
 `condition` 支援 `service_started`、`service_healthy` 與 `service_completed_successfully`。條件未滿足時 dependent 顯示 `waiting` 且不建立 PID；設定錯誤、未知 dependency 與 cycle 會在 apply 前拒絕。
 
 ### schedules
 
-~~~toml
-[[schedules]]
-name = "nightly-job"
-cron = "0 2 * * *"
-timezone = "Asia/Taipei"
-action = "run"
-command = "go"
-args = ["run", "./examples/one-task", "--iterations", "3"]
-concurrency = "forbid"
+~~~yaml
+schedules:
+  - name: nightly-job
+    cron: "0 2 * * *"
+    timezone: Asia/Taipei
+    action: run
+    command: go
+    args: [run, ./examples/one-task, --iterations, "3"]
+    concurrency: forbid
 ~~~
 
 | 欄位 | 必填 | 預設值 | 說明 |
@@ -756,7 +762,7 @@ go run ./examples/one-task --iterations 5 --interval 500ms
 啟動 API 與註冊 task：
 
 ~~~powershell
-mango project add .\mango.example.toml
+mango project add .\mango.example.yaml
 mango daemon start
 mango project apply demo
 mango ls

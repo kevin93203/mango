@@ -413,7 +413,7 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		Logs:         "/tmp/mango/logs",
 		DaemonLog:    "/tmp/mango/daemon.log",
 		SocketPath:   filepath.Join(t.TempDir(), "missing.sock"),
-		DaemonConfig: "/tmp/mango/daemon.toml",
+		DaemonConfig: "/tmp/mango/daemon.yaml",
 	}
 	if err := doctorCommand(layout); err != nil {
 		t.Fatal(err)
@@ -742,8 +742,8 @@ func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
 
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "demo.toml")
-	content := fmt.Sprintf("version = 2\nproject = %q\n\n[services.%s]\ncommand = %q\n", "demo", "api", "echo")
+	path := filepath.Join(t.TempDir(), "demo.yaml")
+	content := "version: 2\nproject: demo\n\nservices:\n  api:\n    command: echo\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
