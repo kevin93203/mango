@@ -255,6 +255,148 @@ func TestLogWriterKeepsConcurrentLinesIntact(t *testing.T) {
 	}
 }
 
+func TestDaemonLogsCommandDefaultsToLastFifteenLines(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "daemon.log")
+	var content strings.Builder
+	for i := 1; i <= 16; i++ {
+		fmt.Fprintf(&content, "line-%d\n", i)
+	}
+	if err := os.WriteFile(path, []byte(content.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, nil); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != 15 || strings.Contains(output.String(), "line-1\n") || !strings.Contains(output.String(), "｜daemon｜ line-2\n") {
+		t.Fatalf("output = %q, want lines 2 through 16 with daemon prefixes", output.String())
+	}
+	if lines[len(lines)-1] != "｜daemon｜ line-16" {
+		t.Fatalf("last output line = %q, want line-16", lines[len(lines)-1])
+	}
+}
+
+func TestDaemonLogsCommandTailZeroAndMissingFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "daemon.log")
+	if err := os.WriteFile(path, []byte("first\r\n\nlast"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, []string{"--tail", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "｜daemon｜ first\n｜daemon｜ \n｜daemon｜ last\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+
+	output.Reset()
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(root, "missing.log")}, nil); err != nil {
+		t.Fatalf("missing daemon log = %v, want success", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("missing daemon log output = %q, want empty", output.String())
+	}
+}
+
+func TestDaemonLogsCommandRejectsInvalidArguments(t *testing.T) {
+	previousJSON := jsonOutput
+	defer func() { jsonOutput = previousJSON }()
+	jsonOutput = false
+
+	tests := [][]string{
+		{"--tail", "-1"},
+		{"--stream", "stdout"},
+		{"clear"},
+		{"unexpected-target"},
+	}
+	for _, args := range tests {
+		if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(t.TempDir(), "daemon.log")}, args); err == nil {
+			t.Fatalf("daemon logs %v unexpectedly succeeded", args)
+		}
+	}
+
+	jsonOutput = true
+	if err := daemonLogsCommand(paths.Layout{}, nil); err == nil || !strings.Contains(err.Error(), "--json is not supported") {
+		t.Fatalf("JSON error = %v, want unsupported JSON error", err)
+	}
+}
+
+func TestFollowDaemonLogsWithReaderBuffersChunksAndFlushesOnError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "daemon.log")
+	if err := os.WriteFile(path, []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var lines []string
+	reads := 0
+	read := func(_ string, offset int64, _ int) (string, int64, error) {
+		reads++
+		switch reads {
+		case 1:
+			if offset != int64(len("initial\n")) {
+				t.Fatalf("first follow offset = %d, want %d", offset, len("initial\n"))
+			}
+			return "partial", offset + int64(len("partial")), nil
+		case 2:
+			return " line\n\nlast", offset + int64(len(" line\n\nlast")), nil
+		default:
+			return "", offset, errors.New("reader failed")
+		}
+	}
+
+	err := followDaemonLogsWithReader(path, 15, read, func(line string) {
+		lines = append(lines, line)
+	}, func() {})
+	if err == nil || !strings.Contains(err.Error(), "read daemon log: reader failed") {
+		t.Fatalf("error = %v, want reader error", err)
+	}
+	want := []string{"initial", "partial line", "", "last"}
+	if strings.Join(lines, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("lines = %#v, want %#v", lines, want)
+	}
+}
+
+func TestDaemonLogWriterColorsOnlyPrefix(t *testing.T) {
+	var colored bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&colored, &colored, cliui.Options{Color: cliui.ColorAlways})
+	newDaemonLogWriter().write("message")
+	if colored.String() != "\x1b[36m｜daemon｜\x1b[0m message\n" {
+		t.Fatalf("colored output = %q, want cyan prefix and immediate reset", colored.String())
+	}
+
+	var plain bytes.Buffer
+	cliOutput = cliui.New(&plain, &plain, cliui.Options{Color: cliui.ColorNever})
+	newDaemonLogWriter().write("message")
+	if plain.String() != "｜daemon｜ message\n" || strings.Contains(plain.String(), "\x1b[") {
+		t.Fatalf("plain output = %q, want no ANSI", plain.String())
+	}
+}
+
 func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput := cliOutput
