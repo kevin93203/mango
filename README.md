@@ -449,6 +449,7 @@ mango monitor
 ~~~text
 mango schedule ls
 mango schedule history [--tail N]
+mango schedule history --attempts [--tail N]
 mango schedule run PROJECT/SCHEDULE
 ~~~
 
@@ -468,6 +469,8 @@ mango schedule run PROJECT/SCHEDULE
 schedule run 的 key 格式為 PROJECT/SCHEDULE。
 
 `mango schedule history --tail N` 只限制本次輸出的筆數，預設為最近 100 筆；`--tail 0` 顯示所有已保留紀錄，不會修改 daemon 的保留設定。
+
+`mango schedule history` 預設每次 schedule run 顯示一筆摘要；`--attempts` 會以單一表格、每個 attempt 一列，展開初次執行與每次 retry 的開始／結束時間、duration、exit code、結果、error 與 stderr。`--json` 永遠包含完整的 `Attempts` 陣列；舊版 history 若沒有 attempt 詳情則回傳 `null`，文字模式會顯示 `attempt details unavailable`。history 的保留上限以 schedule run 主紀錄計算，不以 attempt 數量計算。
 
 排程 history 會保存於 `state/schedule-history.json`，daemon 重啟後仍可查詢。可在 `daemon.yaml` 設定全域保留筆數：
 
@@ -690,7 +693,7 @@ schedules:
 
 - daemon 離線期間錯過的排程不補執行。
 - forbid 會跳過上一個相同 schedule 尚未完成的執行。
-- schedule 執行失敗時，會依 `retry.retries` 與 `retry.delay` 重試；同一次 schedule run 最終只保存一筆 history。
+- schedule 執行失敗時，會依 `retry.retries` 與 `retry.delay` 重試；同一次 schedule run 最終只保存一筆 history，並在 `Attempts` 保存每次執行詳情。
 - cron 與 timezone 錯誤會使 config validate／apply 失敗。
 - schedule task 日誌會寫入 service log root 下的 schedule-<name> 目錄。
 

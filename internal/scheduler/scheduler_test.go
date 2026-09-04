@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,8 +39,12 @@ func TestRunNowRecordsHistory(t *testing.T) {
 	if runs.Load() != 1 {
 		t.Fatalf("runs = %d", runs.Load())
 	}
-	if len(s.History()) != 1 {
-		t.Fatalf("history = %+v", s.History())
+	history := s.History()
+	if len(history) != 1 {
+		t.Fatalf("history = %+v", history)
+	}
+	if len(history[0].Attempts) != 1 || history[0].Attempts[0].Number != 1 {
+		t.Fatalf("attempts = %+v, want one numbered attempt", history[0].Attempts)
 	}
 }
 
@@ -53,7 +58,7 @@ func TestRunNowRetriesFailedExecution(t *testing.T) {
 	})
 	schedule := config.EffectiveSchedule{
 		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
-		RetryCount: 2, RetryDelay: time.Millisecond,
+		RetryCount: 2, RetryDelay: 5 * time.Millisecond,
 	}
 	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
 		t.Fatal(err)
@@ -69,6 +74,60 @@ func TestRunNowRetriesFailedExecution(t *testing.T) {
 	history := s.History()
 	if len(history) != 1 || history[0].ExitCode != 0 || history[0].Error != "" {
 		t.Fatalf("history = %+v, want one successful final record", history)
+	}
+	if len(history[0].Attempts) != 3 {
+		t.Fatalf("attempts = %+v, want three attempts", history[0].Attempts)
+	}
+	for number, attempt := range history[0].Attempts {
+		if attempt.Number != number+1 {
+			t.Fatalf("attempt %d has number %d", number+1, attempt.Number)
+		}
+		if attempt.Started.IsZero() || attempt.Finished.IsZero() || attempt.Finished.Before(attempt.Started) {
+			t.Fatalf("attempt %d timing = %+v", attempt.Number, attempt)
+		}
+		if attempt.DurationSeconds < 0 {
+			t.Fatalf("attempt %d duration = %v", attempt.Number, attempt.DurationSeconds)
+		}
+	}
+	if history[0].Attempts[0].ExitCode != 1 || history[0].Attempts[0].Error != "temporary failure" {
+		t.Fatalf("first attempt = %+v, want failed result", history[0].Attempts[0])
+	}
+	if history[0].Attempts[2].ExitCode != 0 || history[0].Attempts[2].Error != "" {
+		t.Fatalf("last attempt = %+v, want successful result", history[0].Attempts[2])
+	}
+	if !history[0].Started.Equal(history[0].Attempts[0].Started) ||
+		!history[0].Finished.Equal(history[0].Attempts[2].Finished) {
+		t.Fatalf("record timing = %v-%v, attempts = %v-%v", history[0].Started, history[0].Finished,
+			history[0].Attempts[0].Started, history[0].Attempts[2].Finished)
+	}
+	if history[0].Finished.Sub(history[0].Started) < 10*time.Millisecond {
+		t.Fatalf("record duration = %v, want retry delays included", history[0].Finished.Sub(history[0].Started))
+	}
+}
+
+func TestRunNowRecordsAllFailedAttemptsInOneHistoryRecord(t *testing.T) {
+	var runs atomic.Int32
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		runs.Add(1)
+		return ExecutionResult{ExitCode: 2, Err: errors.New("failed")}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		RetryCount: 2,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+
+	history := s.History()
+	if runs.Load() != 3 || len(history) != 1 || len(history[0].Attempts) != 3 {
+		t.Fatalf("runs = %d, history = %+v, want one record with three attempts", runs.Load(), history)
+	}
+	if history[0].ExitCode != 2 || history[0].Error != "failed" || history[0].Attempts[2].Error != "failed" {
+		t.Fatalf("history = %+v, want final failed attempt details", history)
 	}
 }
 
@@ -94,6 +153,10 @@ func TestRunNowStopsRetryingWhenContextIsCanceled(t *testing.T) {
 
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want retry cancellation after first attempt", attempts.Load())
+	}
+	history := s.History()
+	if len(history) != 1 || len(history[0].Attempts) != 1 {
+		t.Fatalf("history = %+v, want only the executed attempt", history)
 	}
 }
 
@@ -337,7 +400,7 @@ func TestHistoryPersistsAndLoads(t *testing.T) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		t.Fatal(err)
 	}
-	if len(file.Records) != 1 || file.Records[0].Stderr != "Traceback\nZeroDivisionError: division by zero\n" {
+	if len(file.Records) != 1 || file.Records[0].Stderr != "Traceback\nZeroDivisionError: division by zero\n" || len(file.Records[0].Attempts) != 1 {
 		t.Fatalf("persisted records = %+v", file.Records)
 	}
 
@@ -346,8 +409,32 @@ func TestHistoryPersistsAndLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := loaded.History()
-	if len(history) != 1 || history[0].Error != "exit status 1" {
+	if len(history) != 1 || history[0].Error != "exit status 1" || len(history[0].Attempts) != 1 {
 		t.Fatalf("loaded history = %+v", history)
+	}
+}
+
+func TestLoadHistoryKeepsLegacyAttemptsUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schedule-history.json")
+	data := []byte(`{"version":1,"records":[{"Project":"demo","Name":"job","ExitCode":0}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(nil)
+	if err := s.LoadHistory(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	history := s.History()
+	if len(history) != 1 || history[0].Attempts != nil {
+		t.Fatalf("history = %+v, want nil attempts for legacy record", history)
+	}
+	encoded, err := json.Marshal(history[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"Attempts":null`)) {
+		t.Fatalf("legacy record JSON = %s, want null Attempts", encoded)
 	}
 }
 

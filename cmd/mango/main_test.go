@@ -886,6 +886,75 @@ func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
 	}
 }
 
+func TestScheduleHistoryAttemptsTextOutput(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	finished := started.Add(1250 * time.Millisecond)
+	err := scheduleCommandWithCaller([]string{"history", "--attempts"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", Name: "job", ExitCode: 0,
+			Attempts: []scheduler.Attempt{
+				{
+					Number: 1, Started: started, Finished: finished, DurationSeconds: 1.25,
+					ExitCode: 1, Error: "temporary\nfailure", Stderr: "retrying\nagain\n",
+				},
+				{
+					Number: 2, Started: finished.Add(2 * time.Second), Finished: finished.Add(3 * time.Second), DurationSeconds: 1,
+					ExitCode: 0,
+				},
+			},
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"SCHEDULE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "RESULT", "ERROR", "STDERR",
+		"demo/job", "2026-01-02T03:04:05Z", "1s", "temporary↵failure", "retrying↵again", "failed", "success",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output = %q, want %q", text, want)
+		}
+	}
+	if strings.Count(text, "SCHEDULE") != 1 || strings.Contains(text, "attempts\n") {
+		t.Fatalf("output = %q, want one flat table without detail sections", text)
+	}
+}
+
+func TestScheduleHistoryAttemptsUnavailableForLegacyRecord(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+
+	err := scheduleCommandWithCaller([]string{"history", "--attempts"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.Record{{Project: "demo", Name: "legacy"}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "ATTEMPT") || !strings.Contains(text, "attempt details unavailable") {
+		t.Fatalf("output = %q, want unavailable attempt details", output.String())
+	}
+	if strings.Count(text, "SCHEDULE") != 1 {
+		t.Fatalf("output = %q, want one table", text)
+	}
+}
+
 func TestPrintScheduleTableIncludesRuntimeColumns(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput := cliOutput
@@ -966,6 +1035,7 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 		tail = request.Tail
 		return ipc.Response{Data: []scheduler.Record{{
 			Project: "demo", Name: "job", ExitCode: 0, Stderr: "notice\n",
+			Attempts: []scheduler.Attempt{{Number: 1, ExitCode: 0}},
 		}}}, nil
 	})
 	if err != nil {
@@ -978,7 +1048,7 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &records); err != nil {
 		t.Fatalf("JSON output = %q: %v", output.String(), err)
 	}
-	if len(records) != 1 || records[0].Stderr != "notice\n" {
+	if len(records) != 1 || records[0].Stderr != "notice\n" || len(records[0].Attempts) != 1 || records[0].Attempts[0].Number != 1 {
 		t.Fatalf("records = %+v, want stderr", records)
 	}
 

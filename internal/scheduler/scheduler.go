@@ -20,6 +20,17 @@ type Record struct {
 	ExitCode int
 	Error    string
 	Stderr   string
+	Attempts []Attempt
+}
+
+type Attempt struct {
+	Number          int
+	Started         time.Time
+	Finished        time.Time
+	DurationSeconds float64
+	ExitCode        int
+	Error           string
+	Stderr          string
 }
 
 type ExecutionResult struct {
@@ -192,10 +203,16 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		}
 		s.mu.Unlock()
 	}()
-	execution := s.executeWithRetry(ctx, schedule)
+	execution, attempts := s.executeWithRetry(ctx, schedule)
+	recordStarted := started
+	recordFinished := time.Now()
+	if len(attempts) > 0 {
+		recordStarted = attempts[0].Started
+		recordFinished = attempts[len(attempts)-1].Finished
+	}
 	record := Record{
-		Project: schedule.Project, Name: schedule.Name, Started: started, Finished: time.Now(),
-		ExitCode: execution.ExitCode, Stderr: execution.Stderr,
+		Project: schedule.Project, Name: schedule.Name, Started: recordStarted, Finished: recordFinished,
+		ExitCode: execution.ExitCode, Stderr: execution.Stderr, Attempts: attempts,
 	}
 	if execution.Err != nil {
 		record.Error = execution.Err.Error()
@@ -203,22 +220,40 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 	s.record(record)
 }
 
-func (s *Scheduler) executeWithRetry(ctx context.Context, schedule config.EffectiveSchedule) ExecutionResult {
+func (s *Scheduler) executeWithRetry(ctx context.Context, schedule config.EffectiveSchedule) (ExecutionResult, []Attempt) {
 	retries := schedule.RetryCount
 	if retries < 0 {
 		retries = 0
 	}
 	var result ExecutionResult
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 && !waitForRetry(ctx, schedule.RetryDelay) {
-			return result
+	attempts := make([]Attempt, 0, 1)
+	for attemptNumber := 1; ; attemptNumber++ {
+		if attemptNumber > 1 && !waitForRetry(ctx, schedule.RetryDelay) {
+			return result, attempts
 		}
+		attemptStarted := time.Now()
 		result = s.runner(ctx, schedule)
-		if result.Err == nil && result.ExitCode == 0 {
-			return result
+		attemptFinished := time.Now()
+		attempt := Attempt{
+			Number:          attemptNumber,
+			Started:         attemptStarted,
+			Finished:        attemptFinished,
+			DurationSeconds: attemptFinished.Sub(attemptStarted).Seconds(),
+			ExitCode:        result.ExitCode,
+			Stderr:          result.Stderr,
 		}
-		if ctx.Err() != nil || attempt >= retries {
-			return result
+		if attempt.DurationSeconds < 0 {
+			attempt.DurationSeconds = 0
+		}
+		if result.Err != nil {
+			attempt.Error = result.Err.Error()
+		}
+		attempts = append(attempts, attempt)
+		if result.Err == nil && result.ExitCode == 0 {
+			return result, attempts
+		}
+		if ctx.Err() != nil || attemptNumber > retries {
+			return result, attempts
 		}
 	}
 }
