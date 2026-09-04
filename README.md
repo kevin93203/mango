@@ -494,7 +494,7 @@ startup service 只會啟動 daemon；service 是否啟動仍由 TOML 的 autost
 mango doctor
 ~~~
 
-會顯示作業系統、mango root、registry 路徑、daemon 是否可連線與 startup 是否已安裝。
+會顯示作業系統、mango root、registry、logs 根目錄、daemon.log、schedule history 路徑、daemon 是否可連線與 startup 是否已安裝。
 
 ### help
 

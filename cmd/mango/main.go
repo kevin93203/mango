@@ -1130,6 +1130,7 @@ func startupCommand(layout paths.Layout, args []string) error {
 }
 
 func doctorCommand(layout paths.Layout) error {
+	scheduleHistoryPath := filepath.Join(layout.State, "schedule-history.json")
 	registryOK := true
 	registryError := ""
 	if _, err := os.Stat(layout.Registry); err != nil && !os.IsNotExist(err) {
@@ -1147,7 +1148,8 @@ func doctorCommand(layout paths.Layout) error {
 	startupStatus, startupErr := startup.GetStatus()
 	if jsonOutput {
 		report := map[string]interface{}{
-			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry,
+			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry, "logs": layout.Logs,
+			"daemon_log": layout.DaemonLog, "schedule_history": scheduleHistoryPath,
 			"registry_ok": registryOK, "registry_error": registryError,
 			"daemon": daemonData,
 		}
@@ -1169,6 +1171,9 @@ func doctorCommand(layout paths.Layout) error {
 		{{Text: "platform"}, {Text: runtime.GOOS}},
 		{{Text: "root"}, {Text: layout.Root}},
 		{{Text: "registry"}, {Text: layout.Registry}},
+		{{Text: "logs root"}, {Text: layout.Logs}},
+		{{Text: "daemon log"}, {Text: layout.DaemonLog}},
+		{{Text: "schedule history"}, {Text: scheduleHistoryPath}},
 		{{Text: "registry status"}, {Text: doctorStatus(registryOK, registryError)}},
 		{{Text: "daemon"}, {Text: doctorStatus(daemonData["status"] == "ok" || daemonData["status"] == "degraded", fmt.Sprint(daemonData["status"]))}},
 	})
