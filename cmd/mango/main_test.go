@@ -50,6 +50,39 @@ func TestFollowLogResponseDecodesNextOffset(t *testing.T) {
 	}
 }
 
+func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 120})
+
+	printServiceTable([]api.ServiceInfo{{
+		ID: 0, Project: "demo", Name: "api", ProcessName: "api.exe", State: api.StateRunning, PID: 100,
+		Children: []api.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
+	}})
+
+	var parentLine, childLine string
+	for _, line := range strings.Split(output.String(), "\n") {
+		switch {
+		case strings.Contains(line, "api.exe"):
+			parentLine = line
+		case strings.Contains(line, "└─ worker"):
+			childLine = line
+		}
+	}
+	if parentLine == "" || childLine == "" || !strings.Contains(output.String(), "SERVICE") || !strings.Contains(output.String(), "PROCESS") {
+		t.Fatalf("table = %q, want SERVICE and PROCESS columns", output.String())
+	}
+	parentColumns := strings.Split(parentLine, " | ")
+	if len(parentColumns) < 3 || strings.TrimSpace(parentColumns[1]) != "demo/api" || strings.TrimSpace(parentColumns[2]) != "api.exe" {
+		t.Fatalf("parent row = %q, want demo/api and api.exe", parentLine)
+	}
+	childColumns := strings.Split(childLine, " | ")
+	if len(childColumns) < 3 || strings.TrimSpace(childColumns[1]) != "-" || strings.TrimSpace(childColumns[2]) != "└─ worker" {
+		t.Fatalf("child row = %q, want SERVICE '-' and PROCESS '└─ worker'", childLine)
+	}
+}
+
 func TestConfigValidateUsesPositionalPath(t *testing.T) {
 	configPath := writeCLIConfig(t)
 

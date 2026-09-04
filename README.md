@@ -302,7 +302,8 @@ mango ls
 顯示：
 
 - service id
-- project/service
+- `SERVICE`：project/service，也就是 TOML 定義的 managed service
+- `PROCESS`：root process 的作業系統程序名稱
 - mango lifecycle state
 - health
 - root PID 的 OS state
@@ -313,11 +314,11 @@ mango ls
 - memory percentage
 - restart count
 
-若 service 產生子 process，`ls` 會以縮排階層列出所有 descendants。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
+若 service 產生子 process，`ls` 會以縮排階層列出所有 descendants。父列的 `SERVICE` 顯示 managed service key，子列的 `SERVICE` 顯示 `-`；`PROCESS` 則分別顯示 root 與 descendant 的作業系統程序名稱。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
 
 `STATE` 是 mango lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
 
-文字表格欄位順序為：`ID | SERVICE | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
+文字表格欄位順序為：`ID | SERVICE | PROCESS | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
 
 預設使用彩色表格；可用 `mango ls --color=never` 取得不含顏色的穩定文字輸出，或使用 `mango ls --json` 取得 JSON。
 
@@ -402,7 +403,7 @@ mango logs clear TARGET
 mango monitor
 ~~~
 
-主畫面每秒更新 service 狀態、health、OS state、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示。
+主畫面每秒更新 service、process、狀態、health、OS state、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示，並使用與 `mango ls` 相同的 `SERVICE`/`PROCESS` 欄位。
 
 | 按鍵 | 操作 |
 | --- | --- |
