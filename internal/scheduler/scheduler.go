@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,22 +28,42 @@ type ExecutionResult struct {
 	Stderr   string
 }
 
+const (
+	StatusIdle    = "idle"
+	StatusRunning = "running"
+	StatusSuccess = "success"
+	StatusFailed  = "failed"
+)
+
+// ScheduleSnapshot combines a configured schedule with its current execution
+// state and the next cron activation time.
+type ScheduleSnapshot struct {
+	Schedule        config.EffectiveSchedule
+	Status          string
+	LastRun         *time.Time
+	NextRun         *time.Time
+	DurationSeconds *float64
+}
+
 type Runner func(context.Context, config.EffectiveSchedule) ExecutionResult
 
 type Scheduler struct {
-	mu           sync.Mutex
-	cron         *cron.Cron
-	entries      map[string]cron.EntryID
-	schedules    map[string]config.EffectiveSchedule
-	running      map[string]int
-	history      []Record
-	historyLimit int
-	historyPath  string
-	persistMu    sync.Mutex
-	executionWG  sync.WaitGroup
-	stopping     bool
-	runner       Runner
-	ctx          context.Context
+	mu              sync.Mutex
+	cron            *cron.Cron
+	entries         map[string]cron.EntryID
+	schedules       map[string]config.EffectiveSchedule
+	running         map[string]int
+	active          map[string]map[uint64]time.Time
+	nextExecutionID uint64
+	history         []Record
+	historyLimit    int
+	historyPath     string
+	persistMu       sync.Mutex
+	executionWG     sync.WaitGroup
+	stopping        bool
+	started         bool
+	runner          Runner
+	ctx             context.Context
 }
 
 func New(runner Runner) *Scheduler {
@@ -52,6 +73,7 @@ func New(runner Runner) *Scheduler {
 		entries:      map[string]cron.EntryID{},
 		schedules:    map[string]config.EffectiveSchedule{},
 		running:      map[string]int{},
+		active:       map[string]map[uint64]time.Time{},
 		historyLimit: defaultHistoryLimit,
 		runner:       runner,
 		ctx:          context.Background(),
@@ -67,6 +89,7 @@ func (s *Scheduler) SetContext(ctx context.Context) {
 func (s *Scheduler) Start() {
 	s.mu.Lock()
 	s.stopping = false
+	s.started = true
 	s.mu.Unlock()
 	s.cron.Start()
 }
@@ -74,6 +97,7 @@ func (s *Scheduler) Start() {
 func (s *Scheduler) Stop() context.Context {
 	s.mu.Lock()
 	s.stopping = true
+	s.started = false
 	s.mu.Unlock()
 	return s.cron.Stop()
 }
@@ -151,13 +175,23 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		return
 	}
 	s.running[key]++
+	s.nextExecutionID++
+	executionID := s.nextExecutionID
+	started := time.Now()
+	if s.active[key] == nil {
+		s.active[key] = map[uint64]time.Time{}
+	}
+	s.active[key][executionID] = started
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.running[key]--
+		delete(s.active[key], executionID)
+		if len(s.active[key]) == 0 {
+			delete(s.active, key)
+		}
 		s.mu.Unlock()
 	}()
-	started := time.Now()
 	execution := s.runner(ctx, schedule)
 	record := Record{
 		Project: schedule.Project, Name: schedule.Name, Started: started, Finished: time.Now(),
@@ -185,6 +219,109 @@ func (s *Scheduler) List() []config.EffectiveSchedule {
 		result = append(result, schedule)
 	}
 	return result
+}
+
+// ListSnapshots returns configured schedules enriched with execution and cron
+// timing information. Runtime execution state is intentionally kept in memory;
+// completed execution details come from the persisted history.
+func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
+	s.mu.Lock()
+	schedules := make(map[string]config.EffectiveSchedule, len(s.schedules))
+	entryIDs := make(map[string]cron.EntryID, len(s.entries))
+	active := make(map[string][]time.Time, len(s.active))
+	started := s.started
+	for key, schedule := range s.schedules {
+		schedules[key] = schedule
+	}
+	for key, id := range s.entries {
+		entryIDs[key] = id
+	}
+	for key, executions := range s.active {
+		for _, started := range executions {
+			active[key] = append(active[key], started)
+		}
+	}
+	history := append([]Record(nil), s.history...)
+	s.mu.Unlock()
+
+	latest := make(map[string]Record)
+	for _, record := range history {
+		key := record.Project + "/" + record.Name
+		previous, ok := latest[key]
+		if !ok || record.Started.After(previous.Started) {
+			latest[key] = record
+		}
+	}
+
+	keys := make([]string, 0, len(schedules))
+	for key := range schedules {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]ScheduleSnapshot, 0, len(keys))
+	for _, key := range keys {
+		schedule := schedules[key]
+		snapshot := ScheduleSnapshot{Schedule: schedule, Status: StatusIdle}
+
+		entry := s.cron.Entry(entryIDs[key])
+		next := entry.Next
+		if next.IsZero() && started && entry.Schedule != nil {
+			next = entry.Schedule.Next(time.Now())
+		}
+		if !next.IsZero() {
+			snapshot.NextRun = timePtr(next)
+		}
+
+		if starts := active[key]; len(starts) > 0 {
+			started := latestStart(starts)
+			snapshot.Status = StatusRunning
+			snapshot.LastRun = timePtr(started)
+			duration := time.Since(started).Seconds()
+			if duration < 0 {
+				duration = 0
+			}
+			snapshot.DurationSeconds = floatPtr(duration)
+		} else if record, ok := latest[key]; ok {
+			snapshot.LastRun = timePtr(record.Started)
+			snapshot.DurationSeconds = recordDuration(record)
+			if record.Error != "" || record.ExitCode != 0 {
+				snapshot.Status = StatusFailed
+			} else {
+				snapshot.Status = StatusSuccess
+			}
+		}
+		result = append(result, snapshot)
+	}
+	return result
+}
+
+func latestStart(starts []time.Time) time.Time {
+	latest := starts[0]
+	for _, started := range starts[1:] {
+		if started.After(latest) {
+			latest = started
+		}
+	}
+	return latest
+}
+
+func recordDuration(record Record) *float64 {
+	if record.Started.IsZero() || record.Finished.IsZero() {
+		return nil
+	}
+	duration := record.Finished.Sub(record.Started).Seconds()
+	if duration < 0 {
+		duration = 0
+	}
+	return floatPtr(duration)
+}
+
+func timePtr(value time.Time) *time.Time {
+	return &value
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
 }
 
 func (s *Scheduler) Has(key string) bool {

@@ -886,6 +886,61 @@ func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
 	}
 }
 
+func TestPrintScheduleTableIncludesRuntimeColumns(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+
+	lastRun := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	nextRun := lastRun.Add(time.Hour)
+	duration := 65.4
+	printScheduleTable([]api.ScheduleInfo{{
+		Project: "demo", Name: "job", Cron: "0 * * * *", Timezone: "UTC", Action: "run",
+		Concurrency: "forbid", Status: "failed", LastRun: &lastRun, NextRun: &nextRun, DurationSeconds: &duration,
+	}})
+
+	text := output.String()
+	for _, want := range []string{"STATUS", "LAST_RUN", "NEXT_RUN", "DURATION", "failed", "2026-01-02T03:04:05Z", "1m 5s"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("table = %q, want %q", text, want)
+		}
+	}
+}
+
+func TestScheduleListJSONIncludesRuntimeFields(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+
+	err := scheduleCommandWithCaller([]string{"ls"}, func(method string, params interface{}) (ipc.Response, error) {
+		if method != "schedule.ls" || params != nil {
+			t.Fatalf("request = method %q params %#v, want schedule.ls with nil params", method, params)
+		}
+		return ipc.Response{Data: []api.ScheduleInfo{{Project: "demo", Name: "idle", Status: "idle"}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values []map[string]interface{}
+	if err := json.Unmarshal(output.Bytes(), &values); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(values) != 1 || values[0]["Status"] != "idle" {
+		t.Fatalf("JSON values = %+v, want idle status", values)
+	}
+	for _, field := range []string{"LastRun", "NextRun", "DurationSeconds"} {
+		if values[0][field] != nil {
+			t.Fatalf("JSON %s = %#v, want null", field, values[0][field])
+		}
+	}
+}
+
 func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

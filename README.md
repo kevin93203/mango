@@ -454,9 +454,16 @@ mango schedule run PROJECT/SCHEDULE
 
 | 指令 | 說明 |
 | --- | --- |
-| ls | 列出 schedule、cron、timezone、action 與 concurrency。 |
+| ls | 列出 schedule、cron、timezone、action、concurrency 與執行狀態。 |
 | history | 顯示已保存的排程執行紀錄。 |
 | run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
+
+`mango schedule ls` 會在基本設定欄位後顯示 `STATUS`、`LAST_RUN`、`NEXT_RUN` 與 `DURATION`：
+
+- `STATUS` 為 `idle`、`running`、`success` 或 `failed`；執行中狀態優先顯示。
+- `LAST_RUN` 是最近一次實際執行的開始時間，包含手動執行；`NEXT_RUN` 是下一次 cron 觸發時間。
+- `DURATION` 是最近一次執行耗時；執行中則顯示目前已耗時。尚未有值時顯示 `-`。
+- 時間依 schedule 的 timezone 顯示。`--json` 會以 RFC3339 時間、秒數 duration 與 `null` 空值回傳這些欄位。
 
 schedule run 的 key 格式為 PROJECT/SCHEDULE。
 

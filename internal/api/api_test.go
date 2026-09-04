@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestFlattenServiceListPreservesHierarchy(t *testing.T) {
@@ -50,5 +51,29 @@ func TestServiceInfoJSONKeepsHealthAndChildren(t *testing.T) {
 	}
 	if len(decoded[0].Children) != 1 || decoded[0].Children[0].PID != 200 {
 		t.Fatalf("children = %+v", decoded[0].Children)
+	}
+}
+
+func TestScheduleInfoJSONUsesNullableRuntimeFields(t *testing.T) {
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	duration := 1.25
+	items := []ScheduleInfo{
+		{Project: "demo", Name: "idle", Status: "idle"},
+		{Project: "demo", Name: "job", Status: "success", LastRun: &started, DurationSeconds: &duration},
+	}
+
+	data, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded[0]["LastRun"] != nil || decoded[0]["NextRun"] != nil || decoded[0]["DurationSeconds"] != nil {
+		t.Fatalf("nullable fields = %+v, want null values", decoded[0])
+	}
+	if decoded[1]["Status"] != "success" || decoded[1]["LastRun"] != started.Format(time.RFC3339) || decoded[1]["DurationSeconds"] != duration {
+		t.Fatalf("runtime fields = %+v, want populated values", decoded[1])
 	}
 }

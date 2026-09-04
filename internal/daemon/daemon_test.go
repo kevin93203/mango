@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/metrics"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/scheduler"
 )
 
 func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
@@ -99,6 +101,52 @@ func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
 	}
 	if string(data) != result.Stderr {
 		t.Fatalf("stderr log = %q, result stderr = %q", data, result.Stderr)
+	}
+}
+
+func TestScheduleListIncludesRuntimeFields(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	d.scheduler = scheduler.New(func(context.Context, config.EffectiveSchedule) scheduler.ExecutionResult {
+		return scheduler.ExecutionResult{}
+	})
+	schedules := []config.EffectiveSchedule{
+		{Project: "demo", Name: "idle", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid"},
+		{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "forbid"},
+	}
+	if err := d.scheduler.Apply(schedules); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.Start()
+	if err := d.scheduler.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.Wait()
+	stopped := d.scheduler.Stop()
+	<-stopped.Done()
+
+	request, err := ipc.NewRequest("schedule.ls", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule.ls failed: %+v", response.Error)
+	}
+	var items []api.ScheduleInfo
+	if err := decodeTestData(response.Data, &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Name != "idle" || items[1].Name != "job" {
+		t.Fatalf("schedule items = %+v, want sorted idle and job", items)
+	}
+	if items[0].Status != scheduler.StatusIdle || items[0].LastRun != nil || items[0].DurationSeconds != nil || items[0].NextRun == nil {
+		t.Fatalf("idle schedule = %+v, want idle with only next run", items[0])
+	}
+	if items[1].Status != scheduler.StatusSuccess || items[1].LastRun == nil || items[1].DurationSeconds == nil || items[1].NextRun == nil {
+		t.Fatalf("completed schedule = %+v, want runtime fields", items[1])
+	}
+	if items[1].Timezone != "UTC" {
+		t.Fatalf("timezone = %q, want UTC", items[1].Timezone)
 	}
 }
 
