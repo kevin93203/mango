@@ -45,6 +45,16 @@ type ServiceInfo struct {
 	Children      []ChildProcessInfo `json:"Children,omitempty"`
 }
 
+// ServiceOperationResult is the result of one service lifecycle operation.
+// Bulk operations return one result for every resolved service or target
+// error, allowing the caller to report partial failures without losing the
+// successful operations.
+type ServiceOperationResult struct {
+	Key    string `json:"key"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 type DependencyStatus struct {
 	Service   string `json:"Service"`
 	Condition string `json:"Condition"`

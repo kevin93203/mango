@@ -265,6 +265,101 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	}
 }
 
+func TestPlanBulkServicesExpandsProjectsInDependencyOrderAndDeduplicates(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "alpha.yaml")
+	content := `version: 2
+project: alpha
+
+services:
+  db:
+    command: echo
+    autostart: false
+  web:
+    command: echo
+    autostart: false
+    depends_on:
+      db: {}
+  api:
+    command: echo
+    autostart: false
+    depends_on:
+      web: {}
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 2,
+		Projects: map[string]registry.Project{
+			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	keys, results := d.planBulkServices([]string{"alpha/api", "alpha", "alpha/api"})
+	if len(results) != 0 {
+		t.Fatalf("planning results = %+v, want no errors", results)
+	}
+	want := []string{"alpha/db", "alpha/web", "alpha/api"}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("planned keys = %v, want %v", keys, want)
+	}
+}
+
+func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "alpha.yaml")
+	writeTestConfig(t, configPath, "alpha", "api", "worker")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 2,
+		Projects: map[string]registry.Project{
+			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	results := d.BulkServiceOperation("disable", []string{"alpha", "missing"})
+	if len(results) != 3 {
+		t.Fatalf("results = %+v, want project services plus one target error", results)
+	}
+	if results[0].Key != "missing" || results[0].Status != "error" {
+		t.Fatalf("missing target result = %+v", results[0])
+	}
+	if results[1].Status != "ok" || results[2].Status != "ok" {
+		t.Fatalf("service results = %+v", results[1:])
+	}
+	for _, info := range d.ListProcesses("alpha") {
+		if !info.Disabled || info.State != StateDisabled {
+			t.Fatalf("service %s state = %s disabled=%v, want disabled", info.Name, info.State, info.Disabled)
+		}
+	}
+}
+
+func TestServiceBulkIPCRejectsBadParams(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	request, err := ipc.NewRequest("service.bulk", serviceBulkRequest{Action: "start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
+		t.Fatalf("response = %+v, want BAD_PARAMS", response)
+	}
+}
+
 func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

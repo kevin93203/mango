@@ -616,6 +616,89 @@ func TestProcessCommandSupportsMultipleTargets(t *testing.T) {
 	}
 }
 
+func TestProcessBulkCommandSendsProjectTargetsAndPrintsEachResult(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var method string
+	var params struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}
+	err := processBulkCommandWithCaller("restart", []string{"demo", "other/api"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		encoded, err := json.Marshal(gotParams)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &params); err != nil {
+			return ipc.Response{}, err
+		}
+		return ipc.Response{Data: []api.ServiceOperationResult{
+			{Key: "demo/db", Status: "ok"},
+			{Key: "other/api", Status: "ok"},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatalf("bulk command = %v", err)
+	}
+	if method != "service.bulk" || params.Action != "restart" || strings.Join(params.Targets, ",") != "demo,other/api" {
+		t.Fatalf("request = method %q params %+v", method, params)
+	}
+	if text := output.String(); !strings.Contains(text, "Service demo/db restarted") || !strings.Contains(text, "Service other/api restarted") {
+		t.Fatalf("output = %q, want each service result", text)
+	}
+}
+
+func TestProcessBulkCommandPrintsJSONAndReturnsPartialFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&stdout, &stderr, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+
+	err := processBulkCommandWithCaller("stop", []string{"demo"}, func(string, interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []api.ServiceOperationResult{
+			{Key: "demo/api", Status: "ok"},
+			{Key: "demo/web", Status: "error", Error: "stop timeout"},
+		}}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "demo/web") {
+		t.Fatalf("error = %v, want partial failure", err)
+	}
+	var results []api.ServiceOperationResult
+	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+		t.Fatalf("JSON output = %q: %v", stdout.String(), err)
+	}
+	if len(results) != 2 || results[1].Status != "error" || stderr.Len() != 0 {
+		t.Fatalf("results = %+v, stderr = %q", results, stderr.String())
+	}
+}
+
+func TestContainsProjectTargetClassifiesBareNamesOnly(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"demo"}, want: true},
+		{args: []string{"demo/api", "12"}, want: false},
+		{args: []string{"demo/api", "demo"}, want: true},
+	} {
+		if got := containsProjectTarget(test.args); got != test.want {
+			t.Fatalf("containsProjectTarget(%v) = %v, want %v", test.args, got, test.want)
+		}
+	}
+}
+
 func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

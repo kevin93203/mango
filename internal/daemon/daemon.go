@@ -114,6 +114,15 @@ type scheduleHistoryRequest struct {
 	Tail int `json:"tail"`
 }
 
+type serviceBulkRequest struct {
+	Action  string   `json:"action"`
+	Targets []string `json:"targets"`
+}
+
+type bulkProjectSelection struct {
+	services map[string]bool
+}
+
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
 		layout:       layout,
@@ -1041,6 +1050,10 @@ func (d *Daemon) StartProcess(key string) error {
 	managed.disabled = false
 	managed.manualStop = false
 	managed.failures = nil
+	if managed.handle != nil {
+		d.mu.Unlock()
+		return nil
+	}
 	managed.state = StateStopped
 	d.mu.Unlock()
 	return d.startService(project, managed)
@@ -1091,6 +1104,181 @@ func (d *Daemon) RestartProcess(key string) error {
 }
 
 func (d *Daemon) RestartService(key string) error { return d.RestartProcess(key) }
+
+// BulkServiceOperation expands project targets and executes lifecycle actions
+// in dependency order. It deliberately operates only on the explicit target
+// set so that a bulk restart does not also apply the single-service restart
+// propagation rules.
+func (d *Daemon) BulkServiceOperation(action string, targets []string) []api.ServiceOperationResult {
+	keys, results := d.planBulkServices(targets)
+	if len(keys) == 0 {
+		return results
+	}
+
+	appendResult := func(key string, err error) {
+		result := api.ServiceOperationResult{Key: key, Status: "ok"}
+		if err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+		}
+		results = append(results, result)
+	}
+
+	switch action {
+	case "start", "enable":
+		for _, key := range keys {
+			appendResult(key, d.StartProcess(key))
+		}
+	case "stop":
+		for i := len(keys) - 1; i >= 0; i-- {
+			appendResult(keys[i], d.StopProcess(keys[i], false))
+		}
+	case "disable":
+		for i := len(keys) - 1; i >= 0; i-- {
+			appendResult(keys[i], d.StopProcess(keys[i], true))
+		}
+	case "restart":
+		stopErrors := make(map[string]error, len(keys))
+		for i := len(keys) - 1; i >= 0; i-- {
+			stopErrors[keys[i]] = d.StopProcess(keys[i], false)
+		}
+		for _, key := range keys {
+			startErr := d.StartProcess(key)
+			if stopErr := stopErrors[key]; stopErr != nil {
+				if startErr != nil {
+					startErr = errors.Join(stopErr, startErr)
+				} else {
+					startErr = stopErr
+				}
+			}
+			appendResult(key, startErr)
+		}
+	default:
+		for _, key := range keys {
+			appendResult(key, fmt.Errorf("unsupported service bulk action %q", action))
+		}
+	}
+	return results
+}
+
+func (d *Daemon) planBulkServices(targets []string) ([]string, []api.ServiceOperationResult) {
+	selections := make(map[string]*bulkProjectSelection)
+	projectOrder := make([]string, 0)
+	results := make([]api.ServiceOperationResult, 0)
+	seenTargets := make(map[string]bool)
+
+	selectionFor := func(projectName string) *bulkProjectSelection {
+		selection := selections[projectName]
+		if selection == nil {
+			selection = &bulkProjectSelection{services: make(map[string]bool)}
+			selections[projectName] = selection
+			projectOrder = append(projectOrder, projectName)
+		}
+		return selection
+	}
+
+	for _, target := range targets {
+		if seenTargets[target] {
+			continue
+		}
+		seenTargets[target] = true
+		if target == "" {
+			results = append(results, bulkErrorResult(target, errors.New("target cannot be empty")))
+			continue
+		}
+
+		if strings.Contains(target, "/") || isNonNegativeInteger(target) {
+			project, name, err := d.resolveManagedServiceRef(target)
+			if err != nil {
+				results = append(results, bulkErrorResult(target, err))
+				continue
+			}
+			selectionFor(project).services[name] = true
+			continue
+		}
+
+		d.mu.RLock()
+		project := d.projects[target]
+		if project == nil {
+			d.mu.RUnlock()
+			results = append(results, bulkErrorResult(target, fmt.Errorf("project %q not found", target)))
+			continue
+		}
+		if len(project.processes) == 0 {
+			d.mu.RUnlock()
+			results = append(results, bulkErrorResult(target, fmt.Errorf("project %q has no services", target)))
+			continue
+		}
+		selection := selectionFor(target)
+		for name := range project.processes {
+			selection.services[name] = true
+		}
+		d.mu.RUnlock()
+	}
+
+	keys := make([]string, 0)
+	for _, projectName := range projectOrder {
+		selection := selections[projectName]
+		d.mu.RLock()
+		project := d.projects[projectName]
+		if project == nil {
+			d.mu.RUnlock()
+			names := make([]string, 0, len(selection.services))
+			for name := range selection.services {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				results = append(results, bulkErrorResult(projectName+"/"+name, fmt.Errorf("project %q no longer exists", projectName)))
+			}
+			continue
+		}
+		specs := make([]config.EffectiveService, 0, len(project.processes))
+		for _, managed := range project.processes {
+			specs = append(specs, managed.spec)
+		}
+		d.mu.RUnlock()
+		for _, spec := range topologicalSpecs(specs) {
+			if selection.services[spec.Name] {
+				keys = append(keys, projectName+"/"+spec.Name)
+			}
+		}
+	}
+	return keys, results
+}
+
+func bulkErrorResult(key string, err error) api.ServiceOperationResult {
+	return api.ServiceOperationResult{Key: key, Status: "error", Error: err.Error()}
+}
+
+func isNonNegativeInteger(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *Daemon) resolveManagedServiceRef(ref string) (string, string, error) {
+	project, name, err := d.resolveProcessRef(ref)
+	if err != nil {
+		return "", "", err
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	runtimeProject := d.projects[project]
+	if runtimeProject == nil {
+		return "", "", fmt.Errorf("project %q not found", project)
+	}
+	if runtimeProject.processes[name] == nil {
+		return "", "", fmt.Errorf("service %q not found", ref)
+	}
+	return project, name, nil
+}
 
 func collectRestartDependentsLocked(project *projectRuntime, services []string) []restartCandidate {
 	if project == nil || len(services) == 0 {
@@ -1562,6 +1750,20 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "SERVICE_OPERATION_FAILED", err)
 		}
 		return success(request, map[string]string{"key": canonicalKey, "status": "ok"})
+	case "service.bulk":
+		var p serviceBulkRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if len(p.Targets) == 0 {
+			return failure(request, "BAD_PARAMS", errors.New("service bulk requires at least one target"))
+		}
+		switch p.Action {
+		case "start", "stop", "restart", "enable", "disable":
+		default:
+			return failure(request, "BAD_PARAMS", fmt.Errorf("unsupported service bulk action %q", p.Action))
+		}
+		return success(request, d.BulkServiceOperation(p.Action, p.Targets))
 	case "logs.read":
 		var p logRequest
 		if err := json.Unmarshal(request.Params, &p); err != nil {
