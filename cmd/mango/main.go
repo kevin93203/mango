@@ -109,7 +109,7 @@ func usage() {
 		"  logs TARGET [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
-		"  schedule ls|history|run PROJECT/SCHEDULE",
+		"  schedule ls|history [--tail N]|run PROJECT/SCHEDULE",
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
@@ -611,6 +611,10 @@ type followLogResponse struct {
 }
 
 func scheduleCommand(args []string) error {
+	return scheduleCommandWithCaller(args, call)
+}
+
+func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
 	if len(args) == 0 {
 		return errors.New("schedule requires ls, history, or run")
 	}
@@ -618,9 +622,26 @@ func scheduleCommand(args []string) error {
 	var params interface{}
 	switch args[0] {
 	case "ls":
+		if len(args) != 1 {
+			return errors.New("schedule ls does not accept arguments")
+		}
 		method = "schedule.ls"
 	case "history":
 		method = "schedule.history"
+		fs := newFlagSet("schedule history")
+		tail := fs.Int("tail", 100, "number of history records")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(fs.Args()) != 0 {
+			return errors.New("schedule history does not accept positional arguments")
+		}
+		if *tail < 0 {
+			return errors.New("schedule history tail must be non-negative")
+		}
+		params = struct {
+			Tail int `json:"tail"`
+		}{*tail}
 	case "run":
 		if len(args) != 2 {
 			return errors.New("schedule run requires PROJECT/SCHEDULE")
@@ -630,7 +651,7 @@ func scheduleCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown schedule command %q", args[0])
 	}
-	response, err := call(method, params)
+	response, err := caller(method, params)
 	if err != nil {
 		return err
 	}
@@ -955,9 +976,20 @@ func printScheduleHistory(history []scheduler.Record) {
 	for _, record := range history {
 		result := "success"
 		style := cliui.StyleSuccess
-		if record.Error != "" || record.ExitCode != 0 {
+		failed := record.Error != "" || record.ExitCode != 0
+		if failed {
 			result = "failed"
 			style = cliui.StyleError
+		}
+		detail := record.Error
+		if stderr := lastNonEmptyLine(record.Stderr); stderr != "" {
+			detail = stderr
+		}
+		detailStyle := cliui.StyleMuted
+		if failed {
+			detailStyle = cliui.StyleError
+		} else if detail != "" {
+			detailStyle = cliui.StyleWarning
 		}
 		rows = append(rows, []cliui.Cell{
 			{Text: record.Project + "/" + record.Name},
@@ -965,10 +997,20 @@ func printScheduleHistory(history []scheduler.Record) {
 			{Text: formatTime(record.Finished)},
 			{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
 			{Text: result, Style: style},
-			{Text: record.Error, Style: errorStyle(record.Error)},
+			{Text: detail, Style: detailStyle},
 		})
 	}
 	cliOutput.Table([]string{"SCHEDULE", "STARTED", "FINISHED", "EXIT", "RESULT", "ERROR"}, rows)
+}
+
+func lastNonEmptyLine(value string) string {
+	lines := strings.Split(value, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func printStartupStatus(status startup.Status) {

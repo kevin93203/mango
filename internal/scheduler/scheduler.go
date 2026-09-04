@@ -2,12 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/robfig/cron/v3"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/robfig/cron/v3"
 )
 
 type Record struct {
@@ -17,30 +18,43 @@ type Record struct {
 	Finished time.Time
 	ExitCode int
 	Error    string
+	Stderr   string
 }
 
-type Runner func(context.Context, config.EffectiveSchedule) (int, error)
+type ExecutionResult struct {
+	ExitCode int
+	Err      error
+	Stderr   string
+}
+
+type Runner func(context.Context, config.EffectiveSchedule) ExecutionResult
 
 type Scheduler struct {
-	mu        sync.Mutex
-	cron      *cron.Cron
-	entries   map[string]cron.EntryID
-	schedules map[string]config.EffectiveSchedule
-	running   map[string]int
-	history   []Record
-	runner    Runner
-	ctx       context.Context
+	mu           sync.Mutex
+	cron         *cron.Cron
+	entries      map[string]cron.EntryID
+	schedules    map[string]config.EffectiveSchedule
+	running      map[string]int
+	history      []Record
+	historyLimit int
+	historyPath  string
+	persistMu    sync.Mutex
+	executionWG  sync.WaitGroup
+	stopping     bool
+	runner       Runner
+	ctx          context.Context
 }
 
 func New(runner Runner) *Scheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	return &Scheduler{
-		cron:      cron.New(cron.WithParser(parser)),
-		entries:   map[string]cron.EntryID{},
-		schedules: map[string]config.EffectiveSchedule{},
-		running:   map[string]int{},
-		runner:    runner,
-		ctx:       context.Background(),
+		cron:         cron.New(cron.WithParser(parser)),
+		entries:      map[string]cron.EntryID{},
+		schedules:    map[string]config.EffectiveSchedule{},
+		running:      map[string]int{},
+		historyLimit: defaultHistoryLimit,
+		runner:       runner,
+		ctx:          context.Background(),
 	}
 }
 
@@ -51,10 +65,16 @@ func (s *Scheduler) SetContext(ctx context.Context) {
 }
 
 func (s *Scheduler) Start() {
+	s.mu.Lock()
+	s.stopping = false
+	s.mu.Unlock()
 	s.cron.Start()
 }
 
 func (s *Scheduler) Stop() context.Context {
+	s.mu.Lock()
+	s.stopping = true
+	s.mu.Unlock()
 	return s.cron.Stop()
 }
 
@@ -88,18 +108,38 @@ func (s *Scheduler) Apply(schedules []config.EffectiveSchedule) error {
 func (s *Scheduler) RunNow(ctx context.Context, key string) error {
 	s.mu.Lock()
 	schedule, ok := s.schedules[key]
-	s.mu.Unlock()
+	stopping := s.stopping
+	if stopping {
+		s.mu.Unlock()
+		return errors.New("scheduler is stopping")
+	}
 	if !ok {
+		s.mu.Unlock()
 		return fmt.Errorf("schedule %s not found", key)
 	}
-	go s.execute(ctx, schedule)
+	s.executionWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.executionWG.Done()
+		s.execute(ctx, schedule)
+	}()
 	return nil
+}
+
+func (s *Scheduler) Wait() {
+	s.executionWG.Wait()
 }
 
 func (s *Scheduler) run(schedule config.EffectiveSchedule) {
 	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return
+	}
 	ctx := s.ctx
+	s.executionWG.Add(1)
 	s.mu.Unlock()
+	defer s.executionWG.Done()
 	s.execute(ctx, schedule)
 }
 
@@ -118,17 +158,15 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		s.mu.Unlock()
 	}()
 	started := time.Now()
-	exitCode, err := s.runner(ctx, schedule)
-	record := Record{Project: schedule.Project, Name: schedule.Name, Started: started, Finished: time.Now(), ExitCode: exitCode}
-	if err != nil {
-		record.Error = err.Error()
+	execution := s.runner(ctx, schedule)
+	record := Record{
+		Project: schedule.Project, Name: schedule.Name, Started: started, Finished: time.Now(),
+		ExitCode: execution.ExitCode, Stderr: execution.Stderr,
 	}
-	s.mu.Lock()
-	s.history = append(s.history, record)
-	if len(s.history) > 100 {
-		s.history = s.history[len(s.history)-100:]
+	if execution.Err != nil {
+		record.Error = execution.Err.Error()
 	}
-	s.mu.Unlock()
+	s.record(record)
 }
 
 func (s *Scheduler) History() []Record {

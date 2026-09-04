@@ -6,14 +6,15 @@ import (
 )
 
 type Layout struct {
-	Root       string
-	Runtime    string
-	Logs       string
-	State      string
-	Registry   string
-	SocketPath string
-	DaemonLog  string
-	PIDFile    string
+	Root         string
+	Runtime      string
+	Logs         string
+	State        string
+	Registry     string
+	DaemonConfig string
+	SocketPath   string
+	DaemonLog    string
+	PIDFile      string
 }
 
 func Default() (Layout, error) {
@@ -25,8 +26,9 @@ func Default() (Layout, error) {
 		return Layout{
 			Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 			State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-			SocketPath: filepath.Join(root, "runtime", "mango.sock"),
-			DaemonLog:  filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
+			DaemonConfig: filepath.Join(root, "daemon.toml"),
+			SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
+			DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 		}, nil
 	}
 	config, err := os.UserConfigDir()
@@ -43,8 +45,9 @@ func Default() (Layout, error) {
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),
 		State: filepath.Join(data, "state"), Registry: filepath.Join(root, "projects.json"),
-		SocketPath: filepath.Join(runtime, "mango.sock"),
-		DaemonLog:  filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),
+		DaemonConfig: filepath.Join(root, "daemon.toml"),
+		SocketPath:   filepath.Join(runtime, "mango.sock"),
+		DaemonLog:    filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),
 	}, nil
 }
 

@@ -110,6 +110,10 @@ type logRequest struct {
 	IncludeOffset bool
 }
 
+type scheduleHistoryRequest struct {
+	Tail int `json:"tail"`
+}
+
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
 		layout:       layout,
@@ -135,6 +139,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := paths.Ensure(d.layout); err != nil {
 		return err
 	}
+	daemonConfigPath := d.layout.DaemonConfig
+	if daemonConfigPath == "" {
+		daemonConfigPath = filepath.Join(d.layout.Root, "daemon.toml")
+	}
+	daemonConfig, err := config.LoadDaemonConfig(daemonConfigPath)
+	if err != nil {
+		return err
+	}
 	ipc.SetEndpoint(d.layout.SocketPath)
 	if d.daemonAlreadyRunning() {
 		return errors.New("daemon is already running")
@@ -144,8 +156,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	d.scheduler.SetContext(d.ctx)
+	defer d.shutdown()
 	if err := d.reloadRegistryForStart(); err != nil {
 		return err
+	}
+	historyPath := filepath.Join(d.layout.State, "schedule-history.json")
+	if err := d.scheduler.LoadHistory(historyPath, daemonConfig.ScheduleHistoryLimit); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 	if err := d.writePID(); err != nil {
 		return err
@@ -156,7 +173,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("listen for daemon IPC: %w", err)
 	}
 	d.scheduler.Start()
-	defer d.shutdown()
 	return ipc.Serve(d.ctx, listener, d.Handle)
 }
 
@@ -175,7 +191,7 @@ func (d *Daemon) writePID() error {
 	if err := os.MkdirAll(filepath.Dir(d.layout.PIDFile), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(d.layout.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600)
+	return os.WriteFile(d.layout.PIDFile, fmt.Appendf(nil, "%d\n", os.Getpid()), 0o600)
 }
 
 func (d *Daemon) removePID() {
@@ -190,7 +206,9 @@ func (d *Daemon) shutdown() {
 		d.cancel()
 	}
 	if d.scheduler != nil {
-		_ = d.scheduler.Stop()
+		stopped := d.scheduler.Stop()
+		<-stopped.Done()
+		d.scheduler.Wait()
 	}
 	d.mu.Lock()
 	type shutdownTarget struct {
@@ -1411,7 +1429,7 @@ func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
 	return d.resolveServiceRef(ref)
 }
 
-func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) (int, error) {
+func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) scheduler.ExecutionResult {
 	if schedule.Action == "start" || schedule.Action == "stop" || schedule.Action == "restart" {
 		key := schedule.Project + "/" + schedule.Target
 		var err error
@@ -1424,27 +1442,28 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 			err = d.RestartProcess(key)
 		}
 		if err != nil {
-			return 1, err
+			return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 		}
-		return 0, nil
+		return scheduler.ExecutionResult{ExitCode: 0}
 	}
 	stdout, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stdout", 100<<20, 10)
 	if err != nil {
-		return 1, err
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
 	stderr, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stderr", 100<<20, 10)
 	if err != nil {
 		_ = stdout.Close()
-		return 1, err
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
+	capture := logging.NewCaptureWriter(stderr, 64<<10)
 	handle, err := process.Start(process.Spec{
 		Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir,
-		Env: schedule.Env, Stdout: stdout, Stderr: stderr,
+		Env: schedule.Env, Stdout: stdout, Stderr: capture,
 	})
 	if err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return 1, err
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
 	select {
 	case <-handle.Done():
@@ -1454,7 +1473,7 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 	result := handle.Wait()
 	_ = stdout.Close()
 	_ = stderr.Close()
-	return result.ExitCode, result.Err
+	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
 }
 
 func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
@@ -1583,7 +1602,16 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		}
 		return success(request, result)
 	case "schedule.history":
-		return success(request, d.scheduler.History())
+		var p scheduleHistoryRequest
+		if len(request.Params) > 0 && string(request.Params) != "null" {
+			if err := json.Unmarshal(request.Params, &p); err != nil {
+				return failure(request, "BAD_PARAMS", err)
+			}
+		}
+		if p.Tail < 0 {
+			return failure(request, "BAD_PARAMS", errors.New("schedule history tail must be non-negative"))
+		}
+		return success(request, d.scheduler.HistoryTail(p.Tail))
 	case "schedule.run":
 		var p struct{ Key string }
 		if err := json.Unmarshal(request.Params, &p); err != nil {

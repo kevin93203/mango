@@ -22,6 +22,64 @@ type RotatingWriter struct {
 	maxFiles int
 }
 
+type CaptureWriter struct {
+	destination io.Writer
+	maxBytes    int
+	mu          sync.Mutex
+	data        []byte
+	truncated   bool
+}
+
+func NewCaptureWriter(destination io.Writer, maxBytes int) *CaptureWriter {
+	if maxBytes <= 0 {
+		maxBytes = 64 << 10
+	}
+	return &CaptureWriter{destination: destination, maxBytes: maxBytes}
+}
+
+func (w *CaptureWriter) Write(data []byte) (int, error) {
+	n, err := w.destination.Write(data)
+	if n <= 0 {
+		return n, err
+	}
+	if n > len(data) {
+		n = len(data)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	data = data[:n]
+	if len(data) > w.maxBytes {
+		w.data = append(w.data[:0], data[len(data)-w.maxBytes:]...)
+		w.truncated = true
+		return n, err
+	}
+	if drop := len(w.data) + len(data) - w.maxBytes; drop > 0 {
+		w.data = append(w.data[:0], w.data[drop:]...)
+		w.truncated = true
+	}
+	w.data = append(w.data, data...)
+	return n, err
+}
+
+func (w *CaptureWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.truncated {
+		return string(w.data)
+	}
+	marker := "[stderr truncated; showing the last bytes]\n"
+	if len(marker) >= w.maxBytes {
+		return marker[:w.maxBytes]
+	}
+	data := w.data
+	available := w.maxBytes - len(marker)
+	if len(data) > available {
+		data = data[len(data)-available:]
+	}
+	return marker + string(data)
+}
+
 func Open(path string, maxSize int64, maxFiles int) (*RotatingWriter, error) {
 	if maxSize <= 0 {
 		maxSize = 100 << 20

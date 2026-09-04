@@ -14,6 +14,7 @@ import (
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/scheduler"
 )
 
 func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
@@ -162,6 +163,130 @@ func TestProcessCommandSupportsMultipleTargets(t *testing.T) {
 	}
 	if len(results) != 2 || results[0]["key"] != "demo/api" || results[1]["key"] != "1" {
 		t.Fatalf("results = %+v, want results for both targets", results)
+	}
+}
+
+func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var method string
+	var params interface{}
+	err := scheduleCommandWithCaller([]string{"history", "--tail", "2"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		params = gotParams
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", Name: "divide_by_zero", ExitCode: 1,
+			Stderr: "Traceback (most recent call last):\nZeroDivisionError: division by zero\n",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "schedule.history" {
+		t.Fatalf("method = %q, want schedule.history", method)
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"tail":2}` {
+		t.Fatalf("params = %s, want {\"tail\":2}", encoded)
+	}
+	if !strings.Contains(output.String(), "ZeroDivisionError: division by zero") {
+		t.Fatalf("output = %q, want stderr summary", output.String())
+	}
+}
+
+func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+
+	var tail int
+	err := scheduleCommandWithCaller([]string{"history", "--tail", "0"}, func(_ string, params interface{}) (ipc.Response, error) {
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		var request struct {
+			Tail int `json:"tail"`
+		}
+		if err := json.Unmarshal(encoded, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		tail = request.Tail
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", Name: "job", ExitCode: 0, Stderr: "notice\n",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail != 0 {
+		t.Fatalf("tail = %d, want 0", tail)
+	}
+	var records []scheduler.Record
+	if err := json.Unmarshal(output.Bytes(), &records); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(records) != 1 || records[0].Stderr != "notice\n" {
+		t.Fatalf("records = %+v, want stderr", records)
+	}
+
+	output.Reset()
+	if err := scheduleCommandWithCaller([]string{"history"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.Record{}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(output.String()) != "[]" {
+		t.Fatalf("empty JSON output = %q, want []", output.String())
+	}
+}
+
+func TestScheduleHistoryRejectsNegativeTail(t *testing.T) {
+	err := scheduleCommandWithCaller([]string{"history", "--tail", "-1"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		t.Fatal("caller should not be invoked for a negative tail")
+		return ipc.Response{}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("error = %v, want non-negative validation", err)
+	}
+}
+
+func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	err := scheduleCommandWithCaller([]string{"history"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", Name: "job", ExitCode: 0, Stderr: "diagnostic\n",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "success") || strings.Contains(text, "failed") || !strings.Contains(text, "diagnostic") {
+		t.Fatalf("output = %q, want successful stderr summary", text)
 	}
 }
 

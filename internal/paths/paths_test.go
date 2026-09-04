@@ -19,6 +19,9 @@ func TestDefaultUsesMangoHome(t *testing.T) {
 	if layout.SocketPath != filepath.Join(root, "runtime", "mango.sock") {
 		t.Fatalf("socket = %q", layout.SocketPath)
 	}
+	if layout.DaemonConfig != filepath.Join(root, "daemon.toml") {
+		t.Fatalf("daemon config = %q", layout.DaemonConfig)
+	}
 }
 
 func TestDefaultIgnoresLegacyGoserveHome(t *testing.T) {
