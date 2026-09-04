@@ -401,11 +401,12 @@ func projectCommand(layout paths.Layout, args []string) error {
 		if err != nil {
 			return err
 		}
-		project := registry.Project{Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version}
-		if previous, ok := reg.Projects[projectName]; ok {
-			project.ProcessIDs = previous.ProcessIDs
+		if _, ok := reg.Projects[projectName]; ok {
+			return fmt.Errorf("project %q is already registered", projectName)
 		}
-		reg.Projects[projectName] = project
+		reg.Projects[projectName] = registry.Project{
+			Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
+		}
 		if err := registry.Save(layout.Registry, reg); err != nil {
 			return err
 		}

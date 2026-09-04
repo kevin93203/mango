@@ -457,6 +457,21 @@ func TestProjectAddAndRemoveUsePositionalArguments(t *testing.T) {
 	if !ok || project.ConfigPath != configPath {
 		t.Fatalf("registered project = %+v, want demo with path %q", project, configPath)
 	}
+	originalRegistry, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateConfigPath := writeCLIConfig(t)
+	if err := projectCommand(layout, []string{"add", duplicateConfigPath}); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("duplicate project add error = %v, want already registered", err)
+	}
+	currentRegistry, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentRegistry) != string(originalRegistry) {
+		t.Fatalf("registry changed after duplicate add: before=%q after=%q", originalRegistry, currentRegistry)
+	}
 	if err := projectCommand(layout, []string{"add", "--file", configPath}); err == nil {
 		t.Fatal("project add --file PATH unexpectedly succeeded")
 	}
