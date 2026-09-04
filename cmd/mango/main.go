@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -101,8 +102,9 @@ func usage() {
 		"Commands:",
 		"  daemon start|stop|restart|status|logs",
 		"  daemon logs [--tail N] [--follow]",
-		"  project add PATH",
+		"  project add NAME PATH",
 		"  project remove NAME",
+		"  project rename OLD NEW",
 		"  project apply NAME",
 		"  project ls",
 		"  config validate PATH",
@@ -283,8 +285,9 @@ func (w *daemonLogWriter) write(line string) {
 }
 
 func startDaemon(layout paths.Layout) error {
-	if _, err := call("health", nil); err == nil {
+	if response, err := call("health", nil); err == nil {
 		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon already running"))
+		_ = printDaemonWarnings(response.Data)
 		return nil
 	}
 	executable, err := resolveDaemonExecutable()
@@ -314,6 +317,9 @@ func startDaemon(layout paths.Layout) error {
 		return fmt.Errorf("daemon failed to start: %w", err)
 	}
 	cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), cmd.Process.Pid)
+	if response, err := call("health", nil); err == nil {
+		_ = printDaemonWarnings(response.Data)
+	}
 	return nil
 }
 
@@ -382,30 +388,30 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 
 func projectCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
-		return errors.New("project requires add, remove, apply, or ls")
+		return errors.New("project requires add, remove, rename, apply, or ls")
 	}
 	switch args[0] {
 	case "add":
 		if err := rejectJSON("project add"); err != nil {
 			return err
 		}
-		if len(args) != 2 {
-			return errors.New("project add requires PATH")
+		if len(args) != 3 {
+			return errors.New("project add requires NAME and PATH")
 		}
-		loaded, err := config.Load(args[1])
+		projectName, configPath := args[1], args[2]
+		if err := config.ValidateProjectName(projectName); err != nil {
+			return err
+		}
+		loaded, err := config.Load(configPath)
 		if err != nil {
 			return err
 		}
-		projectName := loaded.Project
 		reg, err := registry.Load(layout.Registry)
 		if err != nil {
 			return err
 		}
-		if _, ok := reg.Projects[projectName]; ok {
-			return fmt.Errorf("project %q is already registered", projectName)
-		}
-		reg.Projects[projectName] = registry.Project{
-			Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
+		if err := addProjectToRegistry(&reg, projectName, loaded); err != nil {
+			return err
 		}
 		if err := registry.Save(layout.Registry, reg); err != nil {
 			return err
@@ -425,15 +431,55 @@ func projectCommand(layout paths.Layout, args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, ok := reg.Projects[name]; !ok {
-			return fmt.Errorf("project %q is not registered", name)
+		if _, err := removeProjectFromRegistry(&reg, name); err != nil {
+			return err
 		}
-		delete(reg.Projects, name)
 		if err := registry.Save(layout.Registry, reg); err != nil {
 			return err
 		}
 		_, _ = call("project.reload", nil)
 		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
+		return nil
+	case "rename":
+		if err := rejectJSON("project rename"); err != nil {
+			return err
+		}
+		if len(args) != 3 {
+			return errors.New("project rename requires OLD and NEW")
+		}
+		oldName, newName := args[1], args[2]
+		if oldName == newName {
+			return fmt.Errorf("project %q is already named %q", oldName, newName)
+		}
+		if err := config.ValidateProjectName(newName); err != nil {
+			return err
+		}
+		reg, err := registry.Load(layout.Registry)
+		if err != nil {
+			return err
+		}
+		oldProject, ok := reg.Projects[oldName]
+		if !ok {
+			return fmt.Errorf("project %q is not registered", oldName)
+		}
+		if _, ok := reg.Projects[newName]; ok {
+			return fmt.Errorf("project %q is already registered", newName)
+		}
+		loaded, err := config.Load(oldProject.ConfigPath)
+		if err != nil {
+			return err
+		}
+		if _, err := removeProjectFromRegistry(&reg, oldName); err != nil {
+			return err
+		}
+		if err := addProjectToRegistry(&reg, newName, loaded); err != nil {
+			return err
+		}
+		if err := registry.Save(layout.Registry, reg); err != nil {
+			return err
+		}
+		_, _ = call("project.reload", nil)
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", oldName, newName)))
 		return nil
 	case "apply":
 		return applyProjectCommand(args[1:])
@@ -456,6 +502,28 @@ func projectCommand(layout paths.Layout, args []string) error {
 	}
 }
 
+func addProjectToRegistry(reg *registry.File, name string, loaded config.File) error {
+	if err := config.ValidateProjectName(name); err != nil {
+		return err
+	}
+	if _, ok := reg.Projects[name]; ok {
+		return fmt.Errorf("project %q is already registered", name)
+	}
+	reg.Projects[name] = registry.Project{
+		Name: name, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
+	}
+	return nil
+}
+
+func removeProjectFromRegistry(reg *registry.File, name string) (registry.Project, error) {
+	project, ok := reg.Projects[name]
+	if !ok {
+		return registry.Project{}, fmt.Errorf("project %q is not registered", name)
+	}
+	delete(reg.Projects, name)
+	return project, nil
+}
+
 func configCommand(args []string) error {
 	if err := rejectJSON("config validate"); err != nil {
 		return err
@@ -470,7 +538,7 @@ func configCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: project=%s services=%d schedules=%d path=%s", loaded.Project, len(loaded.Services), len(loaded.Schedules), loaded.Path)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: services=%d schedules=%d path=%s", len(loaded.Services), len(loaded.Schedules), loaded.Path)))
 	return nil
 }
 
@@ -1408,13 +1476,8 @@ func formatBytes(value uint64) string {
 }
 
 func printDaemonStatus(data interface{}) error {
-	var health struct {
-		Status       string            `json:"status"`
-		PID          int               `json:"pid"`
-		Version      int               `json:"version"`
-		ConfigErrors map[string]string `json:"config_errors"`
-	}
-	if err := decodeData(data, &health); err != nil {
+	health, err := decodeDaemonHealth(data)
+	if err != nil {
 		return err
 	}
 	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "Daemon status"))
@@ -1427,6 +1490,47 @@ func printDaemonStatus(data interface{}) error {
 		rows = append(rows, []cliui.Cell{{Text: "config error: " + project}, {Text: message, Style: cliui.StyleError}})
 	}
 	cliOutput.KeyValues(rows)
+	return nil
+}
+
+type daemonHealthData struct {
+	Status       string            `json:"status"`
+	PID          int               `json:"pid"`
+	Version      int               `json:"version"`
+	ConfigErrors map[string]string `json:"config_errors"`
+}
+
+func decodeDaemonHealth(data interface{}) (daemonHealthData, error) {
+	var health daemonHealthData
+	if err := decodeData(data, &health); err != nil {
+		return daemonHealthData{}, err
+	}
+	return health, nil
+}
+
+func printDaemonWarnings(data interface{}) error {
+	health, err := decodeDaemonHealth(data)
+	if err != nil {
+		return err
+	}
+	if health.Status != "degraded" && len(health.ConfigErrors) == 0 {
+		return nil
+	}
+	count := len(health.ConfigErrors)
+	warningLine := func(format string, args ...interface{}) {
+		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, fmt.Sprintf(format, args...)))
+	}
+	warningLine("Warning: daemon is degraded; %d project(s) failed to load.", count)
+	names := make([]string, 0, len(health.ConfigErrors))
+	for name := range health.ConfigErrors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		warningLine("  %s: %s", name, health.ConfigErrors[name])
+		warningLine("  Action: fix the YAML, then run `mango project apply %s`", name)
+	}
+	warningLine("Run `mango daemon status` for complete details.")
 	return nil
 }
 

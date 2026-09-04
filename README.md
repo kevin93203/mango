@@ -83,10 +83,10 @@ MANGO_HOME/
 
 ~~~powershell
 mango config validate .\mango.example.yaml
-mango project add .\mango.example.yaml
+mango project add demo .\mango.example.yaml
 ~~~
 
-project add 會把 YAML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 YAML。
+project add 會把 project name 與 YAML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 YAML。
 若 registry 已有相同 project name，`project add` 會拒絕此次加入並保留既有註冊內容；如需改用其他設定檔，請先執行 `mango project remove NAME`。
 
 設定檔目前僅支援 `.yaml`。舊 `.toml` 設定不會自動轉換；請手動轉換後重新執行 `project remove` 與 `project add`。
@@ -224,22 +224,23 @@ mango logs demo/api --follow
 #### project add
 
 ~~~text
-mango project add PATH
+mango project add NAME PATH
 ~~~
 
 參數：
 
 | 參數 | 必填 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| PATH | 是 | 無 | YAML 設定檔路徑，可使用相對路徑。project 名稱取自 YAML 的 `project` 欄位。 |
+| NAME | 是 | 無 | 要註冊的 project 名稱。 |
+| PATH | 是 | 無 | YAML 設定檔路徑，可使用相對路徑。 |
 
 project name 必須以英文字母開頭，後續只能使用英數字、.、_、-；數字開頭的 project name 不允許，裸數字 target 保留給 service ID。
 
 範例：
 
 ~~~powershell
-mango project add .\mango.example.yaml
-mango project add C:\apps\demo\mango.yaml
+mango project add demo .\mango.example.yaml
+mango project add demo C:\apps\demo\mango.yaml
 ~~~
 
 #### project remove
@@ -253,6 +254,14 @@ mango project remove NAME
 | NAME | 是 | 要從 registry 移除的 project 名稱。 |
 
 此指令不會刪除 YAML、日誌或應用程式檔案。
+
+#### project rename
+
+~~~text
+mango project rename OLD NEW
+~~~
+
+以 OLD 的設定檔路徑重新註冊為 NEW，效果等同於 `project remove OLD` 後再 `project add NEW PATH`。YAML 不會被修改；daemon 執行中時會重新載入 registry。
 
 #### project ls
 
@@ -517,13 +526,13 @@ mango --help
 
 ~~~yaml
 version: 2
-project: demo
 ~~~
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
 | version | 是 | 目前必須為 2。 |
-| project | 是 | project 名稱，也必須與 registry 名稱一致。 |
+
+project name 不再寫在 YAML，而是在 `mango project add NAME PATH` 指定。舊設定檔中的 `project:` 欄位會被視為未知欄位，請移除後再重新註冊。
 
 ### defaults
 
@@ -764,7 +773,7 @@ go run ./examples/one-task --iterations 5 --interval 500ms
 啟動 API 與註冊 task：
 
 ~~~powershell
-mango project add .\mango.example.yaml
+mango project add demo .\mango.example.yaml
 mango daemon start
 mango project apply demo
 mango ls
