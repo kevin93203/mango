@@ -67,12 +67,14 @@ $env:MANGO_HOME = "C:\temp\mango-test"
 ~~~text
 MANGO_HOME/
 ├─ projects.json
+├─ daemon.toml           # daemon 全域設定（可選）
 ├─ runtime/
 │  ├─ daemon.pid
 │  └─ mango.sock       # Unix；Windows 使用 Named Pipe
 ├─ logs/
 │  └─ <project>/<service>/
 └─ state/
+	└─ schedule-history.json
 ~~~
 
 ## 快速開始
@@ -422,17 +424,29 @@ mango monitor
 
 ~~~text
 mango schedule ls
-mango schedule history
+mango schedule history [--tail N]
 mango schedule run PROJECT/SCHEDULE
 ~~~
 
 | 指令 | 說明 |
 | --- | --- |
 | ls | 列出 schedule、cron、timezone、action 與 concurrency。 |
-| history | 顯示本次 daemon 執行期間的排程紀錄。 |
+| history | 顯示已保存的排程執行紀錄。 |
 | run | 立即執行指定 schedule，不等待下一次 cron 時間。 |
 
 schedule run 的 key 格式為 PROJECT/SCHEDULE。
+
+`mango schedule history --tail N` 只限制本次輸出的筆數，預設為最近 100 筆；`--tail 0` 顯示所有已保留紀錄，不會修改 daemon 的保留設定。
+
+排程 history 會保存於 `state/schedule-history.json`，daemon 重啟後仍可查詢。可在 `daemon.toml` 設定全域保留筆數：
+
+~~~toml
+schedule_history_limit = 1000
+~~~
+
+預設值 `0` 代表不限制。正數只保留最新 N 筆；高頻率排程建議設定正數以控制 state 檔案大小。
+
+`action = "run"` 的 stderr 會以最多 64 KiB 的尾端內容保存於 history；完整 stderr 仍可用 `mango logs PROJECT/SCHEDULE --stream stderr` 查閱。
 
 `action = "run"` 的 schedule 可直接使用 schedule key 查看日誌：
 

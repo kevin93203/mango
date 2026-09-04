@@ -1,12 +1,51 @@
 package logging
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCaptureWriterKeepsBoundedTailAndWritesDestination(t *testing.T) {
+	var destination bytes.Buffer
+	capture := NewCaptureWriter(&destination, 64)
+	input := strings.Repeat("x", 80) + "traceback\n"
+	if _, err := capture.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+
+	if destination.String() != input {
+		t.Fatalf("destination = %q, want full input", destination.String())
+	}
+	result := capture.String()
+	if len(result) > 64 || !strings.Contains(result, "stderr truncated") || !strings.HasSuffix(result, "traceback\n") {
+		t.Fatalf("capture = %q, want bounded tail", result)
+	}
+}
+
+func TestCaptureWriterKeepsSmallOutputUnchanged(t *testing.T) {
+	capture := NewCaptureWriter(&bytes.Buffer{}, 64)
+	if _, err := capture.Write([]byte("traceback\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.String(); got != "traceback\n" {
+		t.Fatalf("capture = %q, want %q", got, "traceback\n")
+	}
+}
+
+func TestCaptureWriterKeepsExactLimitUnchanged(t *testing.T) {
+	input := strings.Repeat("x", 64)
+	capture := NewCaptureWriter(&bytes.Buffer{}, 64)
+	if _, err := capture.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.String(); got != input {
+		t.Fatalf("capture = %q, want exact input", got)
+	}
+}
 
 func TestRotatingWriterAndTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stdout.log")

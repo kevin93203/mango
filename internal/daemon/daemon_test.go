@@ -73,6 +73,35 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	}
 }
 
+func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
+	if os.Getenv("MANGO_SCHEDULE_HELPER") == "1" {
+		fmt.Fprintln(os.Stderr, "Traceback (most recent call last):")
+		fmt.Fprintln(os.Stderr, "ZeroDivisionError: division by zero")
+		os.Exit(1)
+	}
+
+	root := t.TempDir()
+	d := New(testLayout(root))
+	result := d.runSchedule(context.Background(), config.EffectiveSchedule{
+		Project: "demo", Name: "divide_by_zero", Action: "run", Command: os.Args[0],
+		Args:       []string{"-test.run=TestScheduleRunCapturesStderrInRecord", "--"},
+		WorkingDir: root, Env: map[string]string{"MANGO_SCHEDULE_HELPER": "1"},
+	})
+	if result.ExitCode != 1 || result.Err == nil {
+		t.Fatalf("result = %+v, want non-zero process result", result)
+	}
+	if !strings.Contains(result.Stderr, "ZeroDivisionError: division by zero") {
+		t.Fatalf("stderr = %q, want captured traceback", result.Stderr)
+	}
+	data, err := os.ReadFile(d.logs.Path("demo", scheduleLogName("divide_by_zero"), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != result.Stderr {
+		t.Fatalf("stderr log = %q, result stderr = %q", data, result.Stderr)
+	}
+}
+
 func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
@@ -593,8 +622,9 @@ func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
 		State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
-		SocketPath: filepath.Join(root, "runtime", "mango.sock"),
-		DaemonLog:  filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
+		DaemonConfig: filepath.Join(root, "daemon.toml"),
+		SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
+		DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
 	}
 }
 
