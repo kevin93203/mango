@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/cliui"
@@ -47,6 +51,207 @@ func TestFollowLogResponseDecodesNextOffset(t *testing.T) {
 	}
 	if response.NextOffset != 1234 {
 		t.Fatalf("next offset = %d, want 1234", response.NextOffset)
+	}
+}
+
+func TestParseLogsArgsAcceptsZeroOneAndMultipleTargets(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		want   []string
+		stream string
+		tail   int
+		follow bool
+	}{
+		{name: "zero", args: nil, want: []string{}, stream: "all", tail: 15},
+		{name: "one", args: []string{"demo/api"}, want: []string{"demo/api"}, stream: "all", tail: 15},
+		{name: "many and flags", args: []string{"demo/api", "demo/job", "7", "--stream", "stderr", "--tail", "4", "--follow"}, want: []string{"demo/api", "demo/job", "7"}, stream: "stderr", tail: 4, follow: true},
+		{name: "flags before targets", args: []string{"--stream=stdout", "--tail=2", "demo/api", "demo/job"}, want: []string{"demo/api", "demo/job"}, stream: "stdout", tail: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			targets, options, err := parseLogsArgs(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(targets, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("targets = %v, want %v", targets, test.want)
+			}
+			if options.stream != test.stream || options.tail != test.tail || options.follow != test.follow {
+				t.Fatalf("options = %+v, want stream=%s tail=%d follow=%t", options, test.stream, test.tail, test.follow)
+			}
+		})
+	}
+}
+
+func TestLogsCommandResolvesMixedTargetsAndPrefixesEveryLine(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var mu sync.Mutex
+	readStarted := false
+	caller := func(_ context.Context, method string, params interface{}) (ipc.Response, error) {
+		var request struct {
+			Key    string `json:"Key"`
+			Stream string `json:"Stream"`
+		}
+		if err := decodeData(params, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		switch method {
+		case "logs.resolve":
+			canonical := map[string]string{
+				"demo/api":         "demo/api",
+				"demo/nightly-job": "demo/nightly-job",
+				"7":                "demo/worker",
+			}[request.Key]
+			if canonical == "" {
+				return ipc.Response{}, fmt.Errorf("target %s not found", request.Key)
+			}
+			mu.Lock()
+			if readStarted {
+				return ipc.Response{}, errors.New("read started before target resolution completed")
+			}
+			mu.Unlock()
+			return ipc.Response{Data: map[string]string{"key": canonical}}, nil
+		case "logs.read":
+			mu.Lock()
+			readStarted = true
+			mu.Unlock()
+			switch request.Key {
+			case "demo/api":
+				time.Sleep(20 * time.Millisecond)
+				return ipc.Response{Data: map[string]string{"data": "service output\n"}}, nil
+			case "demo/nightly-job":
+				time.Sleep(5 * time.Millisecond)
+				return ipc.Response{Data: map[string]string{"data": "schedule output\r\n\r\nlast line"}}, nil
+			default:
+				return ipc.Response{Data: map[string]string{"data": "id output"}}, nil
+			}
+		default:
+			return ipc.Response{}, fmt.Errorf("unexpected method %s", method)
+		}
+	}
+
+	err := logsCommandWithCaller([]string{"demo/api", "demo/nightly-job", "7", "--stream", "stdout", "--tail", "2"}, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "｜demo/worker｜ id output\n｜demo/nightly-job｜ schedule output\n｜demo/nightly-job｜ \n｜demo/nightly-job｜ last line\n｜demo/api｜ service output\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestLogsCommandDoesNotReadWhenAnyTargetCannotResolve(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	readCalled := false
+	caller := func(_ context.Context, method string, params interface{}) (ipc.Response, error) {
+		if method == "logs.read" {
+			readCalled = true
+			return ipc.Response{}, errors.New("read should not be called")
+		}
+		var request struct {
+			Key string `json:"Key"`
+		}
+		if err := decodeData(params, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		if request.Key == "bad" {
+			return ipc.Response{}, errors.New("target does not exist")
+		}
+		return ipc.Response{Data: map[string]string{"key": request.Key}}, nil
+	}
+
+	err := logsCommandWithCaller([]string{"good", "bad", "--stream", "stdout"}, caller)
+	if err == nil || !strings.Contains(err.Error(), `logs target "bad"`) {
+		t.Fatalf("error = %v, want bad target error", err)
+	}
+	if readCalled || output.Len() != 0 {
+		t.Fatalf("readCalled=%t output=%q, want no read and no output", readCalled, output.String())
+	}
+}
+
+func TestLogLineBufferHandlesChunksBlankLinesCRLFAndFinalFragment(t *testing.T) {
+	var lines []string
+	emit := func(line string) { lines = append(lines, line) }
+	var buffer logLineBuffer
+	buffer.write("first\r", emit)
+	buffer.write("\n\nthird\nfinal", emit)
+	buffer.flush(emit)
+
+	want := []string{"first", "", "third", "final"}
+	if strings.Join(lines, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("lines = %#v, want %#v", lines, want)
+	}
+}
+
+func TestLogWriterColorsOnlyPrefixAndDisablesColorForNonTTY(t *testing.T) {
+	var colored bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&colored, &colored, cliui.Options{Color: cliui.ColorAlways})
+	writer := newLogWriter()
+	writer.write("demo/api", "stdout", "plain stdout")
+	writer.write("demo/api", "stderr", "plain stderr")
+	text := colored.String()
+	if !strings.Contains(text, "\x1b[32m｜demo/api｜\x1b[0m plain stdout\n") {
+		t.Fatalf("colored stdout = %q, want green prefix followed by reset", text)
+	}
+	if !strings.Contains(text, "\x1b[31m｜demo/api｜\x1b[0m plain stderr\n") {
+		t.Fatalf("colored stderr = %q, want red prefix followed by reset", text)
+	}
+	if strings.Contains(text, "plain stdout\x1b") || strings.Contains(text, "plain stderr\x1b") {
+		t.Fatalf("log content inherited ANSI color: %q", text)
+	}
+
+	var plain bytes.Buffer
+	cliOutput = cliui.New(&plain, &plain, cliui.Options{Color: cliui.ColorAuto})
+	newLogWriter().write("demo/api", "stdout", "piped")
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Fatalf("non-TTY output contains ANSI: %q", plain.String())
+	}
+}
+
+func TestLogWriterKeepsConcurrentLinesIntact(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	writer := newLogWriter()
+	const count = 64
+	var wait sync.WaitGroup
+	for i := 0; i < count; i++ {
+		i := i
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			writer.write("demo/api", "stdout", fmt.Sprintf("line-%d", i))
+		}()
+	}
+	wait.Wait()
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != count {
+		t.Fatalf("line count = %d, want %d; output=%q", len(lines), count, output.String())
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "｜demo/api｜ line-") {
+			t.Fatalf("malformed output line %q", line)
+		}
 	}
 }
 

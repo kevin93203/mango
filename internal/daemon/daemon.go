@@ -1587,6 +1587,20 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "LOG_READ_FAILED", err)
 		}
 		return success(request, map[string]interface{}{"data": data, "next_offset": next})
+	case "logs.resolve":
+		var p struct{ Key string }
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		project, name, err := d.resolveLogRef(p.Key)
+		if err != nil {
+			return failure(request, processReferenceErrorCode(p.Key, "LOG_TARGET_NOT_FOUND"), err)
+		}
+		canonicalName := name
+		if strings.Contains(p.Key, "/") {
+			_, canonicalName, _ = splitKey(p.Key)
+		}
+		return success(request, map[string]string{"key": project + "/" + canonicalName})
 	case "logs.clear":
 		var p struct{ Key string }
 		if err := json.Unmarshal(request.Params, &p); err != nil {
@@ -1669,7 +1683,7 @@ func (d *Daemon) resolveLogRef(ref string) (string, string, error) {
 	if d.scheduler.Has(project + "/" + name) {
 		return project, scheduleLogName(name), nil
 	}
-	return project, name, nil
+	return "", "", fmt.Errorf("log target %q not found", ref)
 }
 
 func (d *Daemon) processExists(project, name string) bool {

@@ -148,6 +148,20 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if actionResult["key"] != "beta/worker" {
 		t.Fatalf("canonical action key = %q, want beta/worker", actionResult["key"])
 	}
+	request, err = ipc.NewRequest("logs.resolve", struct{ Key string }{"1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("service logs.resolve by id failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &actionResult); err != nil {
+		t.Fatal(err)
+	}
+	if actionResult["key"] != "beta/worker" {
+		t.Fatalf("canonical service log target = %q, want beta/worker", actionResult["key"])
+	}
 
 	writer, _, err := d.logs.Open("beta", "worker", "stdout", 1<<20, 2)
 	if err != nil {
@@ -571,6 +585,29 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatalf("reloadRegistry() error = %v", err)
 	}
+	request, err := ipc.NewRequest("logs.resolve", struct{ Key string }{"demo/nightly-job"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule logs.resolve failed: %+v", response.Error)
+	}
+	var resolved map[string]string
+	if err := decodeTestData(response.Data, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved["key"] != "demo/nightly-job" {
+		t.Fatalf("canonical schedule target = %q, want demo/nightly-job", resolved["key"])
+	}
+	request, err = ipc.NewRequest("logs.resolve", struct{ Key string }{"demo/missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if response.OK || response.Error == nil || response.Error.Code != "LOG_TARGET_NOT_FOUND" {
+		t.Fatalf("unknown log target response = %+v", response)
+	}
 	writer, _, err := d.logs.Open("demo", scheduleLogName("nightly-job"), "stdout", 1<<20, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -582,7 +619,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request, err := ipc.NewRequest("logs.read", struct {
+	request, err = ipc.NewRequest("logs.read", struct {
 		Key    string
 		Stream string
 		Tail   int
@@ -590,7 +627,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := d.Handle(context.Background(), request)
+	response = d.Handle(context.Background(), request)
 	if !response.OK {
 		t.Fatalf("schedule logs.read failed: %+v", response.Error)
 	}

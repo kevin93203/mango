@@ -38,6 +38,7 @@ const (
 	StyleMuted
 	StyleStdout
 	StyleStderr
+	StyleLogStdout
 )
 
 type Align int
@@ -333,13 +334,14 @@ func (r *Renderer) paint(style Style, text string, enabled bool) string {
 		return text
 	}
 	code := map[Style]string{
-		StyleSuccess: "32",
-		StyleWarning: "33",
-		StyleError:   "31",
-		StyleHeader:  "36",
-		StyleMuted:   "90",
-		StyleStdout:  "37",
-		StyleStderr:  "31",
+		StyleSuccess:   "32",
+		StyleWarning:   "33",
+		StyleError:     "31",
+		StyleHeader:    "36",
+		StyleMuted:     "90",
+		StyleStdout:    "37",
+		StyleStderr:    "31",
+		StyleLogStdout: "32",
 	}[style]
 	if code == "" {
 		return text
