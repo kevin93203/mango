@@ -497,8 +497,8 @@ func logsCommand(args []string) error {
 	}
 	key := args[0]
 	fs := newFlagSet("logs")
-	stream := fs.String("stream", "stdout", "stdout, stderr, or all")
-	tail := fs.Int("tail", 100, "number of lines")
+	stream := fs.String("stream", "all", "stdout, stderr, or all")
+	tail := fs.Int("tail", 15, "number of lines")
 	follow := fs.Bool("follow", false, "follow new output")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
