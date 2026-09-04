@@ -75,7 +75,7 @@ func main() {
 		if err := rejectJSON("monitor"); err != nil {
 			commandErr = err
 		} else {
-			commandErr = tui.Run(cliOutput)
+			commandErr = tui.Run(cliOutput, monitorLogs)
 		}
 	case "schedule":
 		commandErr = scheduleCommand(args[1:])
@@ -684,6 +684,27 @@ func logsCommand(args []string) error {
 	return logsCommandWithCaller(args, logsCall)
 }
 
+func monitorLogs(output *cliui.Renderer, key string, input <-chan byte) error {
+	resolved, err := resolveLogTargets([]string{key}, logsCall)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-input:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	output.Printf("\x1b[2J\x1b[H")
+	output.Printf("%s %s\n\n", output.Text(cliui.StyleHeader, fmt.Sprintf("%s logs", resolved[0].canonical)), output.Text(cliui.StyleMuted, "(press any key to return)"))
+	return followLogsTargetsWithContext(ctx, resolved, "all", 15, logsCall, newLogWriterFor(output))
+}
+
 type logsOptions struct {
 	stream string
 	tail   int
@@ -941,9 +962,13 @@ func followLogs(key, stream string, tail int) error {
 }
 
 func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
+	return followLogsTargetsWithContext(context.Background(), targets, stream, tail, caller, newLogWriter())
+}
+
+func followLogsTargetsWithContext(ctx context.Context, targets []resolvedLogTarget, stream string, tail int, caller logsCaller, writer *logWriter) error {
 	streams := logStreams(targets, stream)
 	initialEvents, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
-		return caller(context.Background(), "logs.read", struct {
+		return caller(ctx, "logs.read", struct {
 			Key           string
 			Stream        string
 			Tail          int
@@ -957,10 +982,12 @@ func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, cal
 		return data.Data, data.NextOffset, nil
 	})
 	if err := joinLogErrors(errs); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 
-	writer := newLogWriter()
 	buffers := make(map[*logStream]*logLineBuffer, len(streams))
 	for _, item := range streams {
 		buffers[item] = &logLineBuffer{}
@@ -973,8 +1000,12 @@ func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, cal
 	}
 
 	for {
+		if ctx.Err() != nil {
+			flushLogBuffers(streams, buffers, writer)
+			return nil
+		}
 		errs := readLogEventsLive(streams, func(item *logStream) (ipc.Response, error) {
-			return caller(context.Background(), "logs.read", struct {
+			return caller(ctx, "logs.read", struct {
 				Key      string
 				Stream   string
 				Offset   int64
@@ -993,14 +1024,33 @@ func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, cal
 			})
 		})
 		if err := joinLogErrors(errs); err != nil {
-			for _, item := range streams {
-				buffers[item].flush(func(line string) {
-					writer.write(item.target, item.stream, line)
-				})
+			flushLogBuffers(streams, buffers, writer)
+			if ctx.Err() != nil {
+				return nil
 			}
 			return err
 		}
-		time.Sleep(time.Second)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			flushLogBuffers(streams, buffers, writer)
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func flushLogBuffers(streams []*logStream, buffers map[*logStream]*logLineBuffer, writer *logWriter) {
+	for _, item := range streams {
+		buffers[item].flush(func(line string) {
+			writer.write(item.target, item.stream, line)
+		})
 	}
 }
 
@@ -1040,20 +1090,24 @@ func readLogEventsLive(streams []*logStream, read func(*logStream) (ipc.Response
 }
 
 type logWriter struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	output *cliui.Renderer
 }
 
-func newLogWriter() *logWriter { return &logWriter{} }
+func newLogWriter() *logWriter { return newLogWriterFor(cliOutput) }
+
+func newLogWriterFor(output *cliui.Renderer) *logWriter { return &logWriter{output: output} }
 
 func (w *logWriter) write(target, stream, line string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	output := w.output
 	style := cliui.StyleLogStdout
 	if stream == "stderr" {
 		style = cliui.StyleStderr
 	}
-	prefix := cliOutput.Text(style, "｜"+target+"｜")
-	cliOutput.Printf("%s %s\n", prefix, line)
+	prefix := output.Text(style, "｜"+target+"｜")
+	output.Printf("%s %s\n", prefix, line)
 }
 
 type logLineBuffer struct {

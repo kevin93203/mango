@@ -14,7 +14,9 @@ import (
 	"golang.org/x/term"
 )
 
-func Run(output *cliui.Renderer) error {
+type LogsHandler func(output *cliui.Renderer, key string, input <-chan byte) error
+
+func Run(output *cliui.Renderer, logsHandler LogsHandler) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		items, err := list()
 		if err != nil {
@@ -97,7 +99,7 @@ func Run(output *cliui.Renderer) error {
 				draw(true)
 			case 'l':
 				if selected < len(items) {
-					if err := showLogs(output, items[selected].Project+"/"+items[selected].Name, input); err != nil {
+					if err := logsHandler(output, items[selected].Project+"/"+items[selected].Name, input); err != nil {
 						lastErr = err.Error()
 					}
 					draw(true)
@@ -167,37 +169,6 @@ func operate(method, key string) error {
 	defer cancel()
 	_, err := ipc.Call(ctx, request)
 	return err
-}
-
-func showLogs(output *cliui.Renderer, key string, input <-chan byte) error {
-	request, _ := ipc.NewRequest("logs.read", struct {
-		Key    string
-		Stream string
-		Tail   int
-	}{key, "all", 30})
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	response, err := ipc.Call(ctx, request)
-	if err != nil {
-		return err
-	}
-	var data map[string]string
-	encoded, _ := json.Marshal(response.Data)
-	if err := json.Unmarshal(encoded, &data); err != nil {
-		return err
-	}
-	output.Printf("\x1b[2J\x1b[H")
-	output.Printf("%s %s\n\n", output.Text(cliui.StyleHeader, fmt.Sprintf("%s logs", key)), output.Text(cliui.StyleMuted, "(press any key to return)"))
-	if data["stdout"] != "" {
-		output.Printf("%s\n", output.Text(cliui.StyleStdout, "[stdout]"))
-		output.PrintStyled(cliui.StyleNone, data["stdout"])
-	}
-	if data["stderr"] != "" {
-		output.Printf("%s\n", output.Text(cliui.StyleStderr, "[stderr]"))
-		output.PrintStyled(cliui.StyleStderr, data["stderr"])
-	}
-	<-input
-	return nil
 }
 
 func showDetail(output *cliui.Renderer, item api.ServiceInfo, input <-chan byte) error {

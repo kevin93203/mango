@@ -54,6 +54,39 @@ func TestFollowLogResponseDecodesNextOffset(t *testing.T) {
 	}
 }
 
+func TestFollowLogsTargetsUsesSharedWriterAndCanBeCancelled(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reads := 0
+	err := followLogsTargetsWithContext(ctx, []resolvedLogTarget{{canonical: "demo/api"}}, "stdout", 15, func(_ context.Context, method string, _ interface{}) (ipc.Response, error) {
+		if method != "logs.read" {
+			t.Fatalf("method = %q, want logs.read", method)
+		}
+		reads++
+		switch reads {
+		case 1:
+			return ipc.Response{Data: map[string]interface{}{"data": "initial\n", "next_offset": 8}}, nil
+		case 2:
+			cancel()
+			return ipc.Response{Data: map[string]interface{}{"data": "followed\n", "next_offset": 17}}, nil
+		default:
+			return ipc.Response{}, errors.New("unexpected extra read")
+		}
+	}, newLogWriterFor(cliOutput))
+	if err != nil {
+		t.Fatalf("follow logs = %v, want cancellation to stop successfully", err)
+	}
+	want := "｜demo/api｜ initial\n｜demo/api｜ followed\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
 func TestParseLogsArgsAcceptsZeroOneAndMultipleTargets(t *testing.T) {
 	tests := []struct {
 		name   string

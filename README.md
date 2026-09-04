@@ -427,7 +427,7 @@ mango monitor
 | r | restart。 |
 | e | enable。 |
 | d | disable。 |
-| l | 查看選取 service 的最近日誌。 |
+| l | 以與 `mango logs TARGET --follow` 相同的格式追蹤選取 service 的日誌；按任意鍵返回。 |
 | Enter | 查看選取 service 的詳細資訊。 |
 | q | 離開 monitor。 |
 
