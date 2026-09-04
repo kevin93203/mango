@@ -667,6 +667,9 @@ schedules:
     command: go
     args: [run, ./examples/one-task, --iterations, "3"]
     concurrency: forbid
+    retry:
+      retries: 3
+      delay: 5s
 ~~~
 
 | 欄位 | 必填 | 預設值 | 說明 |
@@ -681,11 +684,13 @@ schedules:
 | working_dir | 否 | defaults 值 | task 工作目錄。 |
 | env | 否 | 繼承環境 | task 環境變數。 |
 | concurrency | 否 | forbid | 可選 forbid 或 allow。 |
+| retry | 否 | 不重試 | `retries` 表示初次失敗後的重試次數；`delay` 表示每次重試前的等待時間。 |
 
 排程規則：
 
 - daemon 離線期間錯過的排程不補執行。
 - forbid 會跳過上一個相同 schedule 尚未完成的執行。
+- schedule 執行失敗時，會依 `retry.retries` 與 `retry.delay` 重試；同一次 schedule run 最終只保存一筆 history。
 - cron 與 timezone 錯誤會使 config validate／apply 失敗。
 - schedule task 日誌會寫入 service log root 下的 schedule-<name> 目錄。
 

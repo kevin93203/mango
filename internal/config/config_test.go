@@ -188,6 +188,64 @@ func TestValidateSchedule(t *testing.T) {
 	}
 }
 
+func TestLoadAndEffectiveScheduleRetry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mango.yaml")
+	content := `version: 2
+
+schedules:
+  - name: job
+    cron: "0 2 * * *"
+    action: run
+    command: echo
+    retry:
+      retries: 3
+      delay: 250ms
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedules, err := file.SchedulesEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(schedules) != 1 || schedules[0].RetryCount != 3 || schedules[0].RetryDelay.String() != "250ms" {
+		t.Fatalf("effective retry = %+v, want 3 retries and 250ms delay", schedules[0])
+	}
+}
+
+func TestValidateRejectsInvalidScheduleRetry(t *testing.T) {
+	tests := []struct {
+		name  string
+		retry ScheduleRetry
+		want  string
+	}{
+		{name: "negative retries", retry: ScheduleRetry{Retries: -1}, want: "retry.retries"},
+		{name: "invalid delay", retry: ScheduleRetry{Delay: "not-a-duration"}, want: "retry.delay"},
+		{name: "negative delay", retry: ScheduleRetry{Delay: "-1s"}, want: "non-negative"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := File{
+				Version: 2,
+				Path:    filepath.Join(t.TempDir(), "mango.yaml"),
+				Schedules: []Schedule{{
+					Name: "job", Cron: "0 2 * * *", Action: "run", Command: "echo", Retry: &test.retry,
+				}},
+			}
+			err := Validate(file)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 	root := t.TempDir()
 	external := t.TempDir()

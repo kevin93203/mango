@@ -70,6 +70,9 @@ schedules:
       - --interval
       - 300ms
     concurrency: forbid
+    retry:
+      retries: 3
+      delay: 5s
 
   - name: refresh-api
     cron: "*/30 * * * *"

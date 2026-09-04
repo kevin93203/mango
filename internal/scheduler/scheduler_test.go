@@ -43,6 +43,60 @@ func TestRunNowRecordsHistory(t *testing.T) {
 	}
 }
 
+func TestRunNowRetriesFailedExecution(t *testing.T) {
+	var attempts atomic.Int32
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		if attempts.Add(1) < 3 {
+			return ExecutionResult{ExitCode: 1, Err: errors.New("temporary failure")}
+		}
+		return ExecutionResult{}
+	})
+	schedule := config.EffectiveSchedule{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		RetryCount: 2, RetryDelay: time.Millisecond,
+	}
+	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d, want initial attempt plus two retries", attempts.Load())
+	}
+	history := s.History()
+	if len(history) != 1 || history[0].ExitCode != 0 || history[0].Error != "" {
+		t.Fatalf("history = %+v, want one successful final record", history)
+	}
+}
+
+func TestRunNowStopsRetryingWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var attempts atomic.Int32
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		attempts.Add(1)
+		cancel()
+		return ExecutionResult{ExitCode: 1, Err: errors.New("temporary failure")}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		RetryCount: 3, RetryDelay: time.Second,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(ctx, "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want retry cancellation after first attempt", attempts.Load())
+	}
+}
+
 func TestListSnapshotsReportsIdleAndNextRun(t *testing.T) {
 	s := New(nil)
 	schedule := config.EffectiveSchedule{
