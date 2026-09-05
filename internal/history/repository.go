@@ -178,13 +178,19 @@ func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit 
 			counter := counterModel{Key: key, Value: 1}
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
-				DoUpdates: clause.Assignments(map[string]interface{}{"value": gorm.Expr("value + ?", 1)}),
+				DoUpdates: clause.Assignments(map[string]interface{}{"value": counterIncrementExpression(tx)}),
 			}).Create(&counter).Error; err != nil {
 				return err
 			}
 		}
 		return r.prune(tx, limit)
 	})
+}
+
+func counterIncrementExpression(db *gorm.DB) clause.Expr {
+	table := db.Statement.Quote((counterModel{}).TableName())
+	column := db.Statement.Quote("value")
+	return gorm.Expr(fmt.Sprintf("%s.%s + ?", table, column), 1)
 }
 
 func (r *Repository) Prune(ctx context.Context, limit int) error {
