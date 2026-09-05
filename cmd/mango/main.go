@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,6 +166,9 @@ func initCommand(args []string) error {
 		if err := os.WriteFile(abs, data, 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", abs, err)
 		}
+		if err := os.Chmod(abs, 0o600); err != nil {
+			return fmt.Errorf("set permissions on %s: %w", abs, err)
+		}
 	} else {
 		file, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -183,9 +187,53 @@ func initCommand(args []string) error {
 			return fmt.Errorf("close %s: %w", abs, err)
 		}
 	}
+	if err := copyExampleFiles(filepath.Dir(abs), *force); err != nil {
+		return err
+	}
 
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Example configuration written to %s", abs)))
 	return nil
+}
+
+func copyExampleFiles(root string, force bool) error {
+	return fs.WalkDir(mango.ExampleFiles(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		data, err := fs.ReadFile(mango.ExampleFiles(), path)
+		if err != nil {
+			return fmt.Errorf("read embedded example %s: %w", path, err)
+		}
+		destination := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return fmt.Errorf("create example directory for %s: %w", destination, err)
+		}
+
+		if !force {
+			if info, err := os.Stat(destination); err == nil {
+				if info.IsDir() {
+					return fmt.Errorf("example path %q is a directory", destination)
+				}
+				return nil
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("check example path %s: %w", destination, err)
+			}
+		}
+
+		if err := os.WriteFile(destination, data, 0o644); err != nil {
+			return fmt.Errorf("write example %s: %w", destination, err)
+		}
+		if force {
+			if err := os.Chmod(destination, 0o644); err != nil {
+				return fmt.Errorf("set permissions on example %s: %w", destination, err)
+			}
+		}
+		return nil
+	})
 }
 
 func daemonCommand(layout paths.Layout, args []string) error {
