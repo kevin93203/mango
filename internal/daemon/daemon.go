@@ -19,6 +19,7 @@ import (
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/health"
 	"github.com/kevin93203/mango/internal/history"
+	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/metrics"
@@ -166,6 +167,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := paths.Ensure(d.layout); err != nil {
 		return err
 	}
+	ipc.SetEndpoint(d.layout.SocketPath)
+	lockPath := d.layout.LockPath
+	if lockPath == "" {
+		lockPath = filepath.Join(d.layout.Runtime, "daemon.lock")
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	lock, err := instance.Acquire(lockPath)
+	if err != nil {
+		if errors.Is(err, instance.ErrAlreadyRunning) {
+			return instance.ErrAlreadyRunning
+		}
+		return fmt.Errorf("acquire daemon instance lock: %w", err)
+	}
+	defer lock.Close()
+
+	if d.daemonAlreadyRunning() {
+		return instance.ErrAlreadyRunning
+	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	err = ipc.PrepareEndpoint(probeCtx)
+	cancelProbe()
+	if err != nil {
+		return fmt.Errorf("prepare daemon IPC endpoint: %w", err)
+	}
+
 	daemonConfigPath := d.layout.DaemonConfig
 	if daemonConfigPath == "" {
 		daemonConfigPath = filepath.Join(d.layout.Root, "daemon.yaml")
@@ -173,13 +201,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	daemonConfig, err := config.LoadDaemonConfig(daemonConfigPath)
 	if err != nil {
 		return err
-	}
-	ipc.SetEndpoint(d.layout.SocketPath)
-	if d.daemonAlreadyRunning() {
-		return errors.New("daemon is already running")
-	}
-	if runtime.GOOS != "windows" {
-		_ = os.Remove(d.layout.SocketPath)
 	}
 	d.mu.Lock()
 	runCtx, cancel := context.WithCancel(ctx)
@@ -210,13 +231,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.scheduler.RefreshHistorySummary(d.ctx); err != nil {
 		return fmt.Errorf("load latest history summary: %w", err)
 	}
-	if err := d.writePID(); err != nil {
-		return err
-	}
 	listener, err := ipc.Listen(d.layout.SocketPath)
 	if err != nil {
-		d.removePID()
 		return fmt.Errorf("listen for daemon IPC: %w", err)
+	}
+	if err := d.writePID(); err != nil {
+		_ = listener.Close()
+		return err
 	}
 	d.scheduler.Start()
 	return ipc.Serve(d.ctx, listener, d.Handle)

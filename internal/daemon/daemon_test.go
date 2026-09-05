@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/metrics"
 	"github.com/kevin93203/mango/internal/paths"
@@ -19,6 +21,68 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/workflow"
 )
+
+func TestRunUsesInstanceLock(t *testing.T) {
+	root, err := os.MkdirTemp("", "mgo-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	layout := testLayout(root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- New(layout).Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		request, err := ipc.NewRequest("health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		callCtx, callCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, callErr := ipc.Call(callCtx, request)
+		callCancel()
+		if callErr == nil {
+			ready = true
+			break
+		}
+		select {
+		case err := <-firstDone:
+			if errors.Is(err, os.ErrPermission) {
+				t.Skipf("Unix socket bind is unavailable in this environment: %v", err)
+			}
+			t.Fatalf("first daemon exited before becoming ready: %v", err)
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("first daemon did not become ready")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- New(layout).Run(context.Background()) }()
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, instance.ErrAlreadyRunning) {
+			t.Fatalf("second daemon error = %v, want ErrAlreadyRunning", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second daemon did not fail immediately")
+	}
+
+	cancel()
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first daemon shutdown error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first daemon did not stop")
+	}
+}
 
 func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	root := t.TempDir()
@@ -31,6 +95,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		SocketPath: filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:  filepath.Join(root, "daemon.log"),
 		PIDFile:    filepath.Join(root, "runtime", "daemon.pid"),
+		LockPath:   filepath.Join(root, "runtime", "daemon.lock"),
 	}
 	if err := registry.Save(layout.Registry, registry.File{
 		Version: 3,
@@ -1557,6 +1622,7 @@ func testLayout(root string) paths.Layout {
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
+		LockPath: filepath.Join(root, "runtime", "daemon.lock"),
 	}
 }
 

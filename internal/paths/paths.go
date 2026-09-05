@@ -15,6 +15,7 @@ type Layout struct {
 	SocketPath   string
 	DaemonLog    string
 	PIDFile      string
+	LockPath     string
 }
 
 func Default() (Layout, error) {
@@ -29,6 +30,7 @@ func Default() (Layout, error) {
 			DaemonConfig: filepath.Join(root, "daemon.yaml"),
 			SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 			DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
+			LockPath: filepath.Join(root, "runtime", "daemon.lock"),
 		}, nil
 	}
 	config, err := os.UserConfigDir()
@@ -48,6 +50,7 @@ func Default() (Layout, error) {
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(runtime, "mango.sock"),
 		DaemonLog:    filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),
+		LockPath: filepath.Join(runtime, "daemon.lock"),
 	}, nil
 }
 
