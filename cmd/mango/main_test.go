@@ -13,13 +13,114 @@ import (
 	"testing"
 	"time"
 
+	mango "github.com/kevin93203/mango"
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
 )
+
+func TestInitCommandCreatesDefaultConfig(t *testing.T) {
+	dir := t.TempDir()
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(workingDir)
+
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	if err := initCommand(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "mango.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != mango.ExampleConfig() {
+		t.Fatal("default config does not match the embedded example")
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("generated config is invalid: %v", err)
+	}
+	if !strings.Contains(output.String(), path) {
+		t.Fatalf("output = %q, want generated path %q", output.String(), path)
+	}
+}
+
+func TestInitCommandCreatesParentDirectoriesAndValidatesCustomConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config", "custom.yaml")
+	if err := initCommand([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("parent directory was not created: %v", err)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("generated custom config is invalid: %v", err)
+	}
+}
+
+func TestInitCommandRefusesExistingFileUnlessForced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mango.yaml")
+	original := []byte("original: true\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := initCommand([]string{path}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("init existing file error = %v, want already-exists error", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("existing file changed after rejected init: %q", data)
+	}
+
+	if err := initCommand([]string{path, "--force"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != mango.ExampleConfig() {
+		t.Fatal("--force did not write the embedded example")
+	}
+}
+
+func TestInitCommandValidatesArgumentsAndJSON(t *testing.T) {
+	if err := initCommand([]string{"config.toml"}); err == nil || !strings.Contains(err.Error(), ".yaml") {
+		t.Fatalf("invalid extension error = %v, want yaml extension error", err)
+	}
+	if err := initCommand([]string{"one.yaml", "two.yaml"}); err == nil || !strings.Contains(err.Error(), "at most one PATH") {
+		t.Fatalf("too many paths error = %v, want positional argument error", err)
+	}
+
+	previousJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = previousJSON }()
+	if err := initCommand(nil); err == nil || !strings.Contains(err.Error(), "--json is not supported for init") {
+		t.Fatalf("JSON error = %v, want unsupported-json error", err)
+	}
+}
 
 func TestPrintProcessTableShowsIndentedChildRows(t *testing.T) {
 	var output bytes.Buffer

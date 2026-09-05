@@ -108,11 +108,12 @@ Start the daemon in one terminal:
 In Windows PowerShell, use `.\bin\mangod.exe run` and replace
 `./bin/mango` in the examples below with `.\bin\mango.exe`.
 
-In another terminal, register and apply the example project:
+In another terminal, generate, validate, register, and apply the example project:
 
 ```sh
-./bin/mango config validate mango.example.yaml
-./bin/mango project add demo mango.example.yaml
+./bin/mango init
+./bin/mango config validate mango.yaml
+./bin/mango project add demo mango.yaml
 ./bin/mango project apply demo
 ./bin/mango ls
 ```
@@ -226,6 +227,23 @@ mango <command> [subcommand] [arguments] [options]
 ```
 
 ### Projects and configuration
+
+```sh
+mango init [PATH] [--force]
+```
+
+Creates a complete example configuration. The default output path is
+`./mango.yaml`; a parent directory is created when needed. Existing files are
+not overwritten unless `--force` is provided. `init` only writes the YAML; it
+does not register or apply a project.
+
+```sh
+mango init
+mango init ./config/mango.yaml
+mango init ./mango.yaml --force
+```
+
+Validate and register the generated configuration separately:
 
 ```sh
 mango config validate PATH
@@ -637,8 +655,9 @@ Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
 that setting. `--json` is supported by daemon status, project listing/apply,
 service inspection and lifecycle commands, task/workflow/schedule queries,
 startup status, and `doctor`. It is not supported by interactive monitor/log
-commands, configuration validation, daemon start/stop/restart/logs, project
-add/remove/rename, or startup install/uninstall.
+commands, configuration initialization/validation, daemon
+start/stop/restart/logs, project add/remove/rename, or startup
+install/uninstall.
 
 `--` ends global-option parsing and passes remaining values as command
 arguments.
