@@ -18,6 +18,7 @@ import (
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/health"
+	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/metrics"
@@ -43,11 +44,12 @@ const (
 )
 
 type Daemon struct {
-	layout    paths.Layout
-	logs      *logging.Manager
-	metrics   *metrics.Collector
-	scheduler *scheduler.Scheduler
-	workflow  *workflow.Executor
+	layout      paths.Layout
+	logs        *logging.Manager
+	metrics     *metrics.Collector
+	scheduler   *scheduler.Scheduler
+	historyRepo scheduler.HistoryRepository
+	workflow    *workflow.Executor
 
 	mu                    sync.RWMutex
 	registry              registry.File
@@ -181,12 +183,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	d.scheduler.SetContext(d.ctx)
 	defer d.shutdown()
+	if err := d.scheduler.SetHistoryLimit(daemonConfig.ScheduleHistoryLimit); err != nil {
+		return err
+	}
+	historyRepo, err := openHistoryRepository(d.layout, daemonConfig.History.Database)
+	if err != nil {
+		return err
+	}
+	if err := d.scheduler.SetHistoryRepository(historyRepo); err != nil {
+		_ = historyRepo.Close()
+		return fmt.Errorf("load history database state: %w", err)
+	}
+	d.historyRepo = historyRepo
 	if err := d.reloadRegistryForStart(); err != nil {
 		return err
 	}
-	historyPath := filepath.Join(d.layout.State, "execution-history.json")
-	if err := d.scheduler.LoadHistory(historyPath, daemonConfig.ScheduleHistoryLimit); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	if err := d.scheduler.RefreshHistorySummary(d.ctx); err != nil {
+		return fmt.Errorf("load latest history summary: %w", err)
 	}
 	if err := d.writePID(); err != nil {
 		return err
@@ -275,6 +288,36 @@ func (d *Daemon) shutdown() {
 	if runtime.GOOS != "windows" {
 		_ = os.Remove(d.layout.SocketPath)
 	}
+	if d.historyRepo != nil {
+		_ = d.historyRepo.Close()
+		d.historyRepo = nil
+	}
+}
+
+func openHistoryRepository(layout paths.Layout, database config.DatabaseConfig) (scheduler.HistoryRepository, error) {
+	if err := database.Validate(); err != nil {
+		return nil, err
+	}
+	driver := strings.ToLower(strings.TrimSpace(database.Driver))
+	if driver == "" {
+		driver = config.DefaultHistoryDatabaseDriver
+	}
+	dsn := database.DSN
+	if database.DSNEnv != "" {
+		dsn = os.Getenv(database.DSNEnv)
+		if dsn == "" {
+			return nil, fmt.Errorf("history database environment variable %q is empty", database.DSNEnv)
+		}
+	}
+	path := database.Path
+	if driver == "sqlite" {
+		if path == "" {
+			path = filepath.Join(layout.State, "history.db")
+		} else if !filepath.IsAbs(path) {
+			path = filepath.Join(layout.Root, path)
+		}
+	}
+	return history.Open(history.Config{Driver: driver, Path: path, DSN: dsn})
 }
 
 func (d *Daemon) reloadRegistry() error {
@@ -473,6 +516,11 @@ func (d *Daemon) applyProject(name, path string) error {
 	d.workflow.Apply(d.allTasksWith(tasks, name), d.allWorkflowsWith(workflows, name))
 	if err := d.scheduler.Apply(d.allSchedulesWith(schedules, name)); err != nil {
 		return err
+	}
+	if d.historyRepo != nil {
+		if err := d.scheduler.RefreshHistorySummary(d.executionContext()); err != nil {
+			return fmt.Errorf("refresh history summary: %w", err)
+		}
 	}
 	now := time.Now()
 	d.mu.Lock()
@@ -708,7 +756,15 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 	}
 	d.mu.RUnlock()
 	d.workflow.Apply(tasks, workflows)
-	_ = d.scheduler.Apply(schedules)
+	if err := d.scheduler.Apply(schedules); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: apply schedules: %v\n", err)
+		return
+	}
+	if d.historyRepo != nil {
+		if err := d.scheduler.RefreshHistorySummary(d.executionContext()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: refresh history summary: %v\n", err)
+		}
+	}
 }
 
 func (d *Daemon) startManaged(projectName string, managed *managedProcess) error {
@@ -2119,27 +2175,18 @@ func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInf
 	latest := scheduler.TaskRecord{}
 	var latestTrigger scheduler.TriggerRef
 	hasLatest := false
-	for _, record := range d.scheduler.HistoryTail(0) {
-		if record.Project != snapshot.Task.Project {
-			continue
-		}
-		if record.TargetType == "task" && record.Target == snapshot.Task.Name {
-			candidate := scheduler.TaskRecord{Started: record.Started, Finished: record.Finished, DurationSeconds: recordDurationSeconds(record), Status: record.Status, ExitCode: record.ExitCode, Error: record.Error}
+	if records, err := d.queryHistory(historyRequest{
+		Tail: 1, TargetType: "task", Project: snapshot.Task.Project, Name: snapshot.Task.Name,
+	}); err == nil && len(records) > 0 {
+		record := records[len(records)-1]
+		if record.TargetType == "task" {
+			latest = scheduler.TaskRecord{Started: record.Started, Finished: record.Finished, DurationSeconds: recordDurationSeconds(record), Status: record.Status, ExitCode: record.ExitCode, Error: record.Error}
 			if len(record.Tasks) > 0 {
-				candidate = record.Tasks[0]
+				latest = record.Tasks[0]
 			}
-			if !hasLatest || candidate.Started.After(latest.Started) {
-				latest, latestTrigger, hasLatest = candidate, record.Trigger, true
-			}
-			continue
-		}
-		if record.TargetType != "workflow" {
-			continue
-		}
-		for _, task := range record.Tasks {
-			if task.Task == snapshot.Task.Name && (!hasLatest || task.Started.After(latest.Started)) {
-				latest, latestTrigger, hasLatest = task, record.Trigger, true
-			}
+			latestTrigger, hasLatest = record.Trigger, true
+		} else if len(record.Tasks) > 0 {
+			latest, latestTrigger, hasLatest = record.Tasks[0], record.Trigger, true
 		}
 	}
 	if hasLatest {
@@ -2181,11 +2228,9 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 			info.Runs = d.scheduler.RunCount("workflow", project, name)
 			info.NextRun, info.NextTrigger = d.nextRunForTarget("workflow", project, name)
 			var latest *scheduler.Record
-			for _, record := range d.scheduler.HistoryTail(0) {
-				if record.Project == project && record.TargetType == "workflow" && record.Target == name && (latest == nil || record.Started.After(latest.Started)) {
-					copyRecord := record
-					latest = &copyRecord
-				}
+			if records, err := d.queryHistory(historyRequest{Tail: 1, TargetType: "workflow", Project: project, Name: name}); err == nil && len(records) > 0 {
+				latestRecord := records[len(records)-1]
+				latest = &latestRecord
 			}
 			if latest != nil {
 				if !running {
@@ -2283,44 +2328,10 @@ func (d *Daemon) queryHistory(request historyRequest) ([]scheduler.Record, error
 			return nil, fmt.Errorf("target: %w", err)
 		}
 	}
-	result := make([]scheduler.Record, 0)
-	for _, record := range d.scheduler.HistoryTail(0) {
-		if request.TriggerType != "" && record.Trigger.Type != request.TriggerType {
-			continue
-		}
-		if request.Trigger != "" && record.Trigger.Name != request.Trigger {
-			continue
-		}
-		if project != "" && record.Project != project {
-			continue
-		}
-		if request.TargetType == "workflow" && record.TargetType != "workflow" {
-			continue
-		}
-		if request.TargetType == "workflow" && name != "" && record.Target != name {
-			continue
-		}
-		if request.TargetType == "task" && !recordContainsTask(record, project, name) {
-			continue
-		}
-		if request.TargetType == "" && project != "" && name != "" && !recordMatchesTarget(record, project, name) {
-			continue
-		}
-		if request.TargetType != "task" && request.TargetType != "workflow" && name != "" && record.Target != name {
-			continue
-		}
-		if request.TargetType == "task" && record.TargetType == "workflow" && name != "" {
-			matchingTasks := make([]scheduler.TaskRecord, 0)
-			for _, task := range record.Tasks {
-				if task.Task == name {
-					matchingTasks = append(matchingTasks, task)
-				}
-			}
-			record.Tasks = matchingTasks
-		}
-		result = append(result, record)
-	}
-	return tailRecords(result, request.Tail), nil
+	return d.scheduler.QueryHistory(d.executionContext(), scheduler.HistoryQuery{
+		Tail: request.Tail, TriggerType: request.TriggerType, Trigger: request.Trigger,
+		TargetType: request.TargetType, Project: project, Name: name,
+	})
 }
 
 func scheduleLastTrigger(lastRun *time.Time, name string) *api.TriggerInfo {
@@ -2335,44 +2346,6 @@ func scheduleNextTrigger(nextRun *time.Time, name string) *api.TriggerInfo {
 		return nil
 	}
 	return triggerInfo(scheduler.ScheduleTrigger(name))
-}
-
-func recordMatchesTarget(record scheduler.Record, project, name string) bool {
-	if project != "" && record.Project != project {
-		return false
-	}
-	if name == "" {
-		return true
-	}
-	if record.Target == name {
-		return true
-	}
-	return recordContainsTask(record, project, name)
-}
-
-func recordContainsTask(record scheduler.Record, project, name string) bool {
-	if project != "" && record.Project != project {
-		return false
-	}
-	if record.TargetType == "task" && (name == "" || record.Target == name) {
-		return true
-	}
-	if record.TargetType != "workflow" {
-		return false
-	}
-	for _, task := range record.Tasks {
-		if name == "" || task.Task == name {
-			return true
-		}
-	}
-	return false
-}
-
-func tailRecords(records []scheduler.Record, tail int) []scheduler.Record {
-	if tail <= 0 || tail >= len(records) {
-		return records
-	}
-	return records[len(records)-tail:]
 }
 
 func (d *Daemon) readTail(request ipc.Request, project, name, stream string, lines int, includeOffset bool) ipc.Response {

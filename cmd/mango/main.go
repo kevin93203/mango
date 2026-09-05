@@ -1610,7 +1610,7 @@ func startupCommand(layout paths.Layout, args []string) error {
 }
 
 func doctorCommand(layout paths.Layout) error {
-	executionHistoryPath := filepath.Join(layout.State, "execution-history.json")
+	historyDriver, historyLocation := historyDatabaseDisplay(layout)
 	registryOK := true
 	registryError := ""
 	if _, err := os.Stat(layout.Registry); err != nil && !os.IsNotExist(err) {
@@ -1629,8 +1629,9 @@ func doctorCommand(layout paths.Layout) error {
 	if jsonOutput {
 		report := map[string]interface{}{
 			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry, "logs": layout.Logs,
-			"daemon_log": layout.DaemonLog, "execution_history": executionHistoryPath,
-			"registry_ok": registryOK, "registry_error": registryError,
+			"daemon_log": layout.DaemonLog, "execution_history": historyLocation,
+			"history_database": map[string]string{"driver": historyDriver, "location": historyLocation},
+			"registry_ok":      registryOK, "registry_error": registryError,
 			"daemon": daemonData,
 		}
 		if daemonExecutableErr == nil {
@@ -1653,7 +1654,7 @@ func doctorCommand(layout paths.Layout) error {
 		{{Text: "registry"}, {Text: layout.Registry}},
 		{{Text: "logs root"}, {Text: layout.Logs}},
 		{{Text: "daemon log"}, {Text: layout.DaemonLog}},
-		{{Text: "execution history"}, {Text: executionHistoryPath}},
+		{{Text: "history database"}, {Text: historyLocation}},
 		{{Text: "registry status"}, {Text: doctorStatus(registryOK, registryError)}},
 		{{Text: "daemon"}, {Text: doctorStatus(daemonData["status"] == "ok" || daemonData["status"] == "degraded", fmt.Sprint(daemonData["status"]))}},
 	})
@@ -1668,6 +1669,35 @@ func doctorCommand(layout paths.Layout) error {
 		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: startupErr.Error(), Style: cliui.StyleError}}})
 	}
 	return nil
+}
+
+func historyDatabaseDisplay(layout paths.Layout) (string, string) {
+	configPath := layout.DaemonConfig
+	if configPath == "" {
+		configPath = filepath.Join(layout.Root, "daemon.yaml")
+	}
+	daemonConfig, err := config.LoadDaemonConfig(configPath)
+	if err != nil {
+		return config.DefaultHistoryDatabaseDriver, filepath.Join(layout.State, "history.db")
+	}
+	database := daemonConfig.History.Database
+	driver := database.Driver
+	if driver == "" {
+		driver = config.DefaultHistoryDatabaseDriver
+	}
+	if driver == "sqlite" {
+		path := database.Path
+		if path == "" {
+			path = filepath.Join(layout.State, "history.db")
+		} else if !filepath.IsAbs(path) {
+			path = filepath.Join(layout.Root, path)
+		}
+		return driver, path
+	}
+	if database.DSNEnv != "" {
+		return driver, "dsn from " + database.DSNEnv
+	}
+	return driver, "configured dsn"
 }
 
 func call(method string, params interface{}) (ipc.Response, error) {
