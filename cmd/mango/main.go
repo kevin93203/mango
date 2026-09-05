@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	mango "github.com/kevin93203/mango"
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
@@ -58,6 +59,8 @@ func main() {
 	}
 	var commandErr error
 	switch args[0] {
+	case "init":
+		commandErr = initCommand(args[1:])
 	case "daemon":
 		commandErr = daemonCommand(layout, args[1:])
 	case "project":
@@ -104,6 +107,7 @@ func usage() {
 		"Global options: --color=auto|always|never, --json (where supported)",
 		"",
 		"Commands:",
+		"  init [PATH] [--force]",
 		"  daemon start|stop|restart|status|logs",
 		"  daemon logs [--tail N] [--follow]",
 		"  project add NAME PATH",
@@ -124,6 +128,64 @@ func usage() {
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
+}
+
+func initCommand(args []string) error {
+	if err := rejectJSON("init"); err != nil {
+		return err
+	}
+
+	flags := newFlagSet("init")
+	force := flags.Bool("force", false, "overwrite an existing configuration file")
+	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+		return err
+	}
+	if len(flags.Args()) > 1 {
+		return errors.New("init accepts at most one PATH")
+	}
+
+	path := "mango.yaml"
+	if len(flags.Args()) == 1 {
+		path = flags.Args()[0]
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".yaml") {
+		return fmt.Errorf("unsupported config file %q: only .yaml files are supported", path)
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve init path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return fmt.Errorf("create init directory: %w", err)
+	}
+
+	data := []byte(mango.ExampleConfig())
+	if *force {
+		if err := os.WriteFile(abs, data, 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", abs, err)
+		}
+	} else {
+		file, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("configuration file %q already exists; use --force to overwrite", abs)
+			}
+			return fmt.Errorf("create %s: %w", abs, err)
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(abs)
+			return fmt.Errorf("write %s: %w", abs, err)
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(abs)
+			return fmt.Errorf("close %s: %w", abs, err)
+		}
+	}
+
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Example configuration written to %s", abs)))
+	return nil
 }
 
 func daemonCommand(layout paths.Layout, args []string) error {
