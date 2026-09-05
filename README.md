@@ -449,11 +449,13 @@ Schedule 只負責 cron trigger；它透過 `target_type`／`target` 觸發 work
 ~~~text
 mango schedule ls
 mango schedule run PROJECT/SCHEDULE
-mango workflow ls|run|status|history PROJECT/WORKFLOW
+mango workflow ls|run|status|history [PROJECT/WORKFLOW]
 mango task ls|run|history PROJECT/TASK
 ~~~
 
 `schedule ls` 只顯示 schedule、cron、timezone、target type、target 與 next run。`workflow history` 和 `task history` 查詢共用的 `state/execution-history.json`；`schedule_history_limit` 仍是這個檔案的 retention 設定。
+
+不指定 workflow 時，`mango workflow history` 在 TTY 中會啟動互動式 history browser，可依序瀏覽 workflow、歷次 run、task/node、attempt 與完整 error/stderr。使用 `j`／`k` 或方向鍵移動，Enter 進入下一層，Esc／Backspace 返回，`r` 重新載入，`n` 或 PageDown 載入較舊紀錄，`q` 離開。指定 `PROJECT/WORKFLOW` 時仍輸出純文字表格；`--tasks` 會額外輸出該 workflow 的 task/node 執行資料。非 TTY 環境則輸出最近 100 筆 workflow run 表格。
 
 Task 的 `timeout` 從 process 成功啟動後開始計時。逾時會以 exit code 124 強制終止整個 process tree，並視為失敗，沿用 task 的 retry；每次 retry 都有獨立 timeout。daemon shutdown 則維持 graceful cancellation。
 

@@ -119,7 +119,7 @@ func usage() {
 		"  logs clear TARGET",
 		"  monitor",
 		"  schedule ls|run PROJECT/SCHEDULE",
-		"  workflow ls|run|status|history PROJECT/WORKFLOW",
+		"  workflow ls|run|status|history [PROJECT/WORKFLOW]",
 		"  task ls|run|history PROJECT/TASK",
 		"  startup install|uninstall|status",
 		"  doctor",
@@ -1299,6 +1299,9 @@ func workflowCommandWithCaller(args []string, caller func(string, interface{}) (
 	}
 	method := ""
 	var params interface{}
+	historyTarget := ""
+	showHistoryTasks := false
+	historyTail := 100
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
@@ -1318,20 +1321,44 @@ func workflowCommandWithCaller(args []string, caller func(string, interface{}) (
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if len(fs.Args()) != 1 {
-			return errors.New("workflow history requires PROJECT/WORKFLOW")
+		if len(fs.Args()) > 1 {
+			return errors.New("workflow history accepts at most one PROJECT/WORKFLOW")
 		}
 		if *tail < 0 {
 			return errors.New("workflow history tail must be non-negative")
 		}
 		method = "workflow.history"
-		params = struct {
-			Key   string `json:"key"`
-			Tail  int    `json:"tail"`
-			Tasks bool   `json:"tasks"`
-		}{fs.Args()[0], *tail, *tasks}
+		historyTail = *tail
+		showHistoryTasks = *tasks
+		if len(fs.Args()) == 1 {
+			historyTarget = fs.Args()[0]
+			params = struct {
+				Key   string `json:"key"`
+				Tail  int    `json:"tail"`
+				Tasks bool   `json:"tasks"`
+			}{historyTarget, *tail, *tasks}
+		} else {
+			params = struct {
+				Tail int `json:"tail"`
+			}{*tail}
+		}
 	default:
 		return fmt.Errorf("unknown workflow command %q", args[0])
+	}
+	if method == "workflow.history" && historyTarget == "" && !jsonOutput {
+		return tui.RunWorkflowHistory(cliOutput, func(tail int) ([]scheduler.Record, error) {
+			response, err := caller("workflow.history", struct {
+				Tail int `json:"tail"`
+			}{tail})
+			if err != nil {
+				return nil, err
+			}
+			var history []scheduler.Record
+			if err := decodeData(response.Data, &history); err != nil {
+				return nil, err
+			}
+			return history, nil
+		}, historyTail, showHistoryTasks)
 	}
 	response, err := caller(method, params)
 	if err != nil {
@@ -1360,7 +1387,11 @@ func workflowCommandWithCaller(args []string, caller func(string, interface{}) (
 		if err := decodeData(response.Data, &history); err != nil {
 			return err
 		}
-		printExecutionHistory("WORKFLOW", history)
+		if showHistoryTasks {
+			printWorkflowHistoryTasks(history)
+		} else {
+			printExecutionHistory("WORKFLOW", history)
+		}
 	case "workflow.run":
 		var result map[string]string
 		if err := decodeData(response.Data, &result); err != nil {
@@ -1848,6 +1879,45 @@ func printExecutionHistory(kind string, history []scheduler.Record) {
 		})
 	}
 	cliOutput.Table([]string{kind, "TRIGGER", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
+}
+
+func printWorkflowHistoryTasks(history []scheduler.Record) {
+	if len(history) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No workflow execution history."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0)
+	for _, record := range history {
+		if record.TargetType != "workflow" {
+			continue
+		}
+		for _, task := range record.Tasks {
+			status := task.Status
+			if status == "" {
+				status = "success"
+				if task.Error != "" || task.ExitCode != 0 {
+					status = "failed"
+				}
+			}
+			rows = append(rows, []cliui.Cell{
+				{Text: record.Project + "/" + record.Target},
+				{Text: formatTime(record.Started)},
+				{Text: task.Node},
+				{Text: task.Task},
+				{Text: formatTime(task.Started)},
+				{Text: formatScheduleDuration(task.DurationSeconds), Style: zeroStyle(task.DurationSeconds)},
+				{Text: fmt.Sprintf("%d", len(task.Attempts)), Align: cliui.AlignRight},
+				{Text: fmt.Sprintf("%d", task.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
+				{Text: status, Style: cliui.StateStyle(status)},
+				{Text: compactScheduleText(task.Error), Style: errorStyle(task.Error)},
+			})
+		}
+	}
+	if len(rows) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task records."))
+		return
+	}
+	cliOutput.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func printScheduleHistory(history []scheduler.Record, showAttempts bool) {

@@ -328,6 +328,72 @@ func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	}
 }
 
+func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	firstStarted := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	secondStarted := firstStarted.Add(time.Minute)
+	attempt := scheduler.Attempt{Number: 1, Started: firstStarted, Finished: firstStarted.Add(time.Second), ExitCode: 0}
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "task", Target: "standalone", Started: firstStarted,
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "workflow", Target: "old", Started: firstStarted,
+		Finished: firstStarted.Add(time.Second), Status: scheduler.StatusSuccess,
+		Tasks: []scheduler.TaskRecord{{Node: "build", Task: "compile", Status: scheduler.StatusSuccess, Attempts: []scheduler.Attempt{attempt}}},
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "workflow", Target: "new", Started: secondStarted,
+		Finished: secondStarted.Add(time.Second), Status: scheduler.StatusSuccess,
+	})
+
+	request, err := ipc.NewRequest("workflow.history", struct {
+		Tail int `json:"tail"`
+	}{Tail: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("workflow.history failed: %+v", response.Error)
+	}
+	var records []scheduler.Record
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Target != "new" {
+		t.Fatalf("records = %+v, want newest workflow only", records)
+	}
+
+	request, err = ipc.NewRequest("workflow.history", struct {
+		Key  string `json:"key"`
+		Tail int    `json:"tail"`
+	}{Key: "demo/old", Tail: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("targeted workflow.history failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || len(records[0].Tasks) != 1 || len(records[0].Tasks[0].Attempts) != 1 {
+		t.Fatalf("targeted records = %+v, want nested task attempt", records)
+	}
+
+	request, err = ipc.NewRequest("workflow.history", struct {
+		Tail int `json:"tail"`
+	}{Tail: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
+		t.Fatalf("negative tail response = %+v, want BAD_PARAMS", response)
+	}
+}
+
 func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

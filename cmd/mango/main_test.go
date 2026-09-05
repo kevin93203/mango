@@ -1094,6 +1094,116 @@ func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
 	}
 }
 
+func TestWorkflowHistoryWithoutTargetUsesWorkflowHistoryLoader(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	var method string
+	var params interface{}
+	err := workflowCommandWithCaller([]string{"history"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		params = gotParams
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: "manual",
+			Started: started, Finished: started.Add(time.Second), Status: scheduler.StatusSuccess,
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "workflow.history" {
+		t.Fatalf("method = %q, want workflow.history", method)
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"tail":100}` {
+		t.Fatalf("params = %s, want {\"tail\":100}", encoded)
+	}
+	if !strings.Contains(output.String(), "demo/pipeline") || !strings.Contains(output.String(), "manual") {
+		t.Fatalf("output = %q, want workflow history table", output.String())
+	}
+}
+
+func TestWorkflowHistoryTasksTextOutput(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	err := workflowCommandWithCaller([]string{"history", "--tasks", "demo/pipeline"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.Record{{
+			Project: "demo", TargetType: "workflow", Target: "pipeline", Started: started,
+			Tasks: []scheduler.TaskRecord{{
+				Node: "build", Task: "compile", Status: scheduler.StatusSuccess,
+				Started: started, DurationSeconds: 1.5,
+				Attempts: []scheduler.Attempt{{Number: 1, ExitCode: 0}},
+			}},
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"NODE", "TASK", "build", "compile", "ATTEMPTS"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output = %q, want %q", text, want)
+		}
+	}
+}
+
+func TestWorkflowHistoryWithoutTargetJSONDoesNotEnterTUI(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+
+	called := false
+	err := workflowCommandWithCaller([]string{"history", "--tail", "7"}, func(method string, params interface{}) (ipc.Response, error) {
+		called = true
+		if method != "workflow.history" {
+			t.Fatalf("method = %q, want workflow.history", method)
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != `{"tail":7}` {
+			t.Fatalf("params = %s, want {\"tail\":7}", encoded)
+		}
+		return ipc.Response{Data: []scheduler.Record{{Project: "demo", TargetType: "workflow", Target: "pipeline"}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("history caller was not invoked")
+	}
+	var records []scheduler.Record
+	if err := json.Unmarshal(output.Bytes(), &records); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(records) != 1 || records[0].Target != "pipeline" {
+		t.Fatalf("records = %+v, want workflow record", records)
+	}
+}
+
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
