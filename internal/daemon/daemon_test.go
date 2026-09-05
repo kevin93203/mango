@@ -76,6 +76,42 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	}
 }
 
+func TestDaemonStopWaitsForShutdown(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	cancelled := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	d.mu.Lock()
+	d.cancel = func() { close(cancelled) }
+	d.shutdownDone = shutdownDone
+	d.mu.Unlock()
+
+	responseCh := make(chan ipc.Response, 1)
+	go func() {
+		responseCh <- d.Handle(context.Background(), requestForMethod(t, "daemon.stop"))
+	}()
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("daemon.stop did not cancel the daemon")
+	}
+	select {
+	case response := <-responseCh:
+		t.Fatalf("daemon.stop returned before shutdown completed: %+v", response)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(shutdownDone)
+	select {
+	case response := <-responseCh:
+		if !response.OK {
+			t.Fatalf("daemon.stop failed: %+v", response.Error)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon.stop did not return after shutdown completed")
+	}
+}
+
 func TestOpenHistoryRepositoryDefaultsToSQLiteAndIgnoresLegacyJSON(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

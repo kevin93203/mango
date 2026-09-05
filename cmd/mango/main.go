@@ -255,16 +255,18 @@ func daemonCommand(layout paths.Layout, args []string) error {
 		if err := rejectJSON("daemon stop"); err != nil {
 			return err
 		}
-		_, err := call("daemon.stop", nil)
+		_, err := callWithTimeout("daemon.stop", nil, processOperationTimeout)
 		return err
 	case "restart":
 		if err := rejectJSON("daemon restart"); err != nil {
 			return err
 		}
-		if _, err := call("daemon.stop", nil); err == nil {
+		if _, err := callWithTimeout("daemon.stop", nil, processOperationTimeout); err == nil {
 			if err := waitForDaemonStop(); err != nil {
 				return err
 			}
+		} else if !errors.Is(err, ipc.ErrDaemonUnavailable) {
+			return fmt.Errorf("stop daemon before restart: %w", err)
 		}
 		return startDaemon(layout)
 	case "status":
