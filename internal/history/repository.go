@@ -187,6 +187,27 @@ func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit 
 	})
 }
 
+// Clear removes all persisted execution history, including lifetime
+// counters, while retaining the database schema for future writes.
+func (r *Repository) Clear(ctx context.Context) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		allowGlobalDelete := tx.Session(&gorm.Session{AllowGlobalUpdate: true})
+		if err := allowGlobalDelete.Delete(&attemptModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&taskModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&runModel{}).Error; err != nil {
+			return err
+		}
+		return allowGlobalDelete.Delete(&counterModel{}).Error
+	})
+}
+
 func counterIncrementExpression(db *gorm.DB) clause.Expr {
 	table := db.Statement.Quote((counterModel{}).TableName())
 	column := db.Statement.Quote("value")

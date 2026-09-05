@@ -210,7 +210,10 @@ func TestListSnapshotsReportsIdleAndNextRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshots := s.ListSnapshots()
+	snapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(snapshots) != 1 {
 		t.Fatalf("snapshots = %+v, want one snapshot", snapshots)
 	}
@@ -225,7 +228,11 @@ func TestListSnapshotsReportsIdleAndNextRun(t *testing.T) {
 		t.Fatalf("next run = %v, want nil before scheduler start", snapshot.NextRun)
 	}
 	s.Start()
-	startedSnapshot := s.ListSnapshots()[0]
+	startedSnapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedSnapshot := startedSnapshots[0]
 	if startedSnapshot.NextRun == nil || startedSnapshot.NextRun.Before(time.Now()) {
 		t.Fatalf("next run = %v, want a future time after scheduler start", startedSnapshot.NextRun)
 	}
@@ -254,14 +261,22 @@ func TestListSnapshotsReportsRunningAndCompletedOutcome(t *testing.T) {
 		t.Fatal("schedule did not start")
 	}
 
-	running := s.ListSnapshots()[0]
+	runningSnapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := runningSnapshots[0]
 	if running.Status != StatusRunning || running.LastRun == nil || running.DurationSeconds == nil {
 		t.Fatalf("running snapshot = %+v, want running state and timing", running)
 	}
 	close(release)
 	s.Wait()
 
-	completed := s.ListSnapshots()[0]
+	completedSnapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := completedSnapshots[0]
 	if completed.Status != StatusSuccess || completed.LastRun == nil || completed.DurationSeconds == nil {
 		t.Fatalf("completed snapshot = %+v, want successful result and timing", completed)
 	}
@@ -281,7 +296,11 @@ func TestListSnapshotsReportsFailedOutcome(t *testing.T) {
 	}
 	s.Wait()
 
-	snapshot := s.ListSnapshots()[0]
+	snapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
 	if snapshot.Status != StatusFailed {
 		t.Fatalf("status = %q, want %q", snapshot.Status, StatusFailed)
 	}
@@ -301,7 +320,11 @@ func TestListSnapshotsRestoresLastRunFromHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot := s.ListSnapshots()[0]
+	snapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
 	if snapshot.Status != StatusSuccess || snapshot.LastRun == nil || !snapshot.LastRun.Equal(started) {
 		t.Fatalf("snapshot = %+v, want restored successful run", snapshot)
 	}
@@ -372,7 +395,11 @@ func TestListSnapshotsHonorsConcurrencyAllow(t *testing.T) {
 			t.Fatal("schedule did not start")
 		}
 	}
-	running := s.ListSnapshots()[0]
+	runningSnapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := runningSnapshots[0]
 	if running.Status != StatusRunning || running.LastRun == nil || running.DurationSeconds == nil {
 		t.Fatalf("running snapshot = %+v, want concurrent running state", running)
 	}
@@ -418,6 +445,99 @@ func TestHistoryRecordsAndCounters(t *testing.T) {
 	}
 	if history[0].RunID == "" || s.TriggerRunCount("demo", ScheduleTrigger("job")) != 1 {
 		t.Fatalf("history = %+v, counts = %d; want run id and counter", history, s.TriggerRunCount("demo", ScheduleTrigger("job")))
+	}
+}
+
+func TestClearHistoryUsesRepositoryAsListSource(t *testing.T) {
+	s := New(nil)
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		TargetType: "task", Target: "job",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s.RecordExecution(Record{
+		RunID: "run-1", Project: "demo", Name: "job", TargetType: "task", Target: "job",
+		Trigger: ScheduleTrigger("job"), Status: StatusSuccess, Started: started, Finished: started.Add(time.Second),
+	})
+
+	snapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Runs != 1 || snapshots[0].Status != StatusSuccess || snapshots[0].LastRun == nil {
+		t.Fatalf("snapshots before clear = %+v, want persisted summary", snapshots)
+	}
+
+	if err := s.ClearHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err = s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Runs != 0 || snapshots[0].Status != StatusIdle || snapshots[0].LastRun != nil || snapshots[0].DurationSeconds != nil {
+		t.Fatalf("snapshots after clear = %+v, want empty history summary", snapshots)
+	}
+	if got := s.RunCount("task", "demo", "job"); got != 0 {
+		t.Fatalf("task count after clear = %d, want zero", got)
+	}
+
+	s.RecordExecution(Record{
+		RunID: "run-2", Project: "demo", Name: "job", TargetType: "task", Target: "job",
+		Trigger: ScheduleTrigger("job"), Status: StatusSuccess, Started: started.Add(2 * time.Second), Finished: started.Add(3 * time.Second),
+	})
+	snapshots, err = s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshots[0].Runs != 1 || snapshots[0].LastRun == nil || !snapshots[0].LastRun.Equal(started.Add(2*time.Second)) {
+		t.Fatalf("snapshots after rewrite = %+v, want new persisted summary", snapshots)
+	}
+}
+
+func TestClearHistoryPreservesActiveExecution(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		close(started)
+		<-release
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("schedule did not start")
+	}
+
+	if err := s.ClearHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Status != StatusRunning || snapshots[0].Runs != 0 {
+		t.Fatalf("active snapshot after clear = %+v, want running with zero completed runs", snapshots)
+	}
+
+	close(release)
+	s.Wait()
+	snapshots, err = s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Status != StatusSuccess || snapshots[0].Runs != 1 {
+		t.Fatalf("completed snapshot after clear = %+v, want newly persisted run", snapshots)
 	}
 }
 

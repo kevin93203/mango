@@ -108,8 +108,6 @@ type Scheduler struct {
 	running         map[string]int
 	active          map[string]map[uint64]time.Time
 	nextExecutionID uint64
-	counters        map[string]uint64
-	latest          map[string]Record
 	historyRepo     HistoryRepository
 	historyLimit    int
 	executionWG     sync.WaitGroup
@@ -128,8 +126,6 @@ func New(runner Runner) *Scheduler {
 		running:      map[string]int{},
 		active:       map[string]map[uint64]time.Time{},
 		historyLimit: defaultHistoryLimit,
-		counters:     map[string]uint64{},
-		latest:       map[string]Record{},
 		historyRepo:  newMemoryHistoryRepository(),
 		runner:       runner,
 		ctx:          context.Background(),
@@ -137,7 +133,7 @@ func New(runner Runner) *Scheduler {
 }
 
 // SetHistoryRepository replaces the in-memory fallback with the daemon's
-// durable history store and restores only the small counter summary.
+// durable history store.
 func (s *Scheduler) SetHistoryRepository(repo HistoryRepository) error {
 	if repo == nil {
 		repo = newMemoryHistoryRepository()
@@ -150,14 +146,8 @@ func (s *Scheduler) SetHistoryRepository(repo HistoryRepository) error {
 			return err
 		}
 	}
-	counters, err := repo.Counters(context.Background())
-	if err != nil {
-		return err
-	}
 	s.mu.Lock()
 	s.historyRepo = repo
-	s.counters = copyCounts(counters)
-	s.latest = make(map[string]Record)
 	s.mu.Unlock()
 	return nil
 }
@@ -176,8 +166,9 @@ func (s *Scheduler) SetHistoryLimit(limit int) error {
 	return nil
 }
 
-// RefreshHistorySummary loads the latest record for each configured schedule
-// without loading the complete execution history into memory.
+// RefreshHistorySummary validates that the history repository can read the
+// configured schedule summaries. History summaries are read on demand and
+// are not copied into scheduler memory.
 func (s *Scheduler) RefreshHistorySummary(ctx context.Context) error {
 	s.mu.Lock()
 	repo := s.historyRepo
@@ -186,14 +177,8 @@ func (s *Scheduler) RefreshHistorySummary(ctx context.Context) error {
 		refs = append(refs, ScheduleRef{Project: schedule.Project, Name: schedule.Name})
 	}
 	s.mu.Unlock()
-	latest, err := repo.LatestSchedules(ctx, refs)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.latest = latest
-	s.mu.Unlock()
-	return nil
+	_, err := repo.LatestSchedules(ctx, refs)
+	return err
 }
 
 func (s *Scheduler) QueryHistory(ctx context.Context, query HistoryQuery) ([]Record, error) {
@@ -208,23 +193,57 @@ func (s *Scheduler) QueryHistory(ctx context.Context, query HistoryQuery) ([]Rec
 
 // RunCount returns the lifetime number of logical executions for a target.
 func (s *Scheduler) RunCount(targetType, project, target string) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.counters[counterKey(targetType, project, target)]
+	counters, err := s.HistoryCounters(context.Background())
+	if err != nil {
+		return 0
+	}
+	return RunCountFromCounters(counters, targetType, project, target)
 }
 
 // TriggerRunCount returns the lifetime number of logical executions caused by
 // a named trigger.
 func (s *Scheduler) TriggerRunCount(project string, trigger TriggerRef) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.counters[counterKey("trigger:"+trigger.Type, project, trigger.Name)]
+	counters, err := s.HistoryCounters(context.Background())
+	if err != nil {
+		return 0
+	}
+	return counters[counterKey("trigger:"+trigger.Type, project, trigger.Name)]
 }
 
 func (s *Scheduler) RunCounts() map[string]uint64 {
+	counters, err := s.HistoryCounters(context.Background())
+	if err != nil {
+		return map[string]uint64{}
+	}
+	return counters
+}
+
+// HistoryCounters reads persisted lifetime counters without changing
+// scheduler state.
+func (s *Scheduler) HistoryCounters(ctx context.Context) (map[string]uint64, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return copyCounts(s.counters)
+	repo := s.historyRepo
+	s.mu.Unlock()
+	return repo.Counters(ctx)
+}
+
+// RunCountFromCounters returns a target count from a batch loaded by
+// HistoryCounters.
+func RunCountFromCounters(counters map[string]uint64, targetType, project, target string) uint64 {
+	return counters[counterKey(targetType, project, target)]
+}
+
+// ClearHistory removes persisted execution history without changing the
+// scheduler's runtime state.
+func (s *Scheduler) ClearHistory(ctx context.Context) error {
+	s.mu.Lock()
+	repo := s.historyRepo
+	s.mu.Unlock()
+	clearer, ok := repo.(historyClearer)
+	if !ok {
+		return errors.New("history repository does not support clearing")
+	}
+	return clearer.Clear(ctx)
 }
 
 func (s *Scheduler) record(record Record) {
@@ -237,21 +256,7 @@ func (s *Scheduler) record(record Record) {
 	s.mu.Unlock()
 	if err := repo.Record(context.Background(), record, limit); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: write execution history: %v\n", err)
-		return
 	}
-
-	s.mu.Lock()
-	for _, key := range counterKeys(record) {
-		s.counters[key]++
-	}
-	if record.Trigger.Type == TriggerSchedule && record.Trigger.Name != "" {
-		key := record.Project + "/" + record.Trigger.Name
-		previous, ok := s.latest[key]
-		if !ok || !record.Started.Before(previous.Started) {
-			s.latest[key] = cloneRecord(record)
-		}
-	}
-	s.mu.Unlock()
 }
 
 // RecordExecution persists a completed workflow or task execution in the
@@ -520,17 +525,19 @@ func (s *Scheduler) List() []config.EffectiveSchedule {
 	return result
 }
 
-// ListSnapshots returns configured schedules enriched with execution and cron
-// timing information. Runtime execution state is intentionally kept in memory;
-// completed execution details come from the persisted history.
-func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
+// ListSnapshots returns configured schedules enriched with runtime state and
+// completed execution details read from the history repository.
+func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, error) {
 	s.mu.Lock()
 	schedules := make(map[string]config.EffectiveSchedule, len(s.schedules))
 	entryIDs := make(map[string]cron.EntryID, len(s.entries))
 	active := make(map[string][]time.Time, len(s.active))
 	started := s.started
+	repo := s.historyRepo
+	refs := make([]ScheduleRef, 0, len(s.schedules))
 	for key, schedule := range s.schedules {
 		schedules[key] = schedule
+		refs = append(refs, ScheduleRef{Project: schedule.Project, Name: schedule.Name})
 	}
 	for key, id := range s.entries {
 		entryIDs[key] = id
@@ -540,12 +547,16 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 			active[key] = append(active[key], started)
 		}
 	}
-	latest := make(map[string]Record, len(s.latest))
-	for key, record := range s.latest {
-		latest[key] = cloneRecord(record)
-	}
-	counters := copyCounts(s.counters)
 	s.mu.Unlock()
+
+	counters, err := repo.Counters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := repo.LatestSchedules(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
 
 	keys := make([]string, 0, len(schedules))
 	for key := range schedules {
@@ -588,7 +599,7 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 		}
 		result = append(result, snapshot)
 	}
-	return result
+	return result, nil
 }
 
 func latestStart(starts []time.Time) time.Time {

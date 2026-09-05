@@ -2042,8 +2042,12 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		}
 		return success(request, map[string]string{"key": p.Key, "status": "cleared"})
 	case "schedule.ls":
+		snapshots, err := d.scheduler.ListSnapshots(d.executionContext())
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
 		result := make([]ScheduleInfo, 0)
-		for _, snapshot := range d.scheduler.ListSnapshots() {
+		for _, snapshot := range snapshots {
 			item := snapshot.Schedule
 			location := item.Timezone
 			if location == nil {
@@ -2066,6 +2070,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			})
 		}
 		return success(request, result)
+	case "history.clear":
+		if err := d.scheduler.ClearHistory(d.executionContext()); err != nil {
+			return failure(request, "HISTORY_CLEAR_FAILED", err)
+		}
+		return success(request, map[string]string{"status": "cleared"})
 	case "schedule.history":
 		var p historyRequest
 		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
@@ -2093,9 +2102,18 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	case "workflow.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
+		ctx := d.executionContext()
+		counters, err := d.scheduler.HistoryCounters(ctx)
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
+		snapshots, err := d.scheduler.ListSnapshots(ctx)
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
 		result := make([]api.WorkflowInfo, 0)
 		for _, snapshot := range d.workflow.ListWorkflows(p.Project) {
-			if info, err := d.getWorkflowInfo(snapshot.Workflow.Project, snapshot.Workflow.Name); err == nil {
+			if info, err := d.getWorkflowInfo(snapshot.Workflow.Project, snapshot.Workflow.Name, counters, snapshots); err == nil {
 				result = append(result, info)
 			} else {
 				result = append(result, workflowInfo(snapshot))
@@ -2118,9 +2136,18 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	case "task.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
+		ctx := d.executionContext()
+		counters, err := d.scheduler.HistoryCounters(ctx)
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
+		snapshots, err := d.scheduler.ListSnapshots(ctx)
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
 		result := make([]api.TaskInfo, 0)
 		for _, snapshot := range d.workflow.ListTasks(p.Project) {
-			result = append(result, d.taskInfoWithHistory(snapshot))
+			result = append(result, d.taskInfoWithHistory(snapshot, counters, snapshots))
 		}
 		return success(request, result)
 	case "task.run":
@@ -2168,10 +2195,17 @@ func taskInfo(snapshot workflow.TaskSnapshot) api.TaskInfo {
 	}
 }
 
-func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInfo {
+func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot, counters map[string]uint64, schedules []scheduler.ScheduleSnapshot) api.TaskInfo {
 	info := taskInfo(snapshot)
 	running := info.Status == workflow.StatusRunning
-	info.Runs = d.scheduler.RunCount("task", snapshot.Task.Project, snapshot.Task.Name)
+	info.Runs = scheduler.RunCountFromCounters(counters, "task", snapshot.Task.Project, snapshot.Task.Name)
+	if !running {
+		// Completed state comes from the database. Do not expose a stale
+		// in-memory workflow summary after history has been cleared.
+		info.Status = workflow.StatusIdle
+		info.LastRun = nil
+		info.DurationSeconds = nil
+	}
 	latest := scheduler.TaskRecord{}
 	var latestTrigger scheduler.TriggerRef
 	hasLatest := false
@@ -2198,7 +2232,7 @@ func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInf
 		}
 		info.LastTrigger = triggerInfo(latestTrigger)
 	}
-	info.NextRun, info.NextTrigger = d.nextRunForTarget("task", snapshot.Task.Project, snapshot.Task.Name)
+	info.NextRun, info.NextTrigger = d.nextRunForTarget(schedules, "task", snapshot.Task.Project, snapshot.Task.Name)
 	return info
 }
 
@@ -2220,13 +2254,20 @@ func workflowInfo(snapshot workflow.WorkflowSnapshot) api.WorkflowInfo {
 	}
 }
 
-func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error) {
+func (d *Daemon) getWorkflowInfo(project, name string, counters map[string]uint64, schedules []scheduler.ScheduleSnapshot) (api.WorkflowInfo, error) {
 	for _, snapshot := range d.workflow.ListWorkflows(project) {
 		if snapshot.Workflow.Name == name {
 			info := workflowInfo(snapshot)
 			running := info.Status == workflow.StatusRunning
-			info.Runs = d.scheduler.RunCount("workflow", project, name)
-			info.NextRun, info.NextTrigger = d.nextRunForTarget("workflow", project, name)
+			info.Runs = scheduler.RunCountFromCounters(counters, "workflow", project, name)
+			info.NextRun, info.NextTrigger = d.nextRunForTarget(schedules, "workflow", project, name)
+			if !running {
+				// Completed state comes from the database. Do not expose a stale
+				// in-memory workflow summary after history has been cleared.
+				info.Status = workflow.StatusIdle
+				info.LastRun = nil
+				info.DurationSeconds = nil
+			}
 			var latest *scheduler.Record
 			if records, err := d.queryHistory(historyRequest{Tail: 1, TargetType: "workflow", Project: project, Name: name}); err == nil && len(records) > 0 {
 				latestRecord := records[len(records)-1]
@@ -2282,10 +2323,10 @@ func recordDurationSeconds(record scheduler.Record) float64 {
 	return duration
 }
 
-func (d *Daemon) nextRunForTarget(targetType, project, name string) (*time.Time, *api.TriggerInfo) {
+func (d *Daemon) nextRunForTarget(schedules []scheduler.ScheduleSnapshot, targetType, project, name string) (*time.Time, *api.TriggerInfo) {
 	var next *time.Time
 	var trigger *api.TriggerInfo
-	for _, snapshot := range d.scheduler.ListSnapshots() {
+	for _, snapshot := range schedules {
 		if snapshot.NextRun == nil || snapshot.Schedule.Project != project {
 			continue
 		}

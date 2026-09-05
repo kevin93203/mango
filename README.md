@@ -303,6 +303,7 @@ mango schedule ls
 mango schedule history
 
 mango history
+mango history clear
 ```
 
 `task` and `workflow` are execution targets. `schedule`, `webhook`, and
@@ -1015,10 +1016,15 @@ mango schedule history --attempts --json
 ### `mango history`
 
 ```text
+mango history clear [--json]
 mango history [--tail N] [--trigger-type schedule|webhook|manual]
               [--trigger NAME] [--target-type task|workflow]
               [--target PROJECT/NAME] [--attempts] [--json]
 ```
+
+`history clear` permanently removes all completed execution records and
+lifetime counters. It leaves the history database schema in place; executions
+that are still running continue normally and are recorded when they finish.
 
 History JSON returns complete nested run records, including `RunID`, the
 structured `Trigger`, task/node records, and retry attempts. Text output shows

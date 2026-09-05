@@ -37,6 +37,10 @@ type historyPruner interface {
 	Prune(context.Context, int) error
 }
 
+type historyClearer interface {
+	Clear(context.Context) error
+}
+
 type memoryHistoryRepository struct {
 	mu       sync.Mutex
 	records  []Record
@@ -55,6 +59,14 @@ func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit
 		r.counters[key]++
 	}
 	r.pruneLocked(limit)
+	return nil
+}
+
+func (r *memoryHistoryRepository) Clear(_ context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = nil
+	r.counters = make(map[string]uint64)
 	return nil
 }
 

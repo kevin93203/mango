@@ -414,6 +414,153 @@ func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	}
 }
 
+func TestHistoryClearIPCRemovesListStatistics(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	if err := d.scheduler.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+		TargetType: "task", Target: "job",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "run-1", Project: "demo", Name: "job", TargetType: "task", Target: "job",
+		Trigger: scheduler.ScheduleTrigger("job"), Status: scheduler.StatusSuccess,
+		Started: started, Finished: started.Add(time.Second),
+	})
+
+	request, err := ipc.NewRequest("schedule.ls", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule.ls before clear failed: %+v", response.Error)
+	}
+	var schedules []api.ScheduleInfo
+	if err := decodeTestData(response.Data, &schedules); err != nil {
+		t.Fatal(err)
+	}
+	if len(schedules) != 1 || schedules[0].Runs != 1 || schedules[0].LastRun == nil {
+		t.Fatalf("schedule list before clear = %+v, want persisted statistics", schedules)
+	}
+
+	request, err = ipc.NewRequest("history.clear", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("history.clear failed: %+v", response.Error)
+	}
+
+	response = d.Handle(context.Background(), requestForMethod(t, "schedule.ls"))
+	if !response.OK {
+		t.Fatalf("schedule.ls after clear failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &schedules); err != nil {
+		t.Fatal(err)
+	}
+	if len(schedules) != 1 || schedules[0].Runs != 0 || schedules[0].Status != scheduler.StatusIdle || schedules[0].LastRun != nil || schedules[0].DurationSeconds != nil {
+		t.Fatalf("schedule list after clear = %+v, want empty history statistics", schedules)
+	}
+
+	request = requestForMethod(t, "history.ls")
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("history.ls after clear failed: %+v", response.Error)
+	}
+	var records []scheduler.Record
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("history after clear = %+v, want empty", records)
+	}
+}
+
+func requestForMethod(t *testing.T, method string) ipc.Request {
+	t.Helper()
+	request, err := ipc.NewRequest(method, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func TestTaskAndWorkflowListsReadCountersFromRepository(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	d.workflow.Apply(map[string]config.EffectiveTask{
+		"demo/compile": {Project: "demo", Name: "compile", Command: "echo"},
+	}, map[string]config.EffectiveWorkflow{
+		"demo/pipeline": {Project: "demo", Name: "pipeline", Tasks: map[string]config.EffectiveWorkflowTask{
+			"build": {Name: "build", Uses: "compile"},
+		}},
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "task-run", Project: "demo", TargetType: "task", Target: "compile",
+		Trigger: scheduler.ManualTrigger(), Status: scheduler.StatusSuccess,
+		Started: started, Finished: started.Add(time.Second),
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "workflow-run", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Trigger: scheduler.ManualTrigger(), Status: scheduler.StatusSuccess,
+		Started: started.Add(time.Minute), Finished: started.Add(2 * time.Minute),
+	})
+
+	response := d.Handle(context.Background(), requestForMethod(t, "task.ls"))
+	if !response.OK {
+		t.Fatalf("task.ls before clear failed: %+v", response.Error)
+	}
+	var tasks []api.TaskInfo
+	if err := decodeTestData(response.Data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Runs != 1 || tasks[0].LastRun == nil {
+		t.Fatalf("task list before clear = %+v, want persisted statistics", tasks)
+	}
+
+	response = d.Handle(context.Background(), requestForMethod(t, "workflow.ls"))
+	if !response.OK {
+		t.Fatalf("workflow.ls before clear failed: %+v", response.Error)
+	}
+	var workflows []api.WorkflowInfo
+	if err := decodeTestData(response.Data, &workflows); err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 || workflows[0].Runs != 1 || workflows[0].LastRun == nil {
+		t.Fatalf("workflow list before clear = %+v, want persisted statistics", workflows)
+	}
+
+	response = d.Handle(context.Background(), requestForMethod(t, "history.clear"))
+	if !response.OK {
+		t.Fatalf("history.clear failed: %+v", response.Error)
+	}
+
+	response = d.Handle(context.Background(), requestForMethod(t, "task.ls"))
+	if !response.OK {
+		t.Fatalf("task.ls after clear failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Runs != 0 || tasks[0].Status != workflow.StatusIdle || tasks[0].LastRun != nil || tasks[0].DurationSeconds != nil {
+		t.Fatalf("task list after clear = %+v, want empty history statistics", tasks)
+	}
+
+	response = d.Handle(context.Background(), requestForMethod(t, "workflow.ls"))
+	if !response.OK {
+		t.Fatalf("workflow.ls after clear failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &workflows); err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 || workflows[0].Runs != 0 || workflows[0].Status != workflow.StatusIdle || workflows[0].LastRun != nil || workflows[0].DurationSeconds != nil {
+		t.Fatalf("workflow list after clear = %+v, want empty history statistics", workflows)
+	}
+}
+
 func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	firstStarted := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
@@ -688,8 +835,12 @@ func TestNextRunIncludesDirectAndIndirectSchedules(t *testing.T) {
 	stopped := d.scheduler.Stop()
 	<-stopped.Done()
 
-	workflowNext, workflowTrigger := d.nextRunForTarget("workflow", "demo", "pipeline")
-	taskNext, taskTrigger := d.nextRunForTarget("task", "demo", "compile")
+	snapshotList, err := d.scheduler.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowNext, workflowTrigger := d.nextRunForTarget(snapshotList, "workflow", "demo", "pipeline")
+	taskNext, taskTrigger := d.nextRunForTarget(snapshotList, "task", "demo", "compile")
 	if workflowNext == nil || workflowTrigger == nil || workflowTrigger.Name != "workflow-earlier" {
 		t.Fatalf("workflow next = %v, trigger = %+v, want workflow schedule", workflowNext, workflowTrigger)
 	}
@@ -699,7 +850,7 @@ func TestNextRunIncludesDirectAndIndirectSchedules(t *testing.T) {
 	if !taskNext.Equal(*workflowNext) || taskTrigger.Name != "workflow-earlier" {
 		t.Fatalf("task next = %v, trigger = %+v; want earliest indirect schedule %v", taskNext, taskTrigger, workflowNext)
 	}
-	if next, trigger := d.nextRunForTarget("task", "demo", "missing"); next != nil || trigger != nil {
+	if next, trigger := d.nextRunForTarget(snapshotList, "task", "demo", "missing"); next != nil || trigger != nil {
 		t.Fatalf("manual-only task next = %v, trigger = %+v, want empty", next, trigger)
 	}
 }
