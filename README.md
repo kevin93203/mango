@@ -295,21 +295,22 @@ Task logs use `PROJECT/task/TASK`. Workflow-node logs use
 ```sh
 mango task ls
 mango task run PROJECT/TASK
-mango task history [PROJECT/TASK]
 
 mango workflow ls
 mango workflow run PROJECT/WORKFLOW
-mango workflow status PROJECT/WORKFLOW
-mango workflow history [PROJECT/WORKFLOW]
 
 mango schedule ls
-mango schedule run PROJECT/SCHEDULE
 mango schedule history
+
+mango history
 ```
 
-When the target is omitted from `task history` or `workflow history` in an
-interactive terminal, Mango opens a hierarchical history browser. Use
-`--json` for machine-readable history and status data.
+`task` and `workflow` are execution targets. `schedule`, `webhook`, and
+`manual` are trigger sources; this release models webhook triggers but does not
+start a webhook server. Use `task run` or `workflow run` for a manual run.
+`history` is the shared execution-history browser and `schedule history` is the
+same view filtered to schedule triggers. Use `--json` for machine-readable
+history and status data.
 
 ## Complete YAML reference
 
@@ -650,7 +651,7 @@ Both forms are accepted:
 ```sh
 mango --color=never ls
 mango status demo/api-single --json
-mango --json workflow history --tail 20
+mango --json history --tail 20
 ```
 
 Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
@@ -951,99 +952,80 @@ It does not support `--json`.
 ```text
 mango task ls [--json]
 mango task run PROJECT/TASK [--json]
-mango task history [PROJECT/TASK] [--tail N] [--attempts] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
-| `task ls` | Lists task name, command, timeout, concurrency, retry count, and latest status. |
+| `task ls` | Lists task name, lifetime logical runs, status, last run, next run, and duration. |
 | `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
-| `task history` | Lists recent task executions. Without a target, it includes tasks across projects. |
-| `--tail N` | Maximum records to return; default `100`; `0` returns all retained records. Must be non-negative. |
-| `--attempts` | Shows one row per retry attempt, including exit code, error, and captured stderr. |
-
-History flags may appear before or after the optional target:
-
-```sh
-mango task history
-mango task history demo/cleanup --tail 20
-mango task history --attempts demo/cleanup
-mango task history demo/cleanup --attempts --tail 50 --json
-```
-
-Task history records include the source (`direct` or a workflow node), trigger
-(`manual` or a schedule name), the resolved command, sanitized args, working
-directory, explicitly configured environment variable names, start/finish
-times, exit code, status, error, stderr, and attempt details. Environment
-values are never persisted in execution history. In an interactive terminal,
-omitting the target opens a browser with task → runs → attempts → output
-levels. Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go back,
-`r` to refresh, `n` or PageDown to load older records, and `q` to quit.
+`task ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
+`RUNS` counts direct task runs and workflow-node invocations; retries do not
+increase it. `NEXT RUN` includes the earliest direct or indirect schedule.
 
 ### Workflows
 
 ```text
 mango workflow ls [--json]
 mango workflow run PROJECT/WORKFLOW [--json]
-mango workflow status PROJECT/WORKFLOW [--json]
-mango workflow history [PROJECT/WORKFLOW] [--tail N] [--tasks] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
-| `workflow ls` | Lists workflow name, concurrency mode, node count, and latest status. |
+| `workflow ls` | Lists workflow name, lifetime logical runs, status, last run, next run, and duration. |
 | `workflow run` | Starts a workflow asynchronously with trigger `manual`. |
-| `workflow status` | Shows one workflow's status, node count, last run, duration, and node definitions. |
-| `workflow history` | Lists recent workflow runs, optionally filtered by project/workflow. |
-| `--tail N` | Maximum records; default `100`; `0` returns all retained records. Must be non-negative. |
-| `--tasks` | Includes per-node task records, execution metadata, attempts, exit codes, and errors in text output. |
+`workflow ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and
+`DURATION`. `RUNS` counts workflow root invocations and `NEXT RUN` is the
+earliest direct schedule for the workflow.
 
 Examples:
 
 ```sh
 mango workflow ls
 mango workflow run demo/release
-mango workflow status demo/release
-mango workflow history demo/release --tail 20
-mango workflow history --tasks demo/release
-mango workflow history --json
 ```
 
-When no workflow target is given in an interactive terminal, the history
-browser navigates workflow → runs → task nodes → attempts → captured output.
-Task details include the resolved command, sanitized args, working directory,
-and explicitly configured environment variable names; environment values are
-not persisted. Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go
-back, `r` to refresh, `n` or PageDown to load older records, and `q` to quit.
+Use `mango history --target-type workflow --target demo/release` to inspect
+workflow runs and their task nodes.
 
 ### Schedules
 
 ```text
 mango schedule ls [--json]
-mango schedule run PROJECT/SCHEDULE [--json]
-mango schedule history [--tail N] [--attempts] [--json]
+mango schedule history [--tail N] [--trigger NAME]
+                       [--target-type task|workflow] [--target PROJECT/NAME]
+                       [--attempts] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
-| `schedule ls` | Lists schedule, cron expression, time zone, target type, target, and next run. |
-| `schedule run` | Triggers a configured schedule immediately; the target runs asynchronously. |
-| `schedule history` | Lists recent execution records retained by the daemon. |
+| `schedule ls` | Lists schedule, trigger type, target, cron expression, time zone, lifetime runs, status, last run, next run, and duration. |
+| `schedule history` | Lists the shared history view filtered to `trigger.type=schedule`. |
 | `--tail N` | Maximum history records; default `100`; `0` returns all retained records. Must be non-negative. |
+| `--trigger NAME` / `--target-type` / `--target` | Applies the shared trigger or execution-target filters; schedule history always keeps the schedule trigger-type filter. |
 | `--attempts` | Shows one row per recorded attempt with timing, result, error, and stderr. |
 
 Examples:
 
 ```sh
 mango schedule ls
-mango schedule run demo/nightly-release
 mango schedule history --tail 20
 mango schedule history --attempts --json
 ```
 
-`schedule history` is an aggregate compatibility view. Use `task history` or
-`workflow history` when you need to filter by a specific target type or inspect
-workflow nodes.
+### `mango history`
+
+```text
+mango history [--tail N] [--trigger-type schedule|webhook|manual]
+              [--trigger NAME] [--target-type task|workflow]
+              [--target PROJECT/NAME] [--attempts] [--json]
+```
+
+History JSON returns complete nested run records, including `RunID`, the
+structured `Trigger`, task/node records, and retry attempts. Text output shows
+one row per logical run by default; `--attempts` expands attempt rows. In an
+interactive terminal, the shared browser navigates `run → task → attempts` or
+`run → workflow → tasks → attempts`; `Esc`, `r`, PageDown, and `q` retain the
+standard navigation behavior.
 
 ### Startup integration
 

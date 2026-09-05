@@ -30,8 +30,8 @@ mango workflow run demo/demo-timeout
 Inspect execution history, including per-node attempts:
 
 ```sh
-mango workflow history --tasks demo/demo-failure
-mango task history demo/demo-slow-timeout
+mango history --target-type workflow --target demo/demo-failure --attempts
+mango history --target-type task --target demo/demo-slow-timeout --attempts
 ```
 
 The failure workflow records retries for `demo-retry-failure`; its dependent

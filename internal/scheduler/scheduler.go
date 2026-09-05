@@ -13,37 +13,30 @@ import (
 )
 
 type Record struct {
+	RunID      string
 	Project    string
 	Name       string
 	TargetType string
 	Target     string
-	// Trigger is the schedule name for cron executions or "manual" for an
-	// explicit workflow/task run.
-	Trigger  string
-	Status   string
-	Started  time.Time
-	Finished time.Time
-	ExitCode int
-	Error    string
-	Stderr   string
-	Attempts []Attempt
-	Tasks    []TaskRecord
-}
-
-// TaskHistoryRecord is the response representation returned by task history
-// queries. Source is derived while querying history and is intentionally not
-// part of the persisted execution Record.
-type TaskHistoryRecord struct {
-	Record
-	Source string `json:"source,omitempty"`
+	Trigger    TriggerRef
+	Status     string
+	Started    time.Time
+	Finished   time.Time
+	ExitCode   int
+	Error      string
+	Stderr     string
+	Attempts   []Attempt
+	Tasks      []TaskRecord
 }
 
 // TaskRecord is the execution record for one direct task invocation or one
 // workflow node. Node is the workflow node name; Task is the task definition
 // referenced by that node.
 type TaskRecord struct {
-	Node string
-	Task string
+	RunID       string
+	ParentRunID string
+	Node        string
+	Task        string
 	// Command, Args, and WorkingDir describe the resolved task invocation.
 	Command    string
 	Args       []string
@@ -95,6 +88,7 @@ const (
 // state and the next cron activation time.
 type ScheduleSnapshot struct {
 	Schedule        config.EffectiveSchedule
+	Runs            uint64
 	Status          string
 	LastRun         *time.Time
 	NextRun         *time.Time
@@ -112,6 +106,7 @@ type Scheduler struct {
 	active          map[string]map[uint64]time.Time
 	nextExecutionID uint64
 	history         []Record
+	counters        map[string]uint64
 	historyLimit    int
 	historyPath     string
 	persistMu       sync.Mutex
@@ -131,6 +126,7 @@ func New(runner Runner) *Scheduler {
 		running:      map[string]int{},
 		active:       map[string]map[uint64]time.Time{},
 		historyLimit: defaultHistoryLimit,
+		counters:     map[string]uint64{},
 		runner:       runner,
 		ctx:          context.Background(),
 	}
@@ -253,6 +249,9 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 	execution, attempts := s.executeWithRetry(ctx, schedule)
 	if execution.Record != nil {
 		record := *execution.Record
+		if record.RunID == "" {
+			record.RunID = NewRunID()
+		}
 		if record.Project == "" {
 			record.Project = schedule.Project
 		}
@@ -265,9 +264,10 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		if record.Target == "" {
 			record.Target = schedule.Target
 		}
-		if record.Trigger == "" {
-			record.Trigger = schedule.Name
-		}
+		// A scheduler-owned invocation is always a schedule trigger. The
+		// executor receives the same value, but normalizing here keeps records
+		// correct for custom runners as well.
+		record.Trigger = ScheduleTrigger(schedule.Name)
 		if record.Started.IsZero() {
 			record.Started = started
 		}
@@ -287,8 +287,8 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		recordFinished = attempts[len(attempts)-1].Finished
 	}
 	record := Record{
-		Project: schedule.Project, Name: schedule.Name, TargetType: schedule.TargetType,
-		Target: schedule.Target, Trigger: schedule.Name, Started: recordStarted, Finished: recordFinished,
+		RunID: NewRunID(), Project: schedule.Project, Name: schedule.Name, TargetType: schedule.TargetType,
+		Target: schedule.Target, Trigger: ScheduleTrigger(schedule.Name), Started: recordStarted, Finished: recordFinished,
 		ExitCode: execution.ExitCode, Stderr: execution.Stderr, Attempts: attempts,
 	}
 	if execution.Err != nil {
@@ -405,11 +405,17 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 
 	latest := make(map[string]Record)
 	for _, record := range history {
-		name := record.Trigger
-		if name == "" {
-			name = record.Name
+		key := ""
+		if record.Trigger.Type == TriggerSchedule && record.Trigger.Name != "" {
+			key = record.Project + "/" + record.Trigger.Name
+		} else if record.Trigger.IsZero() && record.Name != "" {
+			// Read-only compatibility for pre-trigger records injected by older
+			// embedders. Persisted version 1 files are normalized on load.
+			key = record.Project + "/" + record.Name
 		}
-		key := record.Project + "/" + name
+		if key == "" {
+			continue
+		}
 		previous, ok := latest[key]
 		if !ok || record.Started.After(previous.Started) {
 			latest[key] = record
@@ -424,7 +430,7 @@ func (s *Scheduler) ListSnapshots() []ScheduleSnapshot {
 	result := make([]ScheduleSnapshot, 0, len(keys))
 	for _, key := range keys {
 		schedule := schedules[key]
-		snapshot := ScheduleSnapshot{Schedule: schedule, Status: StatusIdle}
+		snapshot := ScheduleSnapshot{Schedule: schedule, Runs: s.TriggerRunCount(schedule.Project, ScheduleTrigger(schedule.Name)), Status: StatusIdle}
 
 		entry := s.cron.Entry(entryIDs[key])
 		next := entry.Next

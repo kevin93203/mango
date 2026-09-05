@@ -164,7 +164,7 @@ func TestV3TaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
 	}
 	d.workflow.Apply(map[string]config.EffectiveTask{"demo/slow-task": task}, nil)
 	started := time.Now()
-	result := d.workflow.RunTask(context.Background(), "demo", "slow-task", "manual")
+	result := d.workflow.RunTask(context.Background(), "demo", "slow-task", scheduler.ManualTrigger())
 	if result.Record == nil || result.Record.Status != workflow.StatusFailed || result.Record.ExitCode != 124 {
 		t.Fatalf("result = %+v, want timeout failure", result)
 	}
@@ -239,6 +239,38 @@ schedules:
 	if len(byTarget["workflow:pipeline"].Tasks) != 1 || byTarget["workflow:pipeline"].Tasks[0].Task != "extract" {
 		t.Fatalf("workflow task records = %+v", byTarget["workflow:pipeline"].Tasks)
 	}
+
+	request, err := ipc.NewRequest("task.ls", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("task.ls failed: %+v", response.Error)
+	}
+	var tasks []api.TaskInfo
+	if err := decodeTestData(response.Data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Runs != 2 || tasks[0].Status != scheduler.StatusSuccess || tasks[0].LastTrigger == nil {
+		t.Fatalf("task info = %+v, want direct plus workflow runs", tasks)
+	}
+
+	request, err = ipc.NewRequest("workflow.ls", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("workflow.ls failed: %+v", response.Error)
+	}
+	var workflows []api.WorkflowInfo
+	if err := decodeTestData(response.Data, &workflows); err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 || workflows[0].Runs != 1 || workflows[0].Status != scheduler.StatusSuccess || workflows[0].LastTrigger == nil {
+		t.Fatalf("workflow info = %+v, want one workflow root run", workflows)
+	}
 }
 
 func TestScheduleListIncludesRuntimeFields(t *testing.T) {
@@ -281,6 +313,9 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	}
 	if items[1].Status != scheduler.StatusSuccess || items[1].LastRun == nil || items[1].DurationSeconds == nil || items[1].NextRun == nil {
 		t.Fatalf("completed schedule = %+v, want runtime fields", items[1])
+	}
+	if items[1].Runs != 1 || items[1].LastTrigger == nil || items[1].LastTrigger.Type != scheduler.TriggerSchedule || items[1].LastTrigger.Name != "job" {
+		t.Fatalf("completed schedule trigger fields = %+v, want one schedule run", items[1])
 	}
 	if items[1].Timezone != "UTC" {
 		t.Fatalf("timezone = %q, want UTC", items[1].Timezone)
@@ -328,7 +363,7 @@ func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	}
 }
 
-func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
+func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	firstStarted := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	secondStarted := firstStarted.Add(time.Minute)
@@ -346,15 +381,16 @@ func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
 		Finished: secondStarted.Add(time.Second), Status: scheduler.StatusSuccess,
 	})
 
-	request, err := ipc.NewRequest("workflow.history", struct {
-		Tail int `json:"tail"`
-	}{Tail: 1})
+	request, err := ipc.NewRequest("history.ls", struct {
+		Tail       int    `json:"tail"`
+		TargetType string `json:"target_type"`
+	}{Tail: 1, TargetType: "workflow"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("workflow.history failed: %+v", response.Error)
+		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
 	var records []scheduler.Record
 	if err := decodeTestData(response.Data, &records); err != nil {
@@ -364,16 +400,17 @@ func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
 		t.Fatalf("records = %+v, want newest workflow only", records)
 	}
 
-	request, err = ipc.NewRequest("workflow.history", struct {
-		Key  string `json:"key"`
-		Tail int    `json:"tail"`
-	}{Key: "demo/old", Tail: 10})
+	request, err = ipc.NewRequest("history.ls", struct {
+		TargetType string `json:"target_type"`
+		Target     string `json:"target"`
+		Tail       int    `json:"tail"`
+	}{TargetType: "workflow", Target: "demo/old", Tail: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("targeted workflow.history failed: %+v", response.Error)
+		t.Fatalf("targeted history.ls failed: %+v", response.Error)
 	}
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
@@ -382,7 +419,7 @@ func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
 		t.Fatalf("targeted records = %+v, want nested task attempt", records)
 	}
 
-	request, err = ipc.NewRequest("workflow.history", struct {
+	request, err = ipc.NewRequest("history.ls", struct {
 		Tail int `json:"tail"`
 	}{Tail: -1})
 	if err != nil {
@@ -394,17 +431,17 @@ func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
 	}
 }
 
-func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t *testing.T) {
+func TestHistoryListTaskFilterIncludesDirectAndWorkflowRuns(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	d.scheduler.RecordExecution(scheduler.Record{
-		Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+		Project: "demo", TargetType: "task", Target: "compile", Trigger: scheduler.ManualTrigger(),
 		Started: base, Finished: base.Add(time.Second), Status: scheduler.StatusSuccess,
 		Attempts: []scheduler.Attempt{{Number: 1, Started: base, Finished: base.Add(time.Second), ExitCode: 0}},
 		Tasks:    []scheduler.TaskRecord{{Task: "compile", Command: "compiler", Args: []string{"--mode", "release"}, WorkingDir: "/workspace", EnvKeys: []string{"MODE"}}},
 	})
 	d.scheduler.RecordExecution(scheduler.Record{
-		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: "nightly",
+		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: scheduler.ScheduleTrigger("nightly"),
 		Started: base.Add(time.Minute), Finished: base.Add(2 * time.Minute), Status: scheduler.StatusSuccess,
 		Tasks: []scheduler.TaskRecord{{
 			Node: "build", Task: "compile", Status: scheduler.StatusSuccess,
@@ -414,60 +451,58 @@ func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t 
 		}},
 	})
 	d.scheduler.RecordExecution(scheduler.Record{
-		Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+		Project: "demo", TargetType: "task", Target: "compile", Trigger: scheduler.ManualTrigger(),
 		Started: base.Add(2 * time.Minute), Finished: base.Add(3 * time.Minute), Status: scheduler.StatusSuccess,
 	})
 
-	request, err := ipc.NewRequest("task.history", struct {
-		Tail int `json:"tail"`
-	}{Tail: 2})
+	request, err := ipc.NewRequest("history.ls", struct {
+		Tail       int    `json:"tail"`
+		TargetType string `json:"target_type"`
+	}{Tail: 2, TargetType: "task"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("task.history failed: %+v", response.Error)
+		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.TaskHistoryRecord
+	var records []scheduler.Record
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || records[0].Source != "workflow/pipeline/build" || records[1].Source != "direct" {
-		t.Fatalf("records = %+v, want workflow and newest direct sources", records)
+	if len(records) != 2 || records[0].TargetType != "workflow" || records[1].TargetType != "task" {
+		t.Fatalf("records = %+v, want workflow and newest direct runs", records)
 	}
-	if records[0].Target != "compile" || len(records[0].Attempts) != 1 {
+	if records[0].Target != "pipeline" || len(records[0].Tasks) != 1 || records[0].Tasks[0].Task != "compile" || len(records[0].Tasks[0].Attempts) != 1 {
 		t.Fatalf("workflow task record = %+v, want task and attempt details", records[0])
 	}
-	if len(records[0].Tasks) != 1 || records[0].Tasks[0].Command != "compiler" || records[0].Tasks[0].WorkingDir != "/workspace" || len(records[0].Tasks[0].EnvKeys) != 1 {
+	if records[0].Tasks[0].Command != "compiler" || records[0].Tasks[0].WorkingDir != "/workspace" || len(records[0].Tasks[0].EnvKeys) != 1 {
 		t.Fatalf("workflow task metadata = %+v, want projected execution metadata", records[0].Tasks)
 	}
 
-	request, err = ipc.NewRequest("task.history", struct {
-		Key  string `json:"key"`
-		Tail int    `json:"tail"`
-	}{Key: "demo/compile", Tail: 10})
+	request, err = ipc.NewRequest("history.ls", struct {
+		TargetType string `json:"target_type"`
+		Target     string `json:"target"`
+		Tail       int    `json:"tail"`
+	}{TargetType: "task", Target: "demo/compile", Tail: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("targeted task.history failed: %+v", response.Error)
+		t.Fatalf("targeted history.ls failed: %+v", response.Error)
 	}
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 3 || records[0].Source != "direct" || records[1].Source != "workflow/pipeline/build" {
-		t.Fatalf("targeted records = %+v, want all task sources", records)
+	if len(records) != 3 || records[0].TargetType != "task" || records[1].TargetType != "workflow" || records[2].TargetType != "task" {
+		t.Fatalf("targeted records = %+v, want all task-containing runs", records)
 	}
-	var legacyRecords []scheduler.Record
-	if err := decodeTestData(response.Data, &legacyRecords); err != nil {
-		t.Fatalf("targeted task history legacy decode failed: %v", err)
-	}
-	if len(legacyRecords) != 3 || legacyRecords[1].Target != "compile" || len(legacyRecords[1].Attempts) != 1 {
-		t.Fatalf("legacy records = %+v, want compatible task records", legacyRecords)
+	if records[1].Target != "pipeline" || len(records[1].Tasks) != 1 || records[1].Tasks[0].Task != "compile" || len(records[1].Tasks[0].Attempts) != 1 {
+		t.Fatalf("targeted workflow record = %+v, want nested task attempt", records[1])
 	}
 
-	request, err = ipc.NewRequest("task.history", struct {
+	request, err = ipc.NewRequest("history.ls", struct {
 		Tail int `json:"tail"`
 	}{Tail: -1})
 	if err != nil {
@@ -475,7 +510,160 @@ func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t 
 	}
 	response = d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
-		t.Fatalf("negative task history tail response = %+v, want BAD_PARAMS", response)
+		t.Fatalf("negative history tail response = %+v, want BAD_PARAMS", response)
+	}
+}
+
+func TestHistoryTaskTargetFiltersWorkflowNodes(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: scheduler.ManualTrigger(),
+		Started: time.Now(), Finished: time.Now(), Status: scheduler.StatusFailed,
+		Tasks: []scheduler.TaskRecord{
+			{Node: "build", Task: "compile", Status: scheduler.StatusSuccess},
+			{Node: "checks", Task: "lint", Status: scheduler.StatusSkipped},
+		},
+	})
+	request, err := ipc.NewRequest("history.ls", struct {
+		TargetType string `json:"target_type"`
+		Target     string `json:"target"`
+	}{TargetType: "task", Target: "demo/compile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("history.ls failed: %+v", response.Error)
+	}
+	var records []scheduler.Record
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || len(records[0].Tasks) != 1 || records[0].Tasks[0].Node != "build" {
+		t.Fatalf("records = %+v, want only matching workflow node", records)
+	}
+}
+
+func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "manual-run", Project: "demo", TargetType: "task", Target: "compile", Trigger: scheduler.ManualTrigger(),
+		Started: base, Finished: base.Add(time.Second), Status: scheduler.StatusSuccess,
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "schedule-run", Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: scheduler.ScheduleTrigger("nightly"),
+		Started: base.Add(time.Minute), Finished: base.Add(2 * time.Minute), Status: scheduler.StatusSuccess,
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "webhook-run", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Trigger: scheduler.TriggerRef{Type: scheduler.TriggerWebhook, Name: "github", Mode: scheduler.TriggerAutomatic, EventID: "evt-1"},
+		Started: base.Add(2 * time.Minute), Finished: base.Add(3 * time.Minute), Status: scheduler.StatusSuccess,
+	})
+
+	request, err := ipc.NewRequest("history.ls", struct {
+		TriggerType string `json:"trigger_type"`
+		Trigger     string `json:"trigger"`
+		Tail        int    `json:"tail"`
+	}{TriggerType: scheduler.TriggerSchedule, Trigger: "nightly", Tail: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("filtered history.ls failed: %+v", response.Error)
+	}
+	var records []scheduler.Record
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].RunID != "schedule-run" {
+		t.Fatalf("filtered records = %+v, want named schedule run", records)
+	}
+
+	request, err = ipc.NewRequest("schedule.history", struct {
+		Tail int `json:"tail"`
+	}{Tail: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("schedule.history failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Trigger.Type != scheduler.TriggerSchedule {
+		t.Fatalf("schedule history = %+v, want schedule trigger only", records)
+	}
+
+	request, err = ipc.NewRequest("history.ls", struct {
+		TriggerType string `json:"trigger_type"`
+		Tail        int    `json:"tail"`
+	}{TriggerType: scheduler.TriggerWebhook, Tail: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("webhook history.ls failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Trigger.EventID != "evt-1" {
+		t.Fatalf("webhook history = %+v, want event id", records)
+	}
+}
+
+func TestNextRunIncludesDirectAndIndirectSchedules(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	d.workflow.Apply(map[string]config.EffectiveTask{
+		"demo/compile": {Project: "demo", Name: "compile", Command: "echo"},
+	}, map[string]config.EffectiveWorkflow{
+		"demo/pipeline": {Project: "demo", Name: "pipeline", Tasks: map[string]config.EffectiveWorkflowTask{
+			"build": {Name: "build", Uses: "compile"},
+		}},
+	})
+	schedules := []config.EffectiveSchedule{
+		{Project: "demo", Name: "direct-later", Cron: "*/5 * * * *", Timezone: time.UTC, TargetType: "task", Target: "compile"},
+		{Project: "demo", Name: "workflow-earlier", Cron: "* * * * *", Timezone: time.UTC, TargetType: "workflow", Target: "pipeline"},
+	}
+	if err := d.scheduler.Apply(schedules); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.Start()
+	stopped := d.scheduler.Stop()
+	<-stopped.Done()
+
+	workflowNext, workflowTrigger := d.nextRunForTarget("workflow", "demo", "pipeline")
+	taskNext, taskTrigger := d.nextRunForTarget("task", "demo", "compile")
+	if workflowNext == nil || workflowTrigger == nil || workflowTrigger.Name != "workflow-earlier" {
+		t.Fatalf("workflow next = %v, trigger = %+v, want workflow schedule", workflowNext, workflowTrigger)
+	}
+	if taskNext == nil || taskTrigger == nil {
+		t.Fatalf("task next = %v, trigger = %+v, want indirect schedule", taskNext, taskTrigger)
+	}
+	if !taskNext.Equal(*workflowNext) || taskTrigger.Name != "workflow-earlier" {
+		t.Fatalf("task next = %v, trigger = %+v; want earliest indirect schedule %v", taskNext, taskTrigger, workflowNext)
+	}
+	if next, trigger := d.nextRunForTarget("task", "demo", "missing"); next != nil || trigger != nil {
+		t.Fatalf("manual-only task next = %v, trigger = %+v, want empty", next, trigger)
+	}
+}
+
+func TestRemovedExecutionHistoryMethodsAreUnknown(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	for _, method := range []string{"schedule.run", "task.history", "workflow.history", "workflow.status"} {
+		request, err := ipc.NewRequest(method, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := d.Handle(context.Background(), request)
+		if response.OK || response.Error == nil || response.Error.Code != "METHOD_NOT_FOUND" {
+			t.Fatalf("method %q response = %+v, want METHOD_NOT_FOUND", method, response)
+		}
 	}
 }
 
