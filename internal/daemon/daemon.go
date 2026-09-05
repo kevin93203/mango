@@ -2076,6 +2076,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if p.Tail < 0 {
 			return failure(request, "BAD_PARAMS", errors.New("workflow history tail must be non-negative"))
 		}
+		if p.Key == "" && p.Project == "" && p.Name == "" {
+			return success(request, filterWorkflowHistory(d.scheduler.HistoryTail(0), "", "", p.Tail))
+		}
 		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
@@ -2240,9 +2243,16 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 func filterWorkflowHistory(history []scheduler.Record, project, workflowName string, tail int) []scheduler.Record {
 	result := make([]scheduler.Record, 0)
 	for _, record := range history {
-		if record.Project == project && record.TargetType == "workflow" && record.Target == workflowName {
-			result = append(result, record)
+		if record.TargetType != "workflow" {
+			continue
 		}
+		if project != "" && record.Project != project {
+			continue
+		}
+		if workflowName != "" && record.Target != workflowName {
+			continue
+		}
+		result = append(result, record)
 	}
 	return tailRecords(result, tail)
 }
