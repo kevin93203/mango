@@ -45,13 +45,19 @@ func TestRunWorkflowExecutesReadyNodesInParallelAndSkipsDescendants(t *testing.T
 		}),
 	})
 
-	result := e.Run(context.Background(), "demo", "pipeline", "manual")
+	result := e.Run(context.Background(), "demo", "pipeline", scheduler.ManualTrigger())
 	if result.Record == nil || result.Record.Status != StatusFailed {
 		t.Fatalf("result = %+v, want failed workflow record", result)
 	}
 	record := result.Record
+	if record.RunID == "" || record.Trigger.Type != scheduler.TriggerManual || record.Trigger.Mode != scheduler.TriggerModeManual {
+		t.Fatalf("workflow record = %+v, want manual trigger and run id", record)
+	}
 	byNode := map[string]scheduler.TaskRecord{}
 	for _, task := range record.Tasks {
+		if task.RunID == "" || task.ParentRunID != record.RunID {
+			t.Fatalf("task record = %+v, want invocation id linked to workflow run", task)
+		}
 		byNode[task.Node] = task
 	}
 	if byNode["child"].Status != StatusSkipped || byNode["a"].Status != StatusSuccess || byNode["b"].Status != StatusSuccess || byNode["bad"].Status != StatusFailed {
@@ -77,15 +83,21 @@ func TestTaskRecordsPersistSafeExecutionMetadata(t *testing.T) {
 		}),
 	})
 
-	direct := e.RunTask(context.Background(), "demo", "compile", "manual")
+	direct := e.RunTask(context.Background(), "demo", "compile", scheduler.ManualTrigger())
 	if direct.Record == nil || len(direct.Record.Tasks) != 1 {
 		t.Fatalf("direct result = %+v, want one task record", direct)
 	}
+	if direct.Record.RunID == "" || direct.Record.Tasks[0].RunID == "" || direct.Record.Tasks[0].ParentRunID != direct.Record.RunID {
+		t.Fatalf("direct task linkage = %+v, want root and invocation ids", direct.Record)
+	}
 	assertSafeTaskRecord(t, direct.Record.Tasks[0])
 
-	workflowRun := e.Run(context.Background(), "demo", "build", "manual")
+	workflowRun := e.Run(context.Background(), "demo", "build", scheduler.ManualTrigger())
 	if workflowRun.Record == nil || len(workflowRun.Record.Tasks) != 1 {
 		t.Fatalf("workflow result = %+v, want one task record", workflowRun.Record)
+	}
+	if workflowRun.Record.RunID == direct.Record.RunID || workflowRun.Record.Tasks[0].ParentRunID != workflowRun.Record.RunID {
+		t.Fatalf("workflow linkage = %+v, want distinct root run id", workflowRun.Record)
 	}
 	assertSafeTaskRecord(t, workflowRun.Record.Tasks[0])
 }
@@ -143,7 +155,7 @@ func TestTaskForbidQueuesAcrossDirectRuns(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result := e.RunTask(context.Background(), "demo", "job", "manual")
+			result := e.RunTask(context.Background(), "demo", "job", scheduler.ManualTrigger())
 			if result.Record == nil || result.Record.Status != StatusSuccess {
 				t.Errorf("result = %+v", result)
 			}
@@ -168,9 +180,11 @@ func TestWorkflowForbidSkipsOverlappingRun(t *testing.T) {
 		"demo/pipeline": {Project: "demo", Name: "pipeline", Concurrency: "forbid", Tasks: map[string]config.EffectiveWorkflowTask{"job": {Name: "job", Uses: "job"}}},
 	})
 	firstDone := make(chan scheduler.ExecutionResult, 1)
-	go func() { firstDone <- e.Run(context.Background(), "demo", "pipeline", "one") }()
+	go func() {
+		firstDone <- e.Run(context.Background(), "demo", "pipeline", scheduler.TriggerRef{Type: scheduler.TriggerManual, Name: "one"})
+	}()
 	<-started
-	second := e.Run(context.Background(), "demo", "pipeline", "two")
+	second := e.Run(context.Background(), "demo", "pipeline", scheduler.TriggerRef{Type: scheduler.TriggerManual, Name: "two"})
 	if second.Record == nil || second.Record.Status != StatusSkipped {
 		t.Fatalf("second result = %+v, want skipped", second)
 	}

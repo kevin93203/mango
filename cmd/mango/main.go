@@ -28,6 +28,7 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
 	"github.com/kevin93203/mango/internal/tui"
+	"golang.org/x/term"
 )
 
 const processOperationTimeout = 30 * time.Second
@@ -88,6 +89,8 @@ func main() {
 		commandErr = workflowCommand(args[1:])
 	case "task":
 		commandErr = taskCommand(args[1:])
+	case "history":
+		commandErr = historyCommand(args[1:])
 	case "startup":
 		commandErr = startupCommand(layout, args[1:])
 	case "doctor":
@@ -123,9 +126,10 @@ func usage() {
 		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
-		"  schedule ls|run PROJECT/SCHEDULE",
-		"  workflow ls|run|status|history [PROJECT/WORKFLOW]",
-		"  task ls|run|history [PROJECT/TASK]",
+		"  schedule ls|history",
+		"  workflow ls|run PROJECT/WORKFLOW",
+		"  task ls|run PROJECT/TASK",
+		"  history [--tail N] [--trigger-type TYPE] [--trigger NAME] [--target-type TYPE] [--target PROJECT/NAME] [--attempts]",
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
@@ -867,7 +871,7 @@ func normalizeInterspersedFlagArgs(args []string) []string {
 		arg := args[index]
 		if strings.HasPrefix(arg, "-") && arg != "-" {
 			flags = append(flags, arg)
-			if (arg == "--tail" || arg == "-tail") && !strings.Contains(arg, "=") && index+1 < len(args) {
+			if isValueFlag(arg) && !strings.Contains(arg, "=") && index+1 < len(args) {
 				index++
 				flags = append(flags, args[index])
 			}
@@ -876,6 +880,16 @@ func normalizeInterspersedFlagArgs(args []string) []string {
 		positionals = append(positionals, arg)
 	}
 	return append(flags, positionals...)
+}
+
+func isValueFlag(arg string) bool {
+	name := strings.SplitN(arg, "=", 2)[0]
+	switch name {
+	case "--tail", "-tail", "--trigger-type", "--trigger", "--target-type", "--target":
+		return true
+	default:
+		return false
+	}
 }
 
 func rejectJSON(command string) error {
@@ -1354,70 +1368,30 @@ func scheduleCommand(args []string) error {
 
 func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
 	if len(args) == 0 {
-		return errors.New("schedule requires ls, history, or run")
+		return errors.New("schedule requires ls or history")
 	}
-	var method string
-	var params interface{}
-	showAttempts := false
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
 			return errors.New("schedule ls does not accept arguments")
 		}
-		method = "schedule.ls"
-	case "history":
-		method = "schedule.history"
-		fs := newFlagSet("schedule history")
-		tail := fs.Int("tail", 100, "number of history records")
-		attempts := fs.Bool("attempts", false, "show attempt details")
-		if err := fs.Parse(args[1:]); err != nil {
+		response, err := caller("schedule.ls", nil)
+		if err != nil {
 			return err
 		}
-		if len(fs.Args()) != 0 {
-			return errors.New("schedule history does not accept positional arguments")
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
 		}
-		if *tail < 0 {
-			return errors.New("schedule history tail must be non-negative")
-		}
-		params = struct {
-			Tail int `json:"tail"`
-		}{*tail}
-		showAttempts = *attempts
-	case "run":
-		if len(args) != 2 {
-			return errors.New("schedule run requires PROJECT/SCHEDULE")
-		}
-		method = "schedule.run"
-		params = struct{ Key string }{args[1]}
-	default:
-		return fmt.Errorf("unknown schedule command %q", args[0])
-	}
-	response, err := caller(method, params)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		return cliOutput.JSON(response.Data)
-	}
-	switch method {
-	case "schedule.ls":
 		var schedules []api.ScheduleInfo
 		if err := decodeData(response.Data, &schedules); err != nil {
 			return err
 		}
 		printScheduleTable(schedules)
-	case "schedule.history":
-		var history []scheduler.Record
-		if err := decodeData(response.Data, &history); err != nil {
-			return err
-		}
-		printScheduleHistory(history, showAttempts)
-	case "schedule.run":
-		var result map[string]string
-		if err := decodeData(response.Data, &result); err != nil {
-			return err
-		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Schedule %s started", result["key"])))
+		return nil
+	case "history":
+		return historyCommandWithCaller(args[1:], caller, true)
+	default:
+		return fmt.Errorf("unknown schedule command %q", args[0])
 	}
 	return nil
 }
@@ -1426,179 +1400,149 @@ func workflowCommand(args []string) error { return workflowCommandWithCaller(arg
 
 func workflowCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
 	if len(args) == 0 {
-		return errors.New("workflow requires ls, run, status, or history")
+		return errors.New("workflow requires ls or run")
 	}
-	method := ""
-	var params interface{}
-	historyTarget := ""
-	showHistoryTasks := false
-	historyTail := 100
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
 			return errors.New("workflow ls does not accept arguments")
 		}
-		method = "workflow.ls"
-	case "run", "status":
-		if len(args) != 2 {
-			return fmt.Errorf("workflow %s requires PROJECT/WORKFLOW", args[0])
-		}
-		method = "workflow." + args[0]
-		params = struct{ Key string }{args[1]}
-	case "history":
-		fs := newFlagSet("workflow history")
-		tail := fs.Int("tail", 100, "number of history records")
-		tasks := fs.Bool("tasks", false, "include task records")
-		if err := fs.Parse(normalizeInterspersedFlagArgs(args[1:])); err != nil {
+		response, err := caller("workflow.ls", nil)
+		if err != nil {
 			return err
 		}
-		if len(fs.Args()) > 1 {
-			return errors.New("workflow history accepts at most one PROJECT/WORKFLOW")
-		}
-		if *tail < 0 {
-			return errors.New("workflow history tail must be non-negative")
-		}
-		method = "workflow.history"
-		historyTail = *tail
-		showHistoryTasks = *tasks
-		if len(fs.Args()) == 1 {
-			historyTarget = fs.Args()[0]
-			params = struct {
-				Key   string `json:"key"`
-				Tail  int    `json:"tail"`
-				Tasks bool   `json:"tasks"`
-			}{historyTarget, *tail, *tasks}
-		} else {
-			params = struct {
-				Tail int `json:"tail"`
-			}{*tail}
-		}
-	default:
-		return fmt.Errorf("unknown workflow command %q", args[0])
-	}
-	if method == "workflow.history" && historyTarget == "" && !jsonOutput {
-		return tui.RunWorkflowHistory(cliOutput, func(tail int) ([]scheduler.Record, error) {
-			response, err := caller("workflow.history", struct {
-				Tail int `json:"tail"`
-			}{tail})
-			if err != nil {
-				return nil, err
-			}
-			var history []scheduler.Record
-			if err := decodeData(response.Data, &history); err != nil {
-				return nil, err
-			}
-			return history, nil
-		}, historyTail, showHistoryTasks)
-	}
-	response, err := caller(method, params)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		return cliOutput.JSON(response.Data)
-	}
-	switch method {
-	case "workflow.ls", "workflow.status":
-		if method == "workflow.status" {
-			var item api.WorkflowInfo
-			if err := decodeData(response.Data, &item); err != nil {
-				return err
-			}
-			printWorkflowTable([]api.WorkflowInfo{item})
-			return nil
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
 		}
 		var items []api.WorkflowInfo
 		if err := decodeData(response.Data, &items); err != nil {
 			return err
 		}
 		printWorkflowTable(items)
-	case "workflow.history":
-		var history []scheduler.Record
-		if err := decodeData(response.Data, &history); err != nil {
+		return nil
+	case "run":
+		if len(args) != 2 {
+			return errors.New("workflow run requires PROJECT/WORKFLOW")
+		}
+		response, err := caller("workflow.run", struct{ Key string }{args[1]})
+		if err != nil {
 			return err
 		}
-		if showHistoryTasks {
-			printWorkflowHistoryTasks(history)
-		} else {
-			printExecutionHistory("WORKFLOW", history)
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
 		}
-	case "workflow.run":
 		var result map[string]string
 		if err := decodeData(response.Data, &result); err != nil {
 			return err
 		}
 		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s started", result["key"])))
+		return nil
+	default:
+		return fmt.Errorf("unknown workflow command %q", args[0])
 	}
-	return nil
 }
-
-func taskCommand(args []string) error { return taskCommandWithCaller(args, call) }
 
 func taskCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
 	if len(args) == 0 {
-		return errors.New("task requires ls, run, or history")
+		return errors.New("task requires ls or run")
 	}
-	method := ""
-	var params interface{}
-	historyTarget := ""
-	historyTail := 100
-	showHistoryAttempts := false
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
 			return errors.New("task ls does not accept arguments")
 		}
-		method = "task.ls"
+		response, err := caller("task.ls", nil)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
+		}
+		var items []api.TaskInfo
+		if err := decodeData(response.Data, &items); err != nil {
+			return err
+		}
+		printTaskTable(items)
+		return nil
 	case "run":
 		if len(args) != 2 {
 			return errors.New("task run requires PROJECT/TASK")
 		}
-		method, params = "task.run", struct{ Key string }{args[1]}
-	case "history":
-		fs := newFlagSet("task history")
-		tail := fs.Int("tail", 100, "number of history records")
-		attempts := fs.Bool("attempts", false, "show attempt details")
-		if err := fs.Parse(normalizeInterspersedFlagArgs(args[1:])); err != nil {
+		response, err := caller("task.run", struct{ Key string }{args[1]})
+		if err != nil {
 			return err
 		}
-		if len(fs.Args()) > 1 {
-			return errors.New("task history accepts at most one PROJECT/TASK")
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
 		}
-		if *tail < 0 {
-			return errors.New("task history tail must be non-negative")
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			return err
 		}
-		method = "task.history"
-		historyTail = *tail
-		showHistoryAttempts = *attempts
-		if len(fs.Args()) == 1 {
-			historyTarget = fs.Args()[0]
-			params = struct {
-				Key  string `json:"key"`
-				Tail int    `json:"tail"`
-			}{historyTarget, *tail}
-		} else {
-			params = struct {
-				Tail int `json:"tail"`
-			}{*tail}
-		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s started", result["key"])))
+		return nil
 	default:
 		return fmt.Errorf("unknown task command %q", args[0])
 	}
-	if method == "task.history" && historyTarget == "" && !jsonOutput {
-		return tui.RunTaskHistory(cliOutput, func(tail int) ([]scheduler.TaskHistoryRecord, error) {
-			response, err := caller("task.history", struct {
-				Tail int `json:"tail"`
-			}{tail})
+}
+
+type historyCLIParams struct {
+	Tail        int    `json:"tail"`
+	TriggerType string `json:"trigger_type,omitempty"`
+	Trigger     string `json:"trigger,omitempty"`
+	TargetType  string `json:"target_type,omitempty"`
+	Target      string `json:"target,omitempty"`
+}
+
+func historyCommand(args []string) error {
+	return historyCommandWithCaller(args, call, false)
+}
+
+func historyCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error), scheduleOnly bool) error {
+	fs := newFlagSet("history")
+	tail := fs.Int("tail", 100, "number of history records")
+	triggerType := fs.String("trigger-type", "", "filter by trigger type: schedule, webhook, or manual")
+	trigger := fs.String("trigger", "", "filter by trigger name")
+	targetType := fs.String("target-type", "", "filter by target type: task or workflow")
+	target := fs.String("target", "", "filter by PROJECT/TASK or PROJECT/WORKFLOW")
+	attempts := fs.Bool("attempts", false, "show attempt details")
+	if err := fs.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return errors.New("history does not accept positional arguments")
+	}
+	if *tail < 0 {
+		return errors.New("history tail must be non-negative")
+	}
+	if scheduleOnly && *triggerType != "" && *triggerType != scheduler.TriggerSchedule {
+		return errors.New("schedule history only supports --trigger-type schedule")
+	}
+	if scheduleOnly {
+		*triggerType = scheduler.TriggerSchedule
+	}
+	params := historyCLIParams{Tail: *tail, TriggerType: *triggerType, Trigger: *trigger, TargetType: *targetType, Target: *target}
+	if !jsonOutput && termIsInteractive() {
+		filter := tui.HistoryFilter{Tail: *tail, TriggerType: *triggerType, Trigger: *trigger, TargetType: *targetType, Target: *target, ShowAttempts: *attempts}
+		method := "history.ls"
+		if scheduleOnly {
+			method = "schedule.history"
+		}
+		return tui.RunHistory(cliOutput, func(filter tui.HistoryFilter) ([]scheduler.Record, error) {
+			response, err := caller(method, historyCLIParams{Tail: filter.Tail, TriggerType: filter.TriggerType, Trigger: filter.Trigger, TargetType: filter.TargetType, Target: filter.Target})
 			if err != nil {
 				return nil, err
 			}
-			var history []scheduler.TaskHistoryRecord
-			if err := decodeData(response.Data, &history); err != nil {
+			var records []scheduler.Record
+			if err := decodeData(response.Data, &records); err != nil {
 				return nil, err
 			}
-			return history, nil
-		}, historyTail, showHistoryAttempts)
+			return records, nil
+		}, filter)
+	}
+	method := "history.ls"
+	if scheduleOnly {
+		method = "schedule.history"
 	}
 	response, err := caller(method, params)
 	if err != nil {
@@ -1607,32 +1551,23 @@ func taskCommandWithCaller(args []string, caller func(string, interface{}) (ipc.
 	if jsonOutput {
 		return cliOutput.JSON(response.Data)
 	}
-	switch method {
-	case "task.ls":
-		var items []api.TaskInfo
-		if err := decodeData(response.Data, &items); err != nil {
-			return err
-		}
-		printTaskTable(items)
-	case "task.history":
-		var history []scheduler.TaskHistoryRecord
-		if err := decodeData(response.Data, &history); err != nil {
-			return err
-		}
-		if showHistoryAttempts {
-			printTaskHistoryAttempts(history)
-		} else {
-			printTaskHistory(history)
-		}
-	case "task.run":
-		var result map[string]string
-		if err := decodeData(response.Data, &result); err != nil {
-			return err
-		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s started", result["key"])))
+	var records []scheduler.Record
+	if err := decodeData(response.Data, &records); err != nil {
+		return err
+	}
+	if *attempts {
+		printUnifiedHistoryAttempts(records)
+	} else {
+		printUnifiedHistory(records)
 	}
 	return nil
 }
+
+func termIsInteractive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+func taskCommand(args []string) error { return taskCommandWithCaller(args, call) }
 
 func startupCommand(layout paths.Layout, args []string) error {
 	if len(args) == 0 {
@@ -1961,20 +1896,32 @@ func printScheduleTable(schedules []api.ScheduleInfo) {
 	}
 	rows := make([][]cliui.Cell, 0, len(schedules))
 	for _, schedule := range schedules {
+		lastRun := "-"
+		if schedule.LastRun != nil {
+			lastRun = formatTime(*schedule.LastRun)
+		}
 		nextRun := "-"
 		if schedule.NextRun != nil {
 			nextRun = formatTime(*schedule.NextRun)
 		}
+		duration := "-"
+		if schedule.DurationSeconds != nil {
+			duration = formatScheduleDuration(*schedule.DurationSeconds)
+		}
 		rows = append(rows, []cliui.Cell{
 			{Text: schedule.Project + "/" + schedule.Name},
-			{Text: schedule.Cron},
-			{Text: schedule.Timezone},
 			{Text: schedule.TargetType},
 			{Text: schedule.Target, Style: zeroStyle(schedule.Target)},
+			{Text: schedule.Cron},
+			{Text: schedule.Timezone},
+			{Text: fmt.Sprintf("%d", schedule.Runs), Align: cliui.AlignRight},
+			{Text: schedule.Status, Style: cliui.StateStyle(schedule.Status)},
+			{Text: lastRun, Style: zeroStyle(lastRun)},
 			{Text: nextRun, Style: zeroStyle(nextRun)},
+			{Text: duration, Style: zeroStyle(duration)},
 		})
 	}
-	cliOutput.Table([]string{"SCHEDULE", "CRON", "TIMEZONE", "TARGET_TYPE", "TARGET", "NEXT_RUN"}, rows)
+	cliOutput.Table([]string{"SCHEDULE", "TYPE", "TARGET", "CRON", "TIMEZONE", "RUNS", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
 func printWorkflowTable(items []api.WorkflowInfo) {
@@ -1988,14 +1935,24 @@ func printWorkflowTable(items []api.WorkflowInfo) {
 		if item.LastRun != nil {
 			lastRun = formatTime(*item.LastRun)
 		}
+		nextRun := "-"
+		if item.NextRun != nil {
+			nextRun = formatTime(*item.NextRun)
+		}
+		duration := "-"
+		if item.DurationSeconds != nil {
+			duration = formatScheduleDuration(*item.DurationSeconds)
+		}
 		rows = append(rows, []cliui.Cell{
-			{Text: item.Project + "/" + item.Name}, {Text: item.Concurrency},
-			{Text: fmt.Sprintf("%d", item.TaskCount), Align: cliui.AlignRight},
+			{Text: item.Project + "/" + item.Name},
+			{Text: fmt.Sprintf("%d", item.Runs), Align: cliui.AlignRight},
 			{Text: item.Status, Style: cliui.StateStyle(item.Status)},
 			{Text: lastRun, Style: zeroStyle(lastRun)},
+			{Text: nextRun, Style: zeroStyle(nextRun)},
+			{Text: duration, Style: zeroStyle(duration)},
 		})
 	}
-	cliOutput.Table([]string{"WORKFLOW", "CONCURRENCY", "TASKS", "STATUS", "LAST_RUN"}, rows)
+	cliOutput.Table([]string{"WORKFLOW", "RUNS", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
 func printTaskTable(items []api.TaskInfo) {
@@ -2005,223 +1962,156 @@ func printTaskTable(items []api.TaskInfo) {
 	}
 	rows := make([][]cliui.Cell, 0, len(items))
 	for _, item := range items {
-		timeout := "-"
-		if item.TimeoutSeconds > 0 {
-			timeout = formatScheduleDuration(item.TimeoutSeconds)
+		lastRun := "-"
+		if item.LastRun != nil {
+			lastRun = formatTime(*item.LastRun)
+		}
+		nextRun := "-"
+		if item.NextRun != nil {
+			nextRun = formatTime(*item.NextRun)
+		}
+		duration := "-"
+		if item.DurationSeconds != nil {
+			duration = formatScheduleDuration(*item.DurationSeconds)
 		}
 		rows = append(rows, []cliui.Cell{
-			{Text: item.Project + "/" + item.Name}, {Text: item.Command},
-			{Text: timeout, Style: zeroStyle(timeout)}, {Text: item.Concurrency},
-			{Text: fmt.Sprintf("%d", item.RetryCount), Align: cliui.AlignRight},
+			{Text: item.Project + "/" + item.Name},
+			{Text: fmt.Sprintf("%d", item.Runs), Align: cliui.AlignRight},
 			{Text: item.Status, Style: cliui.StateStyle(item.Status)},
+			{Text: lastRun, Style: zeroStyle(lastRun)},
+			{Text: nextRun, Style: zeroStyle(nextRun)},
+			{Text: duration, Style: zeroStyle(duration)},
 		})
 	}
-	cliOutput.Table([]string{"TASK", "COMMAND", "TIMEOUT", "CONCURRENCY", "RETRIES", "STATUS"}, rows)
+	cliOutput.Table([]string{"TASK", "RUNS", "STATUS", "LAST_RUN", "NEXT_RUN", "DURATION"}, rows)
 }
 
-func printExecutionHistory(kind string, history []scheduler.Record) {
+func printUnifiedHistory(history []scheduler.Record) {
 	if len(history) == 0 {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No execution history."))
 		return
 	}
 	rows := make([][]cliui.Cell, 0, len(history))
 	for _, record := range history {
-		status := record.Status
-		if status == "" {
-			status = "success"
-			if record.Error != "" || record.ExitCode != 0 {
-				status = "failed"
-			}
-		}
+		status := historyRecordStatus(record)
 		style := cliui.StateStyle(status)
 		rows = append(rows, []cliui.Cell{
-			{Text: record.Project + "/" + record.Target}, {Text: record.Trigger, Style: zeroStyle(record.Trigger)},
-			{Text: formatTime(record.Started)}, {Text: formatTime(record.Finished)},
+			{Text: historyValue(record.RunID)},
+			{Text: historyValue(record.Trigger.Type)},
+			{Text: record.Trigger.Display(), Style: zeroStyle(record.Trigger.Display())},
+			{Text: historyValue(record.TargetType)},
+			{Text: record.Project + "/" + historyValue(record.Target)},
+			{Text: formatTime(record.Started)},
+			{Text: formatTime(record.Finished)},
+			{Text: formatHistoryRecordDuration(record)},
+			{Text: status, Style: style},
 			{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
-			{Text: status, Style: style}, {Text: compactScheduleText(record.Error), Style: errorStyle(record.Error)},
+			{Text: compactScheduleText(record.Error), Style: errorStyle(record.Error)},
 		})
 	}
-	cliOutput.Table([]string{kind, "TRIGGER", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
+	cliOutput.Table([]string{"RUN_ID", "TRIGGER_TYPE", "TRIGGER", "TARGET_TYPE", "TARGET", "STARTED", "FINISHED", "DURATION", "STATUS", "EXIT", "ERROR"}, rows)
 }
 
-func printWorkflowHistoryTasks(history []scheduler.Record) {
-	if len(history) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No workflow execution history."))
-		return
-	}
+func printUnifiedHistoryAttempts(history []scheduler.Record) {
 	rows := make([][]cliui.Cell, 0)
 	for _, record := range history {
-		if record.TargetType != "workflow" {
-			continue
+		appendAttemptRows := func(task scheduler.TaskRecord) {
+			if len(task.Attempts) == 0 {
+				status := historyStatus(task.Status, task.ExitCode, task.Error)
+				rows = append(rows, []cliui.Cell{
+					{Text: historyValue(record.RunID)},
+					{Text: historyValue(record.Trigger.Type)},
+					{Text: record.Trigger.Display()},
+					{Text: historyValue(record.TargetType)},
+					{Text: record.Project + "/" + historyValue(record.Target)},
+					{Text: historyValue(task.Node)},
+					{Text: historyValue(task.Task)},
+					{Text: "-", Style: cliui.StyleMuted},
+					{Text: formatTime(task.Started)},
+					{Text: formatTime(task.Finished)},
+					{Text: formatScheduleDuration(task.DurationSeconds)},
+					{Text: historyValue(task.Command)},
+					{Text: formatHistoryArgs(task.Args)},
+					{Text: historyValue(task.WorkingDir)},
+					{Text: formatHistoryEnvKeys(task.EnvKeys)},
+					{Text: fmt.Sprintf("%d", task.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
+					{Text: status, Style: cliui.StateStyle(status)},
+					{Text: compactScheduleText(task.Error), Style: errorStyle(task.Error)},
+					{Text: formatHistoryAttemptOutput(task.Stderr), Style: stderrStyle(task.Stderr)},
+				})
+				return
+			}
+			for _, attempt := range task.Attempts {
+				status := historyStatus("", attempt.ExitCode, attempt.Error)
+				rows = append(rows, []cliui.Cell{
+					{Text: historyValue(record.RunID)},
+					{Text: historyValue(record.Trigger.Type)},
+					{Text: record.Trigger.Display()},
+					{Text: historyValue(record.TargetType)},
+					{Text: record.Project + "/" + historyValue(record.Target)},
+					{Text: historyValue(task.Node)},
+					{Text: historyValue(task.Task)},
+					{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
+					{Text: formatTime(attempt.Started)},
+					{Text: formatTime(attempt.Finished)},
+					{Text: formatScheduleDuration(attempt.DurationSeconds)},
+					{Text: historyValue(task.Command)},
+					{Text: formatHistoryArgs(task.Args)},
+					{Text: historyValue(task.WorkingDir)},
+					{Text: formatHistoryEnvKeys(task.EnvKeys)},
+					{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
+					{Text: status, Style: cliui.StateStyle(status)},
+					{Text: compactScheduleText(attempt.Error), Style: errorStyle(attempt.Error)},
+					{Text: formatHistoryAttemptOutput(attempt.Stderr), Style: stderrStyle(attempt.Stderr)},
+				})
+			}
 		}
-		for _, task := range record.Tasks {
-			status := task.Status
-			if status == "" {
-				status = "success"
-				if task.Error != "" || task.ExitCode != 0 {
-					status = "failed"
+		if len(record.Tasks) > 0 {
+			for _, task := range record.Tasks {
+				appendAttemptRows(task)
+			}
+		} else {
+			durationSeconds := 0.0
+			if !record.Started.IsZero() && !record.Finished.IsZero() {
+				durationSeconds = record.Finished.Sub(record.Started).Seconds()
+				if durationSeconds < 0 {
+					durationSeconds = 0
 				}
 			}
-			rows = append(rows, []cliui.Cell{
-				{Text: record.Project + "/" + record.Target},
-				{Text: formatTime(record.Started)},
-				{Text: task.Node},
-				{Text: task.Task},
-				{Text: historyValue(task.Command)},
-				{Text: formatHistoryArgs(task.Args)},
-				{Text: historyValue(task.WorkingDir)},
-				{Text: formatHistoryEnvKeys(task.EnvKeys)},
-				{Text: formatTime(task.Started)},
-				{Text: formatScheduleDuration(task.DurationSeconds), Style: zeroStyle(task.DurationSeconds)},
-				{Text: fmt.Sprintf("%d", len(task.Attempts)), Align: cliui.AlignRight},
-				{Text: fmt.Sprintf("%d", task.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
-				{Text: status, Style: cliui.StateStyle(status)},
-				{Text: compactScheduleText(task.Error), Style: errorStyle(task.Error)},
-			})
+			task := scheduler.TaskRecord{
+				Node: record.Target, Task: record.Target, Status: record.Status,
+				Started: record.Started, Finished: record.Finished, DurationSeconds: durationSeconds,
+				ExitCode: record.ExitCode, Error: record.Error, Stderr: record.Stderr, Attempts: record.Attempts,
+			}
+			appendAttemptRows(task)
 		}
 	}
 	if len(rows) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task records."))
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No attempt details recorded."))
 		return
 	}
-	cliOutput.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
+	cliOutput.Table([]string{"RUN_ID", "TRIGGER_TYPE", "TRIGGER", "TARGET_TYPE", "TARGET", "NODE", "TASK", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "EXIT", "STATUS", "ERROR", "STDERR"}, rows)
 }
 
-func printTaskHistory(history []scheduler.TaskHistoryRecord) {
-	if len(history) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task execution history."))
-		return
-	}
-	rows := make([][]cliui.Cell, 0, len(history))
-	for _, item := range history {
-		status := item.Status
-		if status == "" {
-			status = "success"
-			if item.Error != "" || item.ExitCode != 0 {
-				status = "failed"
-			}
-		}
-		taskName := item.Target
-		if taskName == "" {
-			taskName = item.Name
-		}
-		source := item.Source
-		if source == "" {
-			source = "-"
-		}
-		task := historyTaskRecord(item.Record)
-		rows = append(rows, []cliui.Cell{
-			{Text: item.Project + "/" + taskName},
-			{Text: source, Style: zeroStyle(source)},
-			{Text: item.Trigger, Style: zeroStyle(item.Trigger)},
-			{Text: historyValue(task.Command)},
-			{Text: formatHistoryArgs(task.Args)},
-			{Text: historyValue(task.WorkingDir)},
-			{Text: formatHistoryEnvKeys(task.EnvKeys)},
-			{Text: formatTime(item.Started)},
-			{Text: formatTime(item.Finished)},
-			{Text: fmt.Sprintf("%d", item.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
-			{Text: status, Style: cliui.StateStyle(status)},
-			{Text: compactScheduleText(item.Error), Style: errorStyle(item.Error)},
-		})
-	}
-	cliOutput.Table([]string{"TASK", "SOURCE", "TRIGGER", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
+func historyRecordStatus(record scheduler.Record) string {
+	return historyStatus(record.Status, record.ExitCode, record.Error)
 }
 
-func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
-	if len(history) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task execution history."))
-		return
+func historyStatus(status string, exitCode int, errorText string) string {
+	if status != "" {
+		return status
 	}
-	rows := make([][]cliui.Cell, 0)
-	for _, item := range history {
-		taskName := item.Target
-		if taskName == "" {
-			taskName = item.Name
-		}
-		source := item.Source
-		if source == "" {
-			source = "-"
-		}
-		task := historyTaskRecord(item.Record)
-		if len(item.Attempts) == 0 {
-			status := item.Status
-			if status == "" {
-				status = "success"
-				if item.Error != "" || item.ExitCode != 0 {
-					status = "failed"
-				}
-			}
-			stderrStyle := cliui.StyleMuted
-			if item.Stderr != "" {
-				stderrStyle = cliui.StyleStderr
-			}
-			rows = append(rows, []cliui.Cell{
-				{Text: item.Project + "/" + taskName}, {Text: source, Style: zeroStyle(source)},
-				{Text: "-", Style: cliui.StyleMuted}, {Text: formatTime(item.Started)},
-				{Text: formatTime(item.Finished)}, {Text: formatHistoryRecordDuration(item.Record)},
-				{Text: historyValue(task.Command)}, {Text: formatHistoryArgs(task.Args)},
-				{Text: historyValue(task.WorkingDir)}, {Text: formatHistoryEnvKeys(task.EnvKeys)},
-				{Text: fmt.Sprintf("%d", item.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
-				{Text: status, Style: cliui.StateStyle(status)},
-				{Text: compactScheduleText(item.Error), Style: errorStyle(item.Error)},
-				{Text: compactScheduleText(item.Stderr), Style: stderrStyle},
-			})
-			continue
-		}
-		for _, attempt := range item.Attempts {
-			status := "success"
-			if attempt.Error != "" || attempt.ExitCode != 0 {
-				status = "failed"
-			}
-			stderrStyle := cliui.StyleMuted
-			if attempt.Stderr != "" {
-				stderrStyle = cliui.StyleStderr
-			}
-			rows = append(rows, []cliui.Cell{
-				{Text: item.Project + "/" + taskName}, {Text: source, Style: zeroStyle(source)},
-				{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
-				{Text: formatTime(attempt.Started)}, {Text: formatTime(attempt.Finished)},
-				{Text: formatScheduleDuration(attempt.DurationSeconds)},
-				{Text: historyValue(task.Command)}, {Text: formatHistoryArgs(task.Args)},
-				{Text: historyValue(task.WorkingDir)}, {Text: formatHistoryEnvKeys(task.EnvKeys)},
-				{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
-				{Text: status, Style: cliui.StateStyle(status)},
-				{Text: compactScheduleText(attempt.Error), Style: errorStyle(attempt.Error)},
-				{Text: compactScheduleText(attempt.Stderr), Style: stderrStyle},
-			})
-		}
+	if exitCode != 0 || errorText != "" {
+		return "failed"
 	}
-	if len(rows) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task execution history."))
-		return
-	}
-	cliOutput.Table([]string{"TASK", "SOURCE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
+	return "success"
 }
 
-func historyTaskRecord(record scheduler.Record) scheduler.TaskRecord {
-	if len(record.Tasks) == 0 {
-		return scheduler.TaskRecord{}
+func stderrStyle(value string) cliui.Style {
+	if value == "" {
+		return cliui.StyleMuted
 	}
-	return record.Tasks[0]
-}
-
-func formatHistoryArgs(args []string) string {
-	if len(args) == 0 {
-		return "-"
-	}
-	encoded, err := json.Marshal(args)
-	if err != nil {
-		return "-"
-	}
-	return compactScheduleText(unescapeHistoryJSON(string(encoded)))
-}
-
-func formatHistoryEnvKeys(keys []string) string {
-	if len(keys) == 0 {
-		return "-"
-	}
-	return strings.Join(keys, ",")
+	return cliui.StyleStderr
 }
 
 func historyValue(value string) string {
@@ -2231,8 +2121,23 @@ func historyValue(value string) string {
 	return value
 }
 
-func unescapeHistoryJSON(value string) string {
-	return strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(value)
+func formatHistoryArgs(args []string) string {
+	if len(args) == 0 {
+		return "-"
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return "-"
+	}
+	text := strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(string(data))
+	return compactScheduleText(text)
+}
+
+func formatHistoryEnvKeys(keys []string) string {
+	if len(keys) == 0 {
+		return "-"
+	}
+	return strings.Join(keys, ",")
 }
 
 func formatHistoryRecordDuration(record scheduler.Record) string {
@@ -2246,138 +2151,24 @@ func formatHistoryRecordDuration(record scheduler.Record) string {
 	return formatScheduleDuration(seconds)
 }
 
-func printScheduleHistory(history []scheduler.Record, showAttempts bool) {
-	if len(history) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No schedule history."))
-		return
-	}
-	if showAttempts {
-		printScheduleAttemptTable(history)
-		return
-	}
-	rows := make([][]cliui.Cell, 0, len(history))
-	for _, record := range history {
-		result := "success"
-		style := cliui.StyleSuccess
-		failed := record.Error != "" || record.ExitCode != 0
-		if failed {
-			result = "failed"
-			style = cliui.StyleError
-		}
-		detail := record.Error
-		if stderr := lastNonEmptyLine(record.Stderr); stderr != "" {
-			detail = stderr
-		}
-		detailStyle := cliui.StyleMuted
-		if failed {
-			detailStyle = cliui.StyleError
-		} else if detail != "" {
-			detailStyle = cliui.StyleWarning
-		}
-		rows = append(rows, []cliui.Cell{
-			{Text: record.Project + "/" + record.Name},
-			{Text: formatTime(record.Started)},
-			{Text: formatTime(record.Finished)},
-			{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
-			{Text: result, Style: style},
-			{Text: detail, Style: detailStyle},
-		})
-	}
-	cliOutput.Table([]string{"SCHEDULE", "STARTED", "FINISHED", "EXIT", "RESULT", "ERROR"}, rows)
-}
-
-func printScheduleAttemptTable(history []scheduler.Record) {
-	rows := make([][]cliui.Cell, 0, len(history))
-	for _, record := range history {
-		if record.Attempts == nil {
-			rows = append(rows, legacyScheduleAttemptRow(record))
-			continue
-		}
-		if len(record.Attempts) == 0 {
-			rows = append(rows, emptyScheduleAttemptRow(record))
-			continue
-		}
-		for _, attempt := range record.Attempts {
-			rows = append(rows, scheduleAttemptRow(record, attempt))
-		}
-	}
-	cliOutput.Table([]string{"SCHEDULE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
-}
-
-func scheduleAttemptRow(record scheduler.Record, attempt scheduler.Attempt) []cliui.Cell {
-	result := "success"
-	style := cliui.StyleSuccess
-	if attempt.Error != "" || attempt.ExitCode != 0 {
-		result = "failed"
-		style = cliui.StyleError
-	}
-	errorText := compactScheduleText(attempt.Error)
-	if errorText == "" {
-		errorText = "-"
-	}
-	errStyle := errorStyle(attempt.Error)
-	stderrText := compactScheduleText(attempt.Stderr)
-	if stderrText == "" {
-		stderrText = "-"
-	}
-	stderrStyle := cliui.StyleStderr
-	if attempt.Stderr == "" {
-		stderrStyle = cliui.StyleMuted
-	}
-	durationText := formatScheduleDuration(attempt.DurationSeconds)
-	return []cliui.Cell{
-		{Text: record.Project + "/" + record.Name},
-		{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
-		{Text: formatTime(attempt.Started)},
-		{Text: formatTime(attempt.Finished)},
-		{Text: durationText, Style: zeroStyle(durationText)},
-		{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: style, Align: cliui.AlignRight},
-		{Text: result, Style: style},
-		{Text: errorText, Style: errStyle},
-		{Text: stderrText, Style: stderrStyle},
-	}
-}
-
-func legacyScheduleAttemptRow(record scheduler.Record) []cliui.Cell {
-	result := "success"
-	style := cliui.StyleSuccess
-	if record.Error != "" || record.ExitCode != 0 {
-		result = "failed"
-		style = cliui.StyleError
-	}
-	errorText := compactScheduleText(record.Error)
-	if errorText == "" {
-		errorText = "-"
-	}
-	return []cliui.Cell{
-		{Text: record.Project + "/" + record.Name},
-		{Text: "-", Style: cliui.StyleMuted, Align: cliui.AlignRight},
-		{Text: formatTime(record.Started)},
-		{Text: formatTime(record.Finished)},
-		{Text: "-", Style: cliui.StyleMuted},
-		{Text: fmt.Sprintf("%d", record.ExitCode), Style: style, Align: cliui.AlignRight},
-		{Text: result, Style: style},
-		{Text: errorText, Style: errorStyle(record.Error)},
-		{Text: "attempt details unavailable", Style: cliui.StyleMuted},
-	}
-}
-
-func emptyScheduleAttemptRow(record scheduler.Record) []cliui.Cell {
-	row := legacyScheduleAttemptRow(record)
-	row[len(row)-1] = cliui.Cell{Text: "no attempts recorded", Style: cliui.StyleMuted}
-	return row
-}
-
 func compactScheduleText(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "↵")
 	value = strings.ReplaceAll(value, "\n", "↵")
 	return strings.ReplaceAll(value, "\r", "↵")
 }
 
+func formatHistoryAttemptOutput(value string) string {
+	compact := compactScheduleText(value)
+	if len(compact) > 32 {
+		return compactScheduleText(lastNonEmptyLine(value))
+	}
+	return compact
+}
+
 func lastNonEmptyLine(value string) string {
 	lines := strings.Split(value, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
+	for index := len(lines) - 1; index >= 0; index-- {
+		if line := strings.TrimSpace(lines[index]); line != "" {
 			return line
 		}
 	}

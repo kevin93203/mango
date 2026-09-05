@@ -128,10 +128,20 @@ type ScheduleInfo struct {
 	TargetType      string
 	Target          string
 	TimeoutSeconds  float64
+	Runs            uint64
 	Status          string
 	LastRun         *time.Time
 	NextRun         *time.Time
 	DurationSeconds *float64
+	LastTrigger     *TriggerInfo
+	NextTrigger     *TriggerInfo
+}
+
+type TriggerInfo struct {
+	Type    string
+	Name    string
+	Mode    string
+	EventID string
 }
 
 type TaskInfo struct {
@@ -143,9 +153,13 @@ type TaskInfo struct {
 	TimeoutSeconds  float64
 	Concurrency     string
 	RetryCount      int
+	Runs            uint64
 	Status          string
 	LastRun         *time.Time
+	NextRun         *time.Time
 	DurationSeconds *float64
+	LastTrigger     *TriggerInfo
+	NextTrigger     *TriggerInfo
 }
 
 type WorkflowTaskInfo struct {
@@ -163,8 +177,12 @@ type WorkflowInfo struct {
 	Concurrency     string
 	Status          string
 	TaskCount       int
+	Runs            uint64
 	LastRun         *time.Time
+	NextRun         *time.Time
 	DurationSeconds *float64
+	LastTrigger     *TriggerInfo
+	NextTrigger     *TriggerInfo
 	Tasks           []WorkflowTaskInfo
 }
 

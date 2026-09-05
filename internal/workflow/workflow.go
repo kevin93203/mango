@@ -26,10 +26,11 @@ const (
 // Invocation describes the execution context of a task. It is also used by
 // the daemon to choose an isolated execution log name.
 type Invocation struct {
-	Project  string
-	Workflow string
-	Node     string
-	Trigger  string
+	Project     string
+	Workflow    string
+	Node        string
+	Trigger     scheduler.TriggerRef
+	ParentRunID string
 }
 
 type TaskRunner func(context.Context, config.EffectiveTask, Invocation) scheduler.ExecutionResult
@@ -150,10 +151,15 @@ func (e *Executor) ListTasks(project string) []TaskSnapshot {
 	for _, key := range keys {
 		task := e.tasks[key]
 		item := TaskSnapshot{Task: task, Status: StatusIdle}
+		if e.taskRunning[key] > 0 {
+			item.Status = StatusRunning
+		}
 		if record, ok := e.taskLatest[key]; ok {
-			item.Status = record.Status
-			item.LastRun = timePtr(record.Started)
-			item.DurationSeconds = floatPtr(record.DurationSeconds)
+			if item.Status != StatusRunning {
+				item.Status = record.Status
+				item.LastRun = timePtr(record.Started)
+				item.DurationSeconds = floatPtr(record.DurationSeconds)
+			}
 		}
 		result = append(result, item)
 	}
@@ -177,7 +183,7 @@ func (e *Executor) ListWorkflows(project string) []WorkflowSnapshot {
 		if e.workflowActive[key] > 0 {
 			item.Status = StatusRunning
 		}
-		if record, ok := e.wfLatest[key]; ok && item.Status != StatusRunning && record.Status != StatusSkipped {
+		if record, ok := e.wfLatest[key]; ok && item.Status != StatusRunning {
 			item.Status = record.Status
 			item.LastRun = timePtr(record.Started)
 			item.DurationSeconds = recordDuration(record)
@@ -190,15 +196,16 @@ func (e *Executor) ListWorkflows(project string) []WorkflowSnapshot {
 // Run executes a workflow synchronously. The returned record is not persisted
 // by the executor; the caller decides whether it belongs to a cron run or a
 // manual run and sends it to the common history sink.
-func (e *Executor) Run(ctx context.Context, project, workflowName, trigger string) scheduler.ExecutionResult {
+func (e *Executor) Run(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef) scheduler.ExecutionResult {
 	key := project + "/" + workflowName
+	runID := scheduler.NewRunID()
 	e.mu.Lock()
 	wf, ok := e.workflows[key]
 	if ok {
 		if wf.Concurrency == "forbid" && e.workflowActive[key] > 0 {
 			e.mu.Unlock()
 			now := time.Now()
-			record := scheduler.Record{Project: project, Name: workflowName, TargetType: "workflow", Target: workflowName, Trigger: trigger, Status: StatusSkipped, Started: now, Finished: now}
+			record := scheduler.Record{RunID: runID, Project: project, Name: workflowName, TargetType: "workflow", Target: workflowName, Trigger: trigger, Status: StatusSkipped, Started: now, Finished: now}
 			return scheduler.ExecutionResult{ExitCode: 0, Record: &record}
 		}
 		e.workflowActive[key]++
@@ -208,7 +215,7 @@ func (e *Executor) Run(ctx context.Context, project, workflowName, trigger strin
 		return failedExecution(fmt.Errorf("workflow %s not found", key))
 	}
 
-	record := e.executeWorkflow(ctx, wf, trigger)
+	record := e.executeWorkflow(ctx, wf, runID, trigger)
 	e.mu.Lock()
 	e.workflowActive[key]--
 	e.wfLatest[key] = record
@@ -217,7 +224,7 @@ func (e *Executor) Run(ctx context.Context, project, workflowName, trigger strin
 }
 
 // RunTask executes one direct task synchronously.
-func (e *Executor) RunTask(ctx context.Context, project, taskName, trigger string) scheduler.ExecutionResult {
+func (e *Executor) RunTask(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef) scheduler.ExecutionResult {
 	key := project + "/" + taskName
 	e.mu.Lock()
 	task, ok := e.tasks[key]
@@ -225,23 +232,24 @@ func (e *Executor) RunTask(ctx context.Context, project, taskName, trigger strin
 	if !ok {
 		return failedExecution(fmt.Errorf("task %s not found", key))
 	}
-	result, attempts := e.executeTask(ctx, task, Invocation{Project: project, Node: taskName, Trigger: trigger})
+	rootRunID := scheduler.NewRunID()
+	result, attempts := e.executeTask(ctx, task, Invocation{Project: project, Node: taskName, Trigger: trigger, ParentRunID: rootRunID})
 	now := time.Now()
 	started := now
 	if len(attempts) > 0 {
 		started = attempts[0].Started
 	}
-	taskRecord := makeTaskRecord(taskName, task, started, now, result, attempts, taskStatus(ctx, result))
+	taskRecord := makeTaskRecord(taskName, task, rootRunID, started, now, result, attempts, taskStatus(ctx, result))
 	e.setTaskLatest(key, taskRecord)
 	record := scheduler.Record{
-		Project: project, Name: taskName, TargetType: "task", Target: taskName, Trigger: trigger,
+		RunID: rootRunID, Project: project, Name: taskName, TargetType: "task", Target: taskName, Trigger: trigger,
 		Status: taskRecord.Status, Started: started, Finished: now, ExitCode: taskRecord.ExitCode,
 		Error: taskRecord.Error, Stderr: taskRecord.Stderr, Attempts: attempts, Tasks: []scheduler.TaskRecord{taskRecord},
 	}
 	return scheduler.ExecutionResult{ExitCode: record.ExitCode, Err: errorFromRecord(record), Stderr: record.Stderr, Record: &record}
 }
 
-func (e *Executor) RunNowWorkflow(ctx context.Context, project, workflowName, trigger string) error {
+func (e *Executor) RunNowWorkflow(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef) error {
 	if !e.HasWorkflow(project + "/" + workflowName) {
 		return fmt.Errorf("workflow %s/%s not found", project, workflowName)
 	}
@@ -256,7 +264,7 @@ func (e *Executor) RunNowWorkflow(ctx context.Context, project, workflowName, tr
 	return nil
 }
 
-func (e *Executor) RunNowTask(ctx context.Context, project, taskName, trigger string) error {
+func (e *Executor) RunNowTask(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef) error {
 	if !e.HasTask(project + "/" + taskName) {
 		return fmt.Errorf("task %s/%s not found", project, taskName)
 	}
@@ -273,7 +281,7 @@ func (e *Executor) RunNowTask(ctx context.Context, project, taskName, trigger st
 
 func (e *Executor) Wait() { e.runs.Wait() }
 
-func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkflow, trigger string) scheduler.Record {
+func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkflow, runID string, trigger scheduler.TriggerRef) scheduler.Record {
 	started := time.Now()
 	type nodeResult struct {
 		node   string
@@ -297,7 +305,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 			}
 			if ctx.Err() != nil {
 				state.status = StatusCancelled
-				state.record = cancelledTaskRecord(node, wf.Tasks[node].Uses)
+				state.record = cancelledTaskRecord(node, wf.Tasks[node].Uses, runID)
 				nodes[node] = state
 				progress = true
 				continue
@@ -305,7 +313,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 			ready, blocked := nodeReadiness(node, wf, nodes)
 			if blocked {
 				state.status = StatusSkipped
-				state.record = skippedTaskRecord(node, wf.Tasks[node].Uses)
+				state.record = skippedTaskRecord(node, wf.Tasks[node].Uses, runID)
 				nodes[node] = state
 				progress = true
 				continue
@@ -316,7 +324,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 			task, ok := e.taskFor(wf.Project, wf.Tasks[node].Uses)
 			if !ok {
 				state.status = StatusFailed
-				state.record = failedTaskRecord(node, wf.Tasks[node].Uses, fmt.Errorf("task %s/%s not found", wf.Project, wf.Tasks[node].Uses))
+				state.record = failedTaskRecord(node, wf.Tasks[node].Uses, runID, fmt.Errorf("task %s/%s not found", wf.Project, wf.Tasks[node].Uses))
 				nodes[node] = state
 				progress = true
 				continue
@@ -326,13 +334,13 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 			active++
 			progress = true
 			go func(node string, task config.EffectiveTask) {
-				result, attempts := e.executeTask(ctx, task, Invocation{Project: wf.Project, Workflow: wf.Name, Node: node, Trigger: trigger})
+				result, attempts := e.executeTask(ctx, task, Invocation{Project: wf.Project, Workflow: wf.Name, Node: node, Trigger: trigger, ParentRunID: runID})
 				now := time.Now()
 				begin := now
 				if len(attempts) > 0 {
 					begin = attempts[0].Started
 				}
-				taskRecord := makeTaskRecord(node, task, begin, now, result, attempts, taskStatus(ctx, result))
+				taskRecord := makeTaskRecord(node, task, runID, begin, now, result, attempts, taskStatus(ctx, result))
 				e.setTaskLatest(wf.Project+"/"+task.Name, taskRecord)
 				results <- nodeResult{node: node, record: taskRecord}
 			}(node, task)
@@ -368,7 +376,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 		state := nodes[node]
 		if state.status == "pending" {
 			state.status = StatusCancelled
-			state.record = cancelledTaskRecord(node, wf.Tasks[node].Uses)
+			state.record = cancelledTaskRecord(node, wf.Tasks[node].Uses, runID)
 		}
 		records = append(records, state.record)
 		switch state.status {
@@ -398,7 +406,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 	}
 	finished := time.Now()
 	return scheduler.Record{
-		Project: wf.Project, Name: wf.Name, TargetType: "workflow", Target: wf.Name, Trigger: trigger,
+		RunID: runID, Project: wf.Project, Name: wf.Name, TargetType: "workflow", Target: wf.Name, Trigger: trigger,
 		Status: status, Started: started, Finished: finished, ExitCode: exitCode, Error: errorText, Tasks: records,
 	}
 }
@@ -504,9 +512,10 @@ func sortedWorkflowNodes(wf config.EffectiveWorkflow) []string {
 	return result
 }
 
-func makeTaskRecord(node string, task config.EffectiveTask, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
+func makeTaskRecord(node string, task config.EffectiveTask, parentRunID string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
 	metadata := scheduler.SafeTaskMetadata(task.Command, task.Args, task.WorkingDir, task.DeclaredEnv)
 	record := scheduler.TaskRecord{
+		RunID: scheduler.NewRunID(), ParentRunID: parentRunID,
 		Node: node, Task: task.Name, Command: metadata.Command, Args: metadata.Args,
 		WorkingDir: metadata.WorkingDir, EnvKeys: metadata.EnvKeys, ArgsRedacted: metadata.ArgsRedacted,
 		Status: status, Started: started, Finished: finished,
@@ -529,19 +538,19 @@ func taskStatus(ctx context.Context, result scheduler.ExecutionResult) string {
 	return StatusSuccess
 }
 
-func skippedTaskRecord(node, task string) scheduler.TaskRecord {
+func skippedTaskRecord(node, task, parentRunID string) scheduler.TaskRecord {
 	now := time.Now()
-	return scheduler.TaskRecord{Node: node, Task: task, Status: StatusSkipped, Started: now, Finished: now, ExitCode: 0}
+	return scheduler.TaskRecord{RunID: scheduler.NewRunID(), ParentRunID: parentRunID, Node: node, Task: task, Status: StatusSkipped, Started: now, Finished: now, ExitCode: 0}
 }
 
-func cancelledTaskRecord(node, task string) scheduler.TaskRecord {
+func cancelledTaskRecord(node, task, parentRunID string) scheduler.TaskRecord {
 	now := time.Now()
-	return scheduler.TaskRecord{Node: node, Task: task, Status: StatusCancelled, Started: now, Finished: now, ExitCode: 130, Error: context.Canceled.Error()}
+	return scheduler.TaskRecord{RunID: scheduler.NewRunID(), ParentRunID: parentRunID, Node: node, Task: task, Status: StatusCancelled, Started: now, Finished: now, ExitCode: 130, Error: context.Canceled.Error()}
 }
 
-func failedTaskRecord(node, task string, err error) scheduler.TaskRecord {
+func failedTaskRecord(node, task, parentRunID string, err error) scheduler.TaskRecord {
 	now := time.Now()
-	return scheduler.TaskRecord{Node: node, Task: task, Status: StatusFailed, Started: now, Finished: now, ExitCode: 1, Error: err.Error()}
+	return scheduler.TaskRecord{RunID: scheduler.NewRunID(), ParentRunID: parentRunID, Node: node, Task: task, Status: StatusFailed, Started: now, Finished: now, ExitCode: 1, Error: err.Error()}
 }
 
 func failedExecution(err error) scheduler.ExecutionResult {

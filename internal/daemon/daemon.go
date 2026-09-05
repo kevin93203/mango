@@ -112,16 +112,14 @@ type logRequest struct {
 	IncludeOffset bool
 }
 
-type scheduleHistoryRequest struct {
-	Tail int `json:"tail"`
-}
-
-type executionHistoryRequest struct {
-	Key     string `json:"key"`
-	Project string `json:"project"`
-	Name    string `json:"name"`
-	Tail    int    `json:"tail"`
-	Tasks   bool   `json:"tasks"`
+type historyRequest struct {
+	Tail        int    `json:"tail"`
+	TriggerType string `json:"trigger_type"`
+	Trigger     string `json:"trigger"`
+	TargetType  string `json:"target_type"`
+	Target      string `json:"target"`
+	Project     string `json:"project"`
+	Name        string `json:"name"`
 }
 
 type executionTargetRequest struct {
@@ -1728,9 +1726,9 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 	}
 	switch schedule.TargetType {
 	case "workflow":
-		return d.workflow.Run(ctx, schedule.Project, schedule.Target, schedule.Name)
+		return d.workflow.Run(ctx, schedule.Project, schedule.Target, scheduler.ScheduleTrigger(schedule.Name))
 	case "task":
-		return d.workflow.RunTask(ctx, schedule.Project, schedule.Target, schedule.Name)
+		return d.workflow.RunTask(ctx, schedule.Project, schedule.Target, scheduler.ScheduleTrigger(schedule.Name))
 	default:
 		return scheduler.ExecutionResult{ExitCode: 1, Err: fmt.Errorf("schedule %s has invalid target type %q", schedule.Name, schedule.TargetType)}
 	}
@@ -2002,33 +2000,40 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 				Timezone:        location.String(),
 				TargetType:      item.TargetType,
 				Target:          item.Target,
+				Runs:            snapshot.Runs,
 				Status:          snapshot.Status,
 				LastRun:         scheduleTimeIn(snapshot.LastRun, location),
 				NextRun:         scheduleTimeIn(snapshot.NextRun, location),
 				DurationSeconds: snapshot.DurationSeconds,
+				LastTrigger:     scheduleLastTrigger(snapshot.LastRun, item.Name),
+				NextTrigger:     scheduleNextTrigger(snapshot.NextRun, item.Name),
 			})
 		}
 		return success(request, result)
-	case "schedule.run":
-		var p struct{ Key string }
-		if err := json.Unmarshal(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		if err := d.scheduler.RunNow(ctx, p.Key); err != nil {
-			return failure(request, "SCHEDULE_RUN_FAILED", err)
-		}
-		return success(request, map[string]string{"key": p.Key, "status": "started"})
 	case "schedule.history":
-		// Compatibility alias. New clients should query workflow.history or
-		// task.history so the target type can be filtered explicitly.
-		var p scheduleHistoryRequest
+		var p historyRequest
 		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if p.Tail < 0 {
-			return failure(request, "BAD_PARAMS", errors.New("schedule history tail must be non-negative"))
+		if p.TriggerType != "" && p.TriggerType != scheduler.TriggerSchedule {
+			return failure(request, "BAD_PARAMS", errors.New("schedule history only supports trigger_type=schedule"))
 		}
-		return success(request, d.scheduler.HistoryTail(p.Tail))
+		p.TriggerType = scheduler.TriggerSchedule
+		history, err := d.queryHistory(p)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		return success(request, history)
+	case "history.ls":
+		var p historyRequest
+		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		history, err := d.queryHistory(p)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		return success(request, history)
 	case "workflow.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
@@ -2050,40 +2055,10 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.workflow.RunNowWorkflow(d.executionContext(), project, name, "manual"); err != nil {
+		if err := d.workflow.RunNowWorkflow(d.executionContext(), project, name, scheduler.ManualTrigger()); err != nil {
 			return failure(request, "WORKFLOW_RUN_FAILED", err)
 		}
 		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
-	case "workflow.status":
-		var p executionTargetRequest
-		if err := json.Unmarshal(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
-		if err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		info, err := d.getWorkflowInfo(project, name)
-		if err != nil {
-			return failure(request, "WORKFLOW_NOT_FOUND", err)
-		}
-		return success(request, info)
-	case "workflow.history":
-		var p executionHistoryRequest
-		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		if p.Tail < 0 {
-			return failure(request, "BAD_PARAMS", errors.New("workflow history tail must be non-negative"))
-		}
-		if p.Key == "" && p.Project == "" && p.Name == "" {
-			return success(request, filterWorkflowHistory(d.scheduler.HistoryTail(0), "", "", p.Tail))
-		}
-		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
-		if err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		return success(request, filterWorkflowHistory(d.scheduler.HistoryTail(0), project, name, p.Tail))
 	case "task.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
@@ -2101,26 +2076,10 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.workflow.RunNowTask(d.executionContext(), project, name, "manual"); err != nil {
+		if err := d.workflow.RunNowTask(d.executionContext(), project, name, scheduler.ManualTrigger()); err != nil {
 			return failure(request, "TASK_RUN_FAILED", err)
 		}
 		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
-	case "task.history":
-		var p executionHistoryRequest
-		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		if p.Tail < 0 {
-			return failure(request, "BAD_PARAMS", errors.New("task history tail must be non-negative"))
-		}
-		if p.Key == "" && p.Project == "" && p.Name == "" {
-			return success(request, filterTaskHistory(d.scheduler.HistoryTail(0), "", "", p.Tail))
-		}
-		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
-		if err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		return success(request, filterTaskHistory(d.scheduler.HistoryTail(0), project, name, p.Tail))
 	default:
 		return failure(request, "METHOD_NOT_FOUND", fmt.Errorf("unknown method %q", request.Method))
 	}
@@ -2155,15 +2114,22 @@ func taskInfo(snapshot workflow.TaskSnapshot) api.TaskInfo {
 
 func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInfo {
 	info := taskInfo(snapshot)
+	running := info.Status == workflow.StatusRunning
+	info.Runs = d.scheduler.RunCount("task", snapshot.Task.Project, snapshot.Task.Name)
 	latest := scheduler.TaskRecord{}
+	var latestTrigger scheduler.TriggerRef
 	hasLatest := false
 	for _, record := range d.scheduler.HistoryTail(0) {
 		if record.Project != snapshot.Task.Project {
 			continue
 		}
 		if record.TargetType == "task" && record.Target == snapshot.Task.Name {
-			if len(record.Tasks) > 0 && (!hasLatest || record.Tasks[0].Started.After(latest.Started)) {
-				latest, hasLatest = record.Tasks[0], true
+			candidate := scheduler.TaskRecord{Started: record.Started, Finished: record.Finished, DurationSeconds: recordDurationSeconds(record), Status: record.Status, ExitCode: record.ExitCode, Error: record.Error}
+			if len(record.Tasks) > 0 {
+				candidate = record.Tasks[0]
+			}
+			if !hasLatest || candidate.Started.After(latest.Started) {
+				latest, latestTrigger, hasLatest = candidate, record.Trigger, true
 			}
 			continue
 		}
@@ -2172,16 +2138,20 @@ func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot) api.TaskInf
 		}
 		for _, task := range record.Tasks {
 			if task.Task == snapshot.Task.Name && (!hasLatest || task.Started.After(latest.Started)) {
-				latest, hasLatest = task, true
+				latest, latestTrigger, hasLatest = task, record.Trigger, true
 			}
 		}
 	}
 	if hasLatest {
-		info.Status = latest.Status
-		info.LastRun = &latest.Started
-		duration := latest.DurationSeconds
-		info.DurationSeconds = &duration
+		if !running {
+			info.Status = latest.Status
+			info.LastRun = &latest.Started
+			duration := latest.DurationSeconds
+			info.DurationSeconds = &duration
+		}
+		info.LastTrigger = triggerInfo(latestTrigger)
 	}
+	info.NextRun, info.NextTrigger = d.nextRunForTarget("task", snapshot.Task.Project, snapshot.Task.Name)
 	return info
 }
 
@@ -2207,6 +2177,9 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 	for _, snapshot := range d.workflow.ListWorkflows(project) {
 		if snapshot.Workflow.Name == name {
 			info := workflowInfo(snapshot)
+			running := info.Status == workflow.StatusRunning
+			info.Runs = d.scheduler.RunCount("workflow", project, name)
+			info.NextRun, info.NextTrigger = d.nextRunForTarget("workflow", project, name)
 			var latest *scheduler.Record
 			for _, record := range d.scheduler.HistoryTail(0) {
 				if record.Project == project && record.TargetType == "workflow" && record.Target == name && (latest == nil || record.Started.After(latest.Started)) {
@@ -2215,7 +2188,7 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 				}
 			}
 			if latest != nil {
-				if latest.Status != workflow.StatusSkipped {
+				if !running {
 					info.Status = latest.Status
 					info.LastRun = &latest.Started
 					duration := latest.Finished.Sub(latest.Started).Seconds()
@@ -2224,16 +2197,19 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 					}
 					info.DurationSeconds = &duration
 				}
+				info.LastTrigger = triggerInfo(latest.Trigger)
 				byNode := make(map[string]scheduler.TaskRecord, len(latest.Tasks))
 				for _, task := range latest.Tasks {
 					byNode[task.Node] = task
 				}
 				for index := range info.Tasks {
 					if task, ok := byNode[info.Tasks[index].Node]; ok {
-						info.Tasks[index].Status = task.Status
-						info.Tasks[index].LastRun = &task.Started
-						taskDuration := task.DurationSeconds
-						info.Tasks[index].DurationSeconds = &taskDuration
+						if !running {
+							info.Tasks[index].Status = task.Status
+							info.Tasks[index].LastRun = &task.Started
+							taskDuration := task.DurationSeconds
+							info.Tasks[index].DurationSeconds = &taskDuration
+						}
 					}
 				}
 			}
@@ -2243,68 +2219,153 @@ func (d *Daemon) getWorkflowInfo(project, name string) (api.WorkflowInfo, error)
 	return api.WorkflowInfo{}, fmt.Errorf("workflow %s/%s not found", project, name)
 }
 
-func filterWorkflowHistory(history []scheduler.Record, project, workflowName string, tail int) []scheduler.Record {
+func triggerInfo(trigger scheduler.TriggerRef) *api.TriggerInfo {
+	if trigger.IsZero() {
+		return nil
+	}
+	return &api.TriggerInfo{Type: trigger.Type, Name: trigger.Name, Mode: trigger.Mode, EventID: trigger.EventID}
+}
+
+func recordDurationSeconds(record scheduler.Record) float64 {
+	if record.Started.IsZero() || record.Finished.IsZero() {
+		return 0
+	}
+	duration := record.Finished.Sub(record.Started).Seconds()
+	if duration < 0 {
+		return 0
+	}
+	return duration
+}
+
+func (d *Daemon) nextRunForTarget(targetType, project, name string) (*time.Time, *api.TriggerInfo) {
+	var next *time.Time
+	var trigger *api.TriggerInfo
+	for _, snapshot := range d.scheduler.ListSnapshots() {
+		if snapshot.NextRun == nil || snapshot.Schedule.Project != project {
+			continue
+		}
+		matches := snapshot.Schedule.TargetType == targetType && snapshot.Schedule.Target == name
+		if targetType == "task" && snapshot.Schedule.TargetType == "workflow" {
+			for _, workflowSnapshot := range d.workflow.ListWorkflows(project) {
+				if workflowSnapshot.Workflow.Name != snapshot.Schedule.Target {
+					continue
+				}
+				for _, node := range workflowSnapshot.Workflow.Tasks {
+					if node.Uses == name {
+						matches = true
+						break
+					}
+				}
+			}
+		}
+		if !matches || (next != nil && !snapshot.NextRun.Before(*next)) {
+			continue
+		}
+		value := *snapshot.NextRun
+		next = &value
+		trigger = triggerInfo(scheduler.ScheduleTrigger(snapshot.Schedule.Name))
+	}
+	return next, trigger
+}
+
+func (d *Daemon) queryHistory(request historyRequest) ([]scheduler.Record, error) {
+	if request.Tail < 0 {
+		return nil, errors.New("history tail must be non-negative")
+	}
+	if request.TargetType != "" && request.TargetType != "task" && request.TargetType != "workflow" {
+		return nil, fmt.Errorf("unknown target type %q", request.TargetType)
+	}
+	project, name := request.Project, request.Name
+	if request.Target != "" {
+		var err error
+		project, name, err = splitKey(request.Target)
+		if err != nil {
+			return nil, fmt.Errorf("target: %w", err)
+		}
+	}
 	result := make([]scheduler.Record, 0)
-	for _, record := range history {
-		if record.TargetType != "workflow" {
+	for _, record := range d.scheduler.HistoryTail(0) {
+		if request.TriggerType != "" && record.Trigger.Type != request.TriggerType {
+			continue
+		}
+		if request.Trigger != "" && record.Trigger.Name != request.Trigger {
 			continue
 		}
 		if project != "" && record.Project != project {
 			continue
 		}
-		if workflowName != "" && record.Target != workflowName {
+		if request.TargetType == "workflow" && record.TargetType != "workflow" {
 			continue
+		}
+		if request.TargetType == "workflow" && name != "" && record.Target != name {
+			continue
+		}
+		if request.TargetType == "task" && !recordContainsTask(record, project, name) {
+			continue
+		}
+		if request.TargetType == "" && project != "" && name != "" && !recordMatchesTarget(record, project, name) {
+			continue
+		}
+		if request.TargetType != "task" && request.TargetType != "workflow" && name != "" && record.Target != name {
+			continue
+		}
+		if request.TargetType == "task" && record.TargetType == "workflow" && name != "" {
+			matchingTasks := make([]scheduler.TaskRecord, 0)
+			for _, task := range record.Tasks {
+				if task.Task == name {
+					matchingTasks = append(matchingTasks, task)
+				}
+			}
+			record.Tasks = matchingTasks
 		}
 		result = append(result, record)
 	}
-	return tailRecords(result, tail)
+	return tailRecords(result, request.Tail), nil
 }
 
-func filterTaskHistory(history []scheduler.Record, project, taskName string, tail int) []scheduler.TaskHistoryRecord {
-	result := make([]scheduler.TaskHistoryRecord, 0)
-	for _, record := range history {
-		if project != "" && record.Project != project {
-			continue
-		}
-		if record.TargetType == "task" {
-			if taskName != "" && record.Target != taskName {
-				continue
-			}
-			result = append(result, scheduler.TaskHistoryRecord{Record: record, Source: "direct"})
-			continue
-		}
-		if record.TargetType != "workflow" {
-			continue
-		}
-		for _, task := range record.Tasks {
-			if taskName != "" && task.Task != taskName {
-				continue
-			}
-			workflowName := record.Target
-			if workflowName == "" {
-				workflowName = record.Name
-			}
-			result = append(result, scheduler.TaskHistoryRecord{
-				Record: scheduler.Record{
-					Project: record.Project, Name: task.Task, TargetType: "task", Target: task.Task,
-					// Keep the task execution metadata when projecting a workflow node
-					// into the task history view.
-					Tasks:   []scheduler.TaskRecord{task},
-					Trigger: record.Trigger, Status: task.Status, Started: task.Started, Finished: task.Finished,
-					ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr, Attempts: task.Attempts,
-				},
-				Source: "workflow/" + workflowName + "/" + task.Node,
-			})
-		}
+func scheduleLastTrigger(lastRun *time.Time, name string) *api.TriggerInfo {
+	if lastRun == nil {
+		return nil
 	}
-	return tailTaskHistoryRecords(result, tail)
+	return triggerInfo(scheduler.ScheduleTrigger(name))
 }
 
-func tailTaskHistoryRecords(records []scheduler.TaskHistoryRecord, tail int) []scheduler.TaskHistoryRecord {
-	if tail <= 0 || tail >= len(records) {
-		return records
+func scheduleNextTrigger(nextRun *time.Time, name string) *api.TriggerInfo {
+	if nextRun == nil {
+		return nil
 	}
-	return records[len(records)-tail:]
+	return triggerInfo(scheduler.ScheduleTrigger(name))
+}
+
+func recordMatchesTarget(record scheduler.Record, project, name string) bool {
+	if project != "" && record.Project != project {
+		return false
+	}
+	if name == "" {
+		return true
+	}
+	if record.Target == name {
+		return true
+	}
+	return recordContainsTask(record, project, name)
+}
+
+func recordContainsTask(record scheduler.Record, project, name string) bool {
+	if project != "" && record.Project != project {
+		return false
+	}
+	if record.TargetType == "task" && (name == "" || record.Target == name) {
+		return true
+	}
+	if record.TargetType != "workflow" {
+		return false
+	}
+	for _, task := range record.Tasks {
+		if name == "" || task.Task == name {
+			return true
+		}
+	}
+	return false
 }
 
 func tailRecords(records []scheduler.Record, tail int) []scheduler.Record {

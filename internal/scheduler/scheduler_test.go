@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,6 +46,12 @@ func TestRunNowRecordsHistory(t *testing.T) {
 	}
 	if len(history[0].Attempts) != 1 || history[0].Attempts[0].Number != 1 {
 		t.Fatalf("attempts = %+v, want one numbered attempt", history[0].Attempts)
+	}
+	if history[0].RunID == "" || history[0].Trigger.Type != TriggerSchedule || history[0].Trigger.Name != "job" || history[0].Trigger.Mode != TriggerAutomatic {
+		t.Fatalf("record = %+v, want schedule trigger and run id", history[0])
+	}
+	if got := s.TriggerRunCount("demo", ScheduleTrigger("job")); got != 1 {
+		t.Fatalf("schedule runs = %d, want 1", got)
 	}
 }
 
@@ -102,6 +109,42 @@ func TestRunNowRetriesFailedExecution(t *testing.T) {
 	}
 	if history[0].Finished.Sub(history[0].Started) < 10*time.Millisecond {
 		t.Fatalf("record duration = %v, want retry delays included", history[0].Finished.Sub(history[0].Started))
+	}
+	if got := s.TriggerRunCount("demo", ScheduleTrigger("job")); got != 1 {
+		t.Fatalf("schedule runs = %d, want one logical run despite retries", got)
+	}
+}
+
+func TestRunIDsAreUniqueForConcurrentRuns(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		started <- struct{}{}
+		<-release
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "parallel", Cron: "* * * * *", Timezone: time.UTC, Concurrency: "allow",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.RunNow(context.Background(), "demo/parallel"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent schedule did not start")
+		}
+	}
+	close(release)
+	s.Wait()
+	history := s.History()
+	if len(history) != 2 || history[0].RunID == "" || history[0].RunID == history[1].RunID {
+		t.Fatalf("history = %+v, want two distinct persistent run ids", history)
 	}
 }
 
@@ -412,11 +455,14 @@ func TestHistoryPersistsAndLoads(t *testing.T) {
 	if len(history) != 1 || history[0].Error != "exit status 1" || len(history[0].Attempts) != 1 {
 		t.Fatalf("loaded history = %+v", history)
 	}
+	if history[0].RunID == "" || loaded.TriggerRunCount("demo", ScheduleTrigger("job")) != 1 {
+		t.Fatalf("loaded history = %+v, counts = %d; want run id and counter", history, loaded.TriggerRunCount("demo", ScheduleTrigger("job")))
+	}
 }
 
 func TestLoadHistoryKeepsLegacyAttemptsUnknown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "schedule-history.json")
-	data := []byte(`{"version":1,"records":[{"Project":"demo","Name":"job","ExitCode":0}]}`)
+	data := []byte(`{"version":1,"records":[{"Project":"demo","Name":"job","Trigger":"job","ExitCode":0}]}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -435,6 +481,96 @@ func TestLoadHistoryKeepsLegacyAttemptsUnknown(t *testing.T) {
 	}
 	if !bytes.Contains(encoded, []byte(`"Attempts":null`)) {
 		t.Fatalf("legacy record JSON = %s, want null Attempts", encoded)
+	}
+	if history[0].Trigger.Type != TriggerSchedule || history[0].Trigger.Name != "job" || history[0].Trigger.Mode != TriggerAutomatic {
+		t.Fatalf("legacy trigger = %+v, want migrated schedule trigger", history[0].Trigger)
+	}
+	var migrated HistoryFile
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Version != historyVersion || migrated.Counters[counterKey("trigger:"+TriggerSchedule, "demo", "job")] != 1 {
+		t.Fatalf("migrated history = %+v, want version 2 counter", migrated)
+	}
+}
+
+func TestHistoryCountersSurviveRetentionAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "execution-history.json")
+	s := New(nil)
+	if err := s.LoadHistory(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		status := StatusSuccess
+		if index == 1 {
+			status = StatusSkipped
+		}
+		if index == 2 {
+			status = StatusCancelled
+		}
+		s.RecordExecution(Record{
+			RunID: fmt.Sprintf("run-%d", index), Project: "demo", TargetType: "task", Target: "compile",
+			Trigger: ManualTrigger(), Status: status,
+		})
+	}
+	if got := s.RunCount("task", "demo", "compile"); got != 3 {
+		t.Fatalf("task runs = %d, want 3 despite retention", got)
+	}
+	if got := len(s.History()); got != 2 {
+		t.Fatalf("retained history length = %d, want 2", got)
+	}
+	loaded := New(nil)
+	if err := loaded.LoadHistory(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.RunCount("task", "demo", "compile"); got != 3 {
+		t.Fatalf("reloaded task runs = %d, want 3", got)
+	}
+	if got := len(loaded.History()); got != 2 {
+		t.Fatalf("reloaded history length = %d, want 2", got)
+	}
+}
+
+func TestWorkflowNodeInvocationsContributeToTaskRuns(t *testing.T) {
+	s := New(nil)
+	s.RecordExecution(Record{
+		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: ManualTrigger(), Status: StatusSuccess,
+		Tasks: []TaskRecord{
+			{Task: "compile", Status: StatusSuccess},
+			{Task: "compile", Status: StatusSkipped},
+			{Task: "lint", Status: StatusCancelled},
+		},
+	})
+	if got := s.RunCount("workflow", "demo", "pipeline"); got != 1 {
+		t.Fatalf("workflow runs = %d, want one root invocation", got)
+	}
+	if got := s.RunCount("task", "demo", "compile"); got != 2 {
+		t.Fatalf("compile runs = %d, want two node invocations", got)
+	}
+	if got := s.RunCount("task", "demo", "lint"); got != 1 {
+		t.Fatalf("lint runs = %d, want cancelled node counted", got)
+	}
+}
+
+func TestWebhookTriggerIsSerializable(t *testing.T) {
+	record := Record{
+		RunID: "webhook-run", Project: "demo", TargetType: "workflow", Target: "deploy",
+		Trigger: TriggerRef{Type: TriggerWebhook, Name: "github", Mode: TriggerAutomatic, EventID: "evt-123"},
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Record
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Trigger != record.Trigger || decoded.RunID != record.RunID {
+		t.Fatalf("decoded record = %+v, want webhook trigger and run id", decoded)
 	}
 }
 
