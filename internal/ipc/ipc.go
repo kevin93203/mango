@@ -13,6 +13,15 @@ import (
 
 var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: mango daemon start")
 
+type EndpointState uint8
+
+const (
+	EndpointMissing EndpointState = iota
+	EndpointStale
+	EndpointActive
+	EndpointUnknown
+)
+
 var endpointState struct {
 	sync.RWMutex
 	value string
@@ -28,6 +37,29 @@ func endpointForCurrentUser() string {
 	endpointState.RLock()
 	defer endpointState.RUnlock()
 	return endpointState.value
+}
+
+// PrepareEndpoint verifies an endpoint that did not answer the daemon health
+// request. It removes only an endpoint whose transport reports a definite
+// stale condition. Unknown errors are returned so callers fail safely.
+func PrepareEndpoint(ctx context.Context) error {
+	state, err := probeEndpoint(ctx)
+	switch state {
+	case EndpointMissing:
+		return nil
+	case EndpointStale:
+		if err := removeStaleEndpoint(); err != nil {
+			return fmt.Errorf("remove stale daemon endpoint: %w", err)
+		}
+		return nil
+	case EndpointActive:
+		return errors.New("daemon endpoint is active but health check failed")
+	default:
+		if err == nil {
+			return errors.New("daemon endpoint status is unknown")
+		}
+		return fmt.Errorf("inspect daemon endpoint: %w", err)
+	}
 }
 
 type Request struct {

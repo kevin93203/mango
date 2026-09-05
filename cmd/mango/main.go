@@ -436,21 +436,29 @@ func startDaemon(layout paths.Layout) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := waitForDaemon(layout); err != nil {
+	go func() { _ = cmd.Wait() }()
+	response, err := waitForDaemon(layout)
+	if err != nil {
 		return fmt.Errorf("daemon failed to start: %w", err)
 	}
-	cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), cmd.Process.Pid)
-	if response, err := call("health", nil); err == nil {
-		_ = printDaemonWarnings(response.Data)
+	health, err := decodeDaemonHealth(response.Data)
+	if err != nil || health.PID <= 0 {
+		health.PID = cmd.Process.Pid
 	}
+	if health.PID == cmd.Process.Pid {
+		cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), health.PID)
+	} else {
+		cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleWarning, "Daemon already running"), health.PID)
+	}
+	_ = printDaemonWarnings(response.Data)
 	return nil
 }
 
-func waitForDaemon(layout paths.Layout) error {
+func waitForDaemon(layout paths.Layout) (ipc.Response, error) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := call("health", nil); err == nil {
-			return nil
+		if response, err := call("health", nil); err == nil {
+			return response, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -459,9 +467,9 @@ func waitForDaemon(layout paths.Layout) error {
 		if len(message) > 2000 {
 			message = message[len(message)-2000:]
 		}
-		return fmt.Errorf("daemon did not become ready; recent daemon log:\n%s", message)
+		return ipc.Response{}, fmt.Errorf("daemon did not become ready; recent daemon log:\n%s", message)
 	}
-	return errors.New("daemon did not become ready within 5 seconds")
+	return ipc.Response{}, errors.New("daemon did not become ready within 5 seconds")
 }
 
 func waitForDaemonStop() error {

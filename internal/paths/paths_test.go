@@ -19,6 +19,9 @@ func TestDefaultUsesMangoHome(t *testing.T) {
 	if layout.SocketPath != filepath.Join(root, "runtime", "mango.sock") {
 		t.Fatalf("socket = %q", layout.SocketPath)
 	}
+	if layout.LockPath != filepath.Join(root, "runtime", "daemon.lock") {
+		t.Fatalf("lock = %q", layout.LockPath)
+	}
 	if layout.DaemonConfig != filepath.Join(root, "daemon.yaml") {
 		t.Fatalf("daemon config = %q", layout.DaemonConfig)
 	}

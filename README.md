@@ -57,6 +57,9 @@ Mango has a small client/daemon architecture:
   service, task, workflow, and schedule operations.
 - The client and daemon communicate through a Unix domain socket on Unix-like
   systems and a Windows named pipe on Windows.
+- Each `MANGO_HOME` is one daemon instance. `mangod` takes an OS-level lock at
+  `MANGO_HOME/runtime/daemon.lock`; different `MANGO_HOME` values can run in
+  parallel.
 - A project is a name registered to a YAML configuration file. The project
   name is stored in Mango's registry; it is not written inside the YAML file.
 
@@ -690,7 +693,9 @@ mangod run
 
 `mangod` has one entry point. `run` starts the daemon in the foreground; press
 Ctrl+C to stop it. The daemon owns service processes, schedules, task/workflow
-execution, local IPC, logs, and execution history.
+execution, local IPC, logs, and execution history. Only one `mangod run` can
+own a given `MANGO_HOME`; a second direct invocation exits with
+`daemon is already running`.
 
 ### `mango daemon`
 
@@ -704,7 +709,7 @@ mango daemon logs [--tail N] [--follow]
 
 | Command | Arguments / flags | Description |
 | --- | --- | --- |
-| `start` | none | Starts `mangod` in the background and waits for its health endpoint. `mangod` must be next to `mango` or on `PATH`. |
+| `start` | none | Starts `mangod` in the background and waits for its health endpoint. It is idempotent: concurrent callers succeed while only one daemon runs. `mangod` must be next to `mango` or on `PATH`. |
 | `stop` | none | Requests a graceful daemon shutdown. |
 | `restart` | none | Stops the daemon, waits for the IPC endpoint to close, then starts it again. |
 | `status` | `--json` | Shows daemon status, PID, API version, and project configuration errors. A stopped daemon is reported as `stopped`. |
@@ -1050,9 +1055,14 @@ mango startup status [--json]
 | `status` | Reports whether integration is installed and where it is configured. |
 
 The platform mechanisms are Windows Task Scheduler, Linux `systemd --user`,
-and a macOS `launchd` LaunchAgent. Startup integration launches only `mangod`;
-service startup still depends on each service's `autostart` setting. The daemon
-binary must be available next to `mango` or on `PATH` when installing.
+and a macOS `launchd` LaunchAgent. When `MANGO_HOME` is set, each definition
+passes the same value to `mangod`. Linux restarts only after failure, macOS keeps the
+job alive only after an unsuccessful exit, and Windows uses
+`MultipleInstancesPolicy=IgnoreNew`. The daemon lock remains the final guard
+for direct or overlapping launches. Startup integration launches only
+`mangod`; service startup still depends on each service's `autostart` setting.
+The daemon binary must be available next to `mango` or on `PATH` when
+installing.
 
 ```sh
 mango startup install
@@ -1183,6 +1193,7 @@ MANGO_HOME/
 ├── daemon.yaml                 # optional daemon settings
 ├── daemon.log
 ├── runtime/
+│   ├── daemon.lock              # persistent file; lock is released on close
 │   ├── daemon.pid
 │   └── mango.sock              # Unix; Windows uses a named pipe
 ├── logs/
