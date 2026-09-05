@@ -1319,6 +1319,66 @@ func TestHistoryWithoutTargetUsesUnifiedHistoryLoader(t *testing.T) {
 	}
 }
 
+func TestHistoryClearCommand(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var method string
+	var params interface{}
+	err := historyCommandWithCaller([]string{"clear"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		params = gotParams
+		return ipc.Response{Data: map[string]string{"status": "cleared"}}, nil
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "history.clear" || params != nil {
+		t.Fatalf("method = %q, params = %#v, want history.clear with nil params", method, params)
+	}
+	if output.String() != "History cleared.\n" {
+		t.Fatalf("output = %q, want confirmation", output.String())
+	}
+
+	if err := historyCommandWithCaller([]string{"clear", "unexpected"}, func(string, interface{}) (ipc.Response, error) {
+		t.Fatal("history.clear caller invoked with invalid arguments")
+		return ipc.Response{}, nil
+	}, false); err == nil {
+		t.Fatal("history clear unexpectedly accepted arguments")
+	}
+	if err := historyCommandWithCaller([]string{"clear"}, func(string, interface{}) (ipc.Response, error) {
+		t.Fatal("schedule history clear caller invoked")
+		return ipc.Response{}, nil
+	}, true); err == nil {
+		t.Fatal("schedule history clear unexpectedly succeeded")
+	}
+
+	output.Reset()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+	if err := historyCommandWithCaller([]string{"clear"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		if gotMethod != "history.clear" || gotParams != nil {
+			t.Fatalf("JSON method = %q, params = %#v", gotMethod, gotParams)
+		}
+		return ipc.Response{Data: map[string]string{"status": "cleared"}}, nil
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if result["status"] != "cleared" {
+		t.Fatalf("JSON result = %+v, want cleared status", result)
+	}
+}
+
 func TestUnifiedHistoryWorkflowAttemptsTextOutput(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

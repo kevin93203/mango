@@ -129,6 +129,7 @@ func usage() {
 		"  schedule ls|history",
 		"  workflow ls|run PROJECT/WORKFLOW",
 		"  task ls|run PROJECT/TASK",
+		"  history clear",
 		"  history [--tail N] [--trigger-type TYPE] [--trigger NAME] [--target-type TYPE] [--target PROJECT/NAME] [--attempts]",
 		"  startup install|uninstall|status",
 		"  doctor",
@@ -1393,7 +1394,6 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 	default:
 		return fmt.Errorf("unknown schedule command %q", args[0])
 	}
-	return nil
 }
 
 func workflowCommand(args []string) error { return workflowCommandWithCaller(args, call) }
@@ -1499,6 +1499,28 @@ func historyCommand(args []string) error {
 }
 
 func historyCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error), scheduleOnly bool) error {
+	if len(args) > 0 && args[0] == "clear" {
+		if scheduleOnly {
+			return errors.New("schedule history does not support clear")
+		}
+		if len(args) != 1 {
+			return errors.New("history clear does not accept arguments")
+		}
+		response, err := caller("history.clear", nil)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cliOutput.JSON(response.Data)
+		}
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			return err
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, "History cleared."))
+		return nil
+	}
+
 	fs := newFlagSet("history")
 	tail := fs.Int("tail", 100, "number of history records")
 	triggerType := fs.String("trigger-type", "", "filter by trigger type: schedule, webhook, or manual")

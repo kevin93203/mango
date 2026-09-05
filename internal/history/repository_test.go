@@ -53,6 +53,53 @@ func TestRepositoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRepositoryClearRemovesRecordsAndCounters(t *testing.T) {
+	repository := openTestRepository(t)
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	record := scheduler.Record{
+		RunID: "run-1", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Trigger: scheduler.ScheduleTrigger("nightly"), Started: started, Finished: started.Add(time.Second),
+		Tasks: []scheduler.TaskRecord{{
+			RunID: "task-1", Node: "build", Task: "compile", Started: started,
+			Finished: started.Add(time.Second), Attempts: []scheduler.Attempt{{Number: 1, Started: started}},
+		}},
+		Attempts: []scheduler.Attempt{{Number: 1, Started: started}},
+	}
+	if err := repository.Record(context.Background(), record, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repository.Clear(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := repository.Query(context.Background(), scheduler.HistoryQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records after clear = %+v, want empty", records)
+	}
+	counters, err := repository.Counters(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(counters) != 0 {
+		t.Fatalf("counters after clear = %+v, want empty", counters)
+	}
+
+	if err := repository.Record(context.Background(), scheduler.Record{RunID: "run-2", Project: "demo", TargetType: "task", Target: "compile"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	records, err = repository.Query(context.Background(), scheduler.HistoryQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].RunID != "run-2" {
+		t.Fatalf("records after rewrite = %+v, want run-2", records)
+	}
+}
+
 func TestRepositoryFiltersTasksAndRetainsCounters(t *testing.T) {
 	repository := openTestRepository(t)
 	for index := 0; index < 3; index++ {
