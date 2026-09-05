@@ -1024,8 +1024,10 @@ History JSON returns complete nested run records, including `RunID`, the
 structured `Trigger`, task/node records, and retry attempts. Text output shows
 one row per logical run by default; `--attempts` expands attempt rows. In an
 interactive terminal, the shared browser navigates `run → task → attempts` or
-`run → workflow → tasks → attempts`; `Esc`, `r`, PageDown, and `q` retain the
-standard navigation behavior.
+`run → workflow → tasks → attempts`; each history table shows 15 rows per page.
+Runs are ordered newest-first, while tasks and attempts are ordered oldest-first.
+Use `←`/`→` (or PageUp/PageDown) to change pages, `↑`/`↓` to select within the
+current page, `Esc` to go back, `r` to refresh, and `q` to quit.
 
 ### Startup integration
 

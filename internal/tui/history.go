@@ -47,6 +47,8 @@ type unifiedHistoryModel struct {
 	lastError    string
 }
 
+const historyPageSize = 15
+
 func RunHistory(output *cliui.Renderer, load HistoryLoader, filter HistoryFilter) error {
 	if load == nil {
 		return fmt.Errorf("history loader is nil")
@@ -95,7 +97,12 @@ func (m *unifiedHistoryModel) reload() error {
 			}
 		}
 	}
-	m.selected = m.runIndex
+	if m.runIndex < 0 || m.runIndex >= len(records) {
+		m.runIndex = 0
+	}
+	if m.screen == unifiedHistoryRuns {
+		m.selected = m.runIndex
+	}
 	m.clampSelection()
 	m.lastError = ""
 	return nil
@@ -131,12 +138,25 @@ func (m *unifiedHistoryModel) historyHandleKey(key int) (bool, error) {
 	case historyKeyDown, 'j':
 		m.move(1)
 	case historyKeyPageUp:
-		m.move(-workflowHistoryViewport())
-	case historyKeyPageDown, 'n':
-		if m.screen == unifiedHistoryRuns {
-			return false, m.loadMore()
+		if m.screen == unifiedHistoryOutput {
+			m.move(-workflowHistoryViewport())
+		} else {
+			return false, m.movePage(-1)
 		}
-		m.move(workflowHistoryViewport())
+	case historyKeyPageDown:
+		if m.screen == unifiedHistoryOutput {
+			m.move(workflowHistoryViewport())
+		} else {
+			return false, m.movePage(1)
+		}
+	case historyKeyLeft:
+		if m.screen != unifiedHistoryOutput {
+			return false, m.movePage(-1)
+		}
+	case historyKeyRight:
+		if m.screen != unifiedHistoryOutput {
+			return false, m.movePage(1)
+		}
 	case historyKeyHome:
 		m.moveTo(0)
 	case historyKeyEnd:
@@ -150,7 +170,7 @@ func (m *unifiedHistoryModel) historyHandleKey(key int) (bool, error) {
 }
 
 func (m *unifiedHistoryModel) historyRender(output *cliui.Renderer) {
-	help := "(q quit, ↑/↓ or j/k select, Enter detail, Esc back, r refresh, n older)"
+	help := "(q quit, ↑/↓ or j/k select, ←/→ page, Enter detail, Esc back, r refresh, Home/End)"
 	switch m.screen {
 	case unifiedHistoryRuns:
 		output.Println(output.Text(cliui.StyleHeader, "mango history"), output.Text(cliui.StyleMuted, help))
@@ -177,17 +197,25 @@ func (m *unifiedHistoryModel) historySetError(message string) { m.lastError = me
 func (m *unifiedHistoryModel) enter() {
 	switch m.screen {
 	case unifiedHistoryRuns:
-		if m.currentRun() == nil {
+		run := m.currentRun()
+		if run == nil {
 			return
 		}
 		m.runIndex = m.selected
 		m.selected = 0
-		if m.currentRun().TargetType == "workflow" {
+		if run.TargetType == "workflow" {
 			m.screen = unifiedHistoryWorkflowTasks
 		} else {
 			m.screen = unifiedHistoryTask
 		}
-	case unifiedHistoryTask, unifiedHistoryWorkflowTasks:
+	case unifiedHistoryTask:
+		if m.currentTask() == nil {
+			return
+		}
+		m.taskIndex = 0
+		m.attemptIndex = m.selected
+		m.screen = unifiedHistoryAttempts
+	case unifiedHistoryWorkflowTasks:
 		if m.currentTask() == nil {
 			return
 		}
@@ -212,10 +240,11 @@ func (m *unifiedHistoryModel) back() {
 	case unifiedHistoryAttempts:
 		if m.currentRun() != nil && m.currentRun().TargetType == "workflow" {
 			m.screen = unifiedHistoryWorkflowTasks
+			m.selected = m.taskIndex
 		} else {
 			m.screen = unifiedHistoryTask
+			m.selected = m.attemptIndex
 		}
-		m.selected = m.taskIndex
 	case unifiedHistoryOutput:
 		m.screen = unifiedHistoryAttempts
 		m.selected = m.attemptIndex
@@ -230,7 +259,109 @@ func (m *unifiedHistoryModel) move(delta int) {
 		m.clampOutputOffset()
 		return
 	}
-	m.moveTo(m.selected + delta)
+	start, end := m.pageBounds()
+	if start == end {
+		m.selected = 0
+		return
+	}
+	index := m.selected + delta
+	if index < start {
+		index = start
+	}
+	if index >= end {
+		index = end - 1
+	}
+	m.selected = index
+}
+
+func historyPageCount(count int) int {
+	if count <= 0 {
+		return 0
+	}
+	return (count + historyPageSize - 1) / historyPageSize
+}
+
+func (m *unifiedHistoryModel) currentPage() int {
+	if m.selected < 0 {
+		return 0
+	}
+	page := m.selected / historyPageSize
+	pageCount := historyPageCount(m.itemCount())
+	if pageCount == 0 {
+		return 0
+	}
+	if page >= pageCount {
+		return pageCount - 1
+	}
+	return page
+}
+
+func (m *unifiedHistoryModel) pageBounds() (int, int) {
+	count := m.itemCount()
+	if count == 0 {
+		return 0, 0
+	}
+	start := m.currentPage() * historyPageSize
+	end := start + historyPageSize
+	if end > count {
+		end = count
+	}
+	return start, end
+}
+
+func (m *unifiedHistoryModel) movePage(delta int) error {
+	if m.screen == unifiedHistoryOutput {
+		return nil
+	}
+	count := m.itemCount()
+	if count == 0 {
+		return nil
+	}
+	currentPage := m.currentPage()
+	targetPage := currentPage + delta
+	pageCount := historyPageCount(count)
+	if delta > 0 && targetPage >= pageCount && m.screen == unifiedHistoryRuns && m.hasMore {
+		rowOffset := m.selected % historyPageSize
+		if err := m.loadMore(); err != nil {
+			return err
+		}
+		count = m.itemCount()
+		pageCount = historyPageCount(count)
+		if pageCount > currentPage+1 {
+			targetPage = currentPage + 1
+		} else {
+			targetPage = pageCount - 1
+		}
+		if targetPage <= currentPage {
+			return nil
+		}
+		index := targetPage*historyPageSize + rowOffset
+		if index >= count {
+			index = count - 1
+		}
+		m.selected = index
+		return nil
+	}
+	if targetPage < 0 || targetPage >= pageCount {
+		return nil
+	}
+	rowOffset := m.selected % historyPageSize
+	index := targetPage*historyPageSize + rowOffset
+	if index >= count {
+		index = count - 1
+	}
+	m.selected = index
+	return nil
+}
+
+func renderHistoryPageStatus(output *cliui.Renderer, model *unifiedHistoryModel) {
+	count := model.itemCount()
+	if count == 0 {
+		return
+	}
+	start, end := model.pageBounds()
+	output.Println(output.Text(cliui.StyleMuted, fmt.Sprintf("page %d/%d, rows %d-%d of %d (←/→ to switch pages)",
+		model.currentPage()+1, historyPageCount(count), start+1, end, count)))
 }
 
 func (m *unifiedHistoryModel) moveTo(index int) {
@@ -254,21 +385,30 @@ func (m *unifiedHistoryModel) itemCount() int {
 	switch m.screen {
 	case unifiedHistoryRuns:
 		return len(m.records)
-	case unifiedHistoryTask, unifiedHistoryWorkflowTasks:
+	case unifiedHistoryWorkflowTasks:
 		return len(m.visibleTasks())
+	case unifiedHistoryTask:
+		if task := m.currentTask(); task != nil {
+			return len(historyAttempts(*task))
+		}
+		return 0
 	case unifiedHistoryAttempts:
 		if task := m.currentTask(); task != nil {
-			return len(task.Attempts)
+			return len(historyAttempts(*task))
 		}
 	}
 	return 0
 }
 
 func (m *unifiedHistoryModel) currentRun() *scheduler.Record {
-	if m.runIndex < 0 || m.runIndex >= len(m.records) {
+	index := m.runIndex
+	if m.screen == unifiedHistoryRuns {
+		index = m.selected
+	}
+	if index < 0 || index >= len(m.records) {
 		return nil
 	}
-	return &m.records[m.runIndex]
+	return &m.records[index]
 }
 
 func (m *unifiedHistoryModel) currentRunID() string {
@@ -283,7 +423,7 @@ func (m *unifiedHistoryModel) visibleTasks() []scheduler.TaskRecord {
 	if run == nil {
 		return nil
 	}
-	tasks := run.Tasks
+	tasks := append([]scheduler.TaskRecord(nil), run.Tasks...)
 	if len(tasks) == 0 && run.TargetType == "task" {
 		// Version 1 direct task records stored attempts on the root record
 		// without a nested TaskRecord. Present them through the unified shape.
@@ -295,6 +435,9 @@ func (m *unifiedHistoryModel) visibleTasks() []scheduler.TaskRecord {
 		}}
 	}
 	if m.filter.TargetType != "task" || m.filter.Target == "" {
+		sort.SliceStable(tasks, func(i, j int) bool {
+			return tasks[i].Started.Before(tasks[j].Started)
+		})
 		return tasks
 	}
 	_, name, ok := strings.Cut(m.filter.Target, "/")
@@ -307,13 +450,26 @@ func (m *unifiedHistoryModel) visibleTasks() []scheduler.TaskRecord {
 			result = append(result, task)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Started.Before(result[j].Started)
+	})
 	return result
+}
+
+func historyAttempts(task scheduler.TaskRecord) []scheduler.Attempt {
+	attempts := append([]scheduler.Attempt(nil), task.Attempts...)
+	sort.SliceStable(attempts, func(i, j int) bool {
+		return attempts[i].Started.Before(attempts[j].Started)
+	})
+	return attempts
 }
 
 func (m *unifiedHistoryModel) currentTask() *scheduler.TaskRecord {
 	tasks := m.visibleTasks()
 	index := m.selected
-	if m.screen == unifiedHistoryAttempts || m.screen == unifiedHistoryOutput {
+	if m.screen == unifiedHistoryTask {
+		index = 0
+	} else if m.screen == unifiedHistoryAttempts || m.screen == unifiedHistoryOutput {
 		index = m.taskIndex
 	}
 	if index < 0 || index >= len(tasks) {
@@ -327,14 +483,15 @@ func (m *unifiedHistoryModel) currentAttempt() *scheduler.Attempt {
 	if task == nil {
 		return nil
 	}
+	attempts := historyAttempts(*task)
 	index := m.selected
 	if m.screen == unifiedHistoryOutput {
 		index = m.attemptIndex
 	}
-	if index < 0 || index >= len(task.Attempts) {
+	if index < 0 || index >= len(attempts) {
 		return nil
 	}
-	return &task.Attempts[index]
+	return &attempts[index]
 }
 
 func (m *unifiedHistoryModel) clampOutputOffset() {
@@ -386,11 +543,13 @@ func renderUnifiedRuns(output *cliui.Renderer, model *unifiedHistoryModel) {
 		output.Println(output.Text(cliui.StyleMuted, "No execution history."))
 		return
 	}
-	rows := make([][]cliui.Cell, 0, len(model.records))
-	for index, record := range model.records {
+	start, end := model.pageBounds()
+	rows := make([][]cliui.Cell, 0, end-start)
+	for index, record := range model.records[start:end] {
+		globalIndex := start + index
 		status := historyStatus(record.Status, record.ExitCode, record.Error)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyMarker(index == model.selected)},
+			{Text: historyMarker(globalIndex == model.selected)},
 			{Text: historyDisplay(record.RunID)},
 			{Text: historyDisplay(record.Trigger.Type)},
 			{Text: record.Trigger.Display()},
@@ -402,6 +561,7 @@ func renderUnifiedRuns(output *cliui.Renderer, model *unifiedHistoryModel) {
 		})
 	}
 	output.Table([]string{"", "RUN_ID", "TRIGGER_TYPE", "TRIGGER", "TARGET_TYPE", "TARGET", "STARTED", "DURATION", "STATUS"}, rows)
+	renderHistoryPageStatus(output, model)
 }
 
 func renderUnifiedTask(output *cliui.Renderer, model *unifiedHistoryModel) {
@@ -435,11 +595,13 @@ func renderUnifiedWorkflowTasks(output *cliui.Renderer, model *unifiedHistoryMod
 		output.Println(output.Text(cliui.StyleMuted, "No task records."))
 		return
 	}
-	rows := make([][]cliui.Cell, 0, len(tasks))
-	for index, task := range tasks {
+	start, end := model.pageBounds()
+	rows := make([][]cliui.Cell, 0, end-start)
+	for index, task := range tasks[start:end] {
+		globalIndex := start + index
 		status := historyStatus(task.Status, task.ExitCode, task.Error)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyMarker(index == model.selected)},
+			{Text: historyMarker(globalIndex == model.selected)},
 			{Text: historyDisplay(task.Node)},
 			{Text: historyDisplay(task.Task)},
 			{Text: historyDisplay(task.Command)},
@@ -456,6 +618,7 @@ func renderUnifiedWorkflowTasks(output *cliui.Renderer, model *unifiedHistoryMod
 		})
 	}
 	output.Table([]string{"", "NODE", "TASK", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STATUS", "STARTED", "FINISHED", "DURATION", "ATTEMPTS", "EXIT", "ERROR"}, rows)
+	renderHistoryPageStatus(output, model)
 }
 
 func renderUnifiedTaskDetail(output *cliui.Renderer, model *unifiedHistoryModel, task scheduler.TaskRecord) {
@@ -480,11 +643,14 @@ func renderUnifiedTaskDetail(output *cliui.Renderer, model *unifiedHistoryModel,
 		output.Println(output.Text(cliui.StyleMuted, "No attempt details recorded."))
 		return
 	}
-	rows := make([][]cliui.Cell, 0, len(task.Attempts))
-	for index, attempt := range task.Attempts {
+	attempts := historyAttempts(task)
+	start, end := model.pageBounds()
+	rows := make([][]cliui.Cell, 0, end-start)
+	for index, attempt := range attempts[start:end] {
+		globalIndex := start + index
 		attemptStatus := historyStatus("", attempt.ExitCode, attempt.Error)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyMarker(index == model.selected)},
+			{Text: historyMarker(globalIndex == model.selected)},
 			{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
 			{Text: historyTime(attempt.Started)},
 			{Text: historyTime(attempt.Finished)},
@@ -494,6 +660,7 @@ func renderUnifiedTaskDetail(output *cliui.Renderer, model *unifiedHistoryModel,
 		})
 	}
 	output.Table([]string{"", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "STATUS"}, rows)
+	renderHistoryPageStatus(output, model)
 }
 
 func renderUnifiedAttempts(output *cliui.Renderer, model *unifiedHistoryModel) {
@@ -521,11 +688,14 @@ func renderUnifiedAttempts(output *cliui.Renderer, model *unifiedHistoryModel) {
 		output.Println(output.Text(cliui.StyleMuted, "No attempt details recorded."))
 		return
 	}
-	rows := make([][]cliui.Cell, 0, len(task.Attempts))
-	for index, attempt := range task.Attempts {
+	attempts := historyAttempts(*task)
+	start, end := model.pageBounds()
+	rows := make([][]cliui.Cell, 0, end-start)
+	for index, attempt := range attempts[start:end] {
+		globalIndex := start + index
 		status := historyStatus("", attempt.ExitCode, attempt.Error)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyMarker(index == model.selected)},
+			{Text: historyMarker(globalIndex == model.selected)},
 			{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
 			{Text: historyTime(attempt.Started)},
 			{Text: historyTime(attempt.Finished)},
@@ -536,6 +706,7 @@ func renderUnifiedAttempts(output *cliui.Renderer, model *unifiedHistoryModel) {
 		})
 	}
 	output.Table([]string{"", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "STATUS", "ERROR"}, rows)
+	renderHistoryPageStatus(output, model)
 }
 
 func renderUnifiedOutput(output *cliui.Renderer, model *unifiedHistoryModel) {
