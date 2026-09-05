@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -55,8 +58,31 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 	if string(data) != mango.ExampleConfig() {
 		t.Fatal("default config does not match the embedded example")
 	}
-	if _, err := config.Load(path); err != nil {
+	for _, forbidden := range []string{"python3", ".sh", ".py", "command: sh"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("generated config contains platform-specific reference %q", forbidden)
+		}
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
 		t.Fatalf("generated config is invalid: %v", err)
+	}
+	for _, service := range []string{"api-single", "api-supervisor", "one-task"} {
+		if _, ok := loaded.Services[service]; !ok {
+			t.Fatalf("generated config is missing service %q", service)
+		}
+	}
+	for _, relative := range []string{
+		"examples/api/main.go",
+		"examples/one-task/main.go",
+		"examples/tasks/emit.go",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, relative)); err != nil {
+			t.Fatalf("generated example %s is missing: %v", relative, err)
+		}
+	}
+	if output, err := exec.Command("go", "run", "./examples/tasks/emit.go", "--steps", "1", "--delay", "1ms").CombinedOutput(); err != nil {
+		t.Fatalf("copied example failed to run without go.mod: %v\n%s", err, output)
 	}
 	if !strings.Contains(output.String(), path) {
 		t.Fatalf("output = %q, want generated path %q", output.String(), path)
@@ -73,6 +99,58 @@ func TestInitCommandCreatesParentDirectoriesAndValidatesCustomConfig(t *testing.
 	}
 	if _, err := config.Load(path); err != nil {
 		t.Fatalf("generated custom config is invalid: %v", err)
+	}
+}
+
+func TestInitCommandPreservesAndForcesExampleFiles(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "mango.yaml")
+	examplePath := filepath.Join(root, "examples", "tasks", "emit.go")
+	extraPath := filepath.Join(root, "examples", "keep.txt")
+	if err := os.MkdirAll(filepath.Dir(examplePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(examplePath, []byte("existing example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(extraPath, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := initCommand([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "existing example\n" {
+		t.Fatalf("existing example changed without force: %q", data)
+	}
+
+	if err := initCommand([]string{path, "--force"}); err != nil {
+		t.Fatal(err)
+	}
+	want, err := fs.ReadFile(mango.ExampleFiles(), "examples/tasks/emit.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(want) {
+		t.Fatal("--force did not update the existing example")
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(examplePath); err != nil {
+			t.Fatal(err)
+		} else if info.Mode().Perm() != 0o644 {
+			t.Fatalf("forced example mode = %o, want 644", info.Mode().Perm())
+		}
+	}
+	if data, err := os.ReadFile(extraPath); err != nil || string(data) != "keep me\n" {
+		t.Fatalf("extra example file was not preserved: %q, %v", data, err)
 	}
 }
 
@@ -103,6 +181,13 @@ func TestInitCommandRefusesExistingFileUnlessForced(t *testing.T) {
 	}
 	if string(data) != mango.ExampleConfig() {
 		t.Fatal("--force did not write the embedded example")
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		} else if info.Mode().Perm() != 0o600 {
+			t.Fatalf("forced config mode = %o, want 600", info.Mode().Perm())
+		}
 	}
 }
 

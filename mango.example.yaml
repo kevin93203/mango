@@ -9,11 +9,11 @@ defaults:
   metrics_interval: 1s
 
 services:
-  api:
+  api-single:
     command: go
     args:
       - run
-      - ./examples/api
+      - ./examples/api/main.go
       - --port
       - "8080"
       - --interval
@@ -29,8 +29,18 @@ services:
       retries: 3
       start_period: 3s
 
-  api2:
-    command: ./examples/run_api.sh
+  api-supervisor:
+    command: go
+    args:
+      - run
+      - ./examples/api/main.go
+      - --supervise
+      - --port
+      - "9000"
+      - --port
+      - "9090"
+      - --interval
+      - 3s
     autostart: true
     restart: always
     environment:
@@ -48,7 +58,7 @@ services:
     command: go
     args:
       - run
-      - ./examples/one-task
+      - ./examples/one-task/main.go
       - --iterations
       - "5"
       - --interval
@@ -61,7 +71,7 @@ tasks:
     command: go
     args:
       - run
-      - ./examples/one-task
+      - ./examples/one-task/main.go
       - --iterations
       - "3"
       - --interval
@@ -86,26 +96,27 @@ tasks:
     timeout: 30s
     concurrency: forbid
 
-  demo-extract-python:
-    command: python3
-    args:
-      - ./examples/tasks/transform.py
-      - --name
-      - demo-extract-python
-      - --steps
-      - "3"
-      - --delay
-      - "0.2"
-    timeout: 30s
-    concurrency: allow
-
-  demo-transform-go:
+  demo-extract:
     command: go
     args:
       - run
       - ./examples/tasks/emit.go
       - --name
-      - demo-transform-go
+      - demo-extract
+      - --steps
+      - "3"
+      - --delay
+      - 200ms
+    timeout: 30s
+    concurrency: allow
+
+  demo-transform:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-transform
       - --steps
       - "3"
       - --delay
@@ -113,34 +124,27 @@ tasks:
     timeout: 30s
     concurrency: allow
 
-  demo-load-sh:
-    command: sh
-    args:
-      - ./examples/tasks/load.sh
-      - demo-load-sh
-    timeout: 30s
-    concurrency: forbid
-
-  demo-branch-python:
-    command: python3
-    args:
-      - ./examples/tasks/transform.py
-      - --name
-      - demo-branch-python
-      - --steps
-      - "4"
-      - --delay
-      - "0.15"
-    timeout: 30s
-    concurrency: allow
-
-  demo-branch-go:
+  demo-load:
     command: go
     args:
       - run
       - ./examples/tasks/emit.go
       - --name
-      - demo-branch-go
+      - demo-load
+      - --steps
+      - "1"
+      - --delay
+      - 1s
+    timeout: 30s
+    concurrency: forbid
+
+  demo-branch-a:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-branch-a
       - --steps
       - "4"
       - --delay
@@ -148,59 +152,93 @@ tasks:
     timeout: 30s
     concurrency: allow
 
-  demo-merge-sh:
-    command: sh
+  demo-branch-b:
+    command: go
     args:
-      - ./examples/tasks/load.sh
-      - demo-merge-sh
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-branch-b
+      - --steps
+      - "4"
+      - --delay
+      - 150ms
+    timeout: 30s
+    concurrency: allow
+
+  demo-merge:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/emit.go
+      - --name
+      - demo-merge
+      - --steps
+      - "1"
+      - --delay
+      - 1s
     timeout: 30s
 
   demo-retry-failure:
-    command: sh
+    command: go
     args:
-      - ./examples/tasks/fail.sh
+      - run
+      - ./examples/tasks/emit.go
+      - --name
       - demo-retry-failure
+      - --steps
+      - "1"
+      - --delay
+      - 1ms
+      - --fail
     timeout: 10s
     concurrency: forbid
     retry:
       retries: 2
       delay: 1s
 
-  demo-independent-python:
-    command: python3
+  demo-independent:
+    command: go
     args:
-      - ./examples/tasks/transform.py
+      - run
+      - ./examples/tasks/emit.go
       - --name
-      - demo-independent-python
+      - demo-independent
       - --steps
       - "2"
       - --delay
-      - "0.2"
+      - 200ms
     timeout: 30s
     concurrency: allow
 
   demo-slow-timeout:
-    command: sh
+    command: go
     args:
-      - ./examples/tasks/slow.sh
+      - run
+      - ./examples/tasks/emit.go
+      - --name
       - demo-slow-timeout
-      - "10"
+      - --steps
+      - "1"
+      - --delay
+      - 10s
     timeout: 2s
     concurrency: forbid
     retry:
       retries: 1
       delay: 500ms
 
-  demo-direct-python:
-    command: python3
+  demo-direct:
+    command: go
     args:
-      - ./examples/tasks/transform.py
+      - run
+      - ./examples/tasks/emit.go
       - --name
-      - demo-direct-python
+      - demo-direct
       - --steps
       - "2"
       - --delay
-      - "0.1"
+      - 100ms
     timeout: 30s
     concurrency: allow
 
@@ -217,13 +255,13 @@ workflows:
       prepare:
         uses: demo-prepare
       extract:
-        uses: demo-extract-python
+        uses: demo-extract
         needs: [prepare]
       transform:
-        uses: demo-transform-go
+        uses: demo-transform
         needs: [extract]
       load:
-        uses: demo-load-sh
+        uses: demo-load
         needs: [transform]
 
   demo-parallel:
@@ -231,15 +269,15 @@ workflows:
     tasks:
       prepare:
         uses: demo-prepare
-      branch-python:
-        uses: demo-branch-python
+      branch-a:
+        uses: demo-branch-a
         needs: [prepare]
-      branch-go:
-        uses: demo-branch-go
+      branch-b:
+        uses: demo-branch-b
         needs: [prepare]
       merge:
-        uses: demo-merge-sh
-        needs: [branch-python, branch-go]
+        uses: demo-merge
+        needs: [branch-a, branch-b]
 
   demo-failure:
     concurrency: forbid
@@ -247,12 +285,12 @@ workflows:
       retry:
         uses: demo-retry-failure
       independent:
-        uses: demo-independent-python
+        uses: demo-independent
       blocked:
-        uses: demo-load-sh
+        uses: demo-load
         needs: [retry]
       fan-in:
-        uses: demo-merge-sh
+        uses: demo-merge
         needs: [blocked, independent]
 
   demo-timeout:
@@ -302,4 +340,4 @@ schedules:
     cron: "*/30 * * * *"
     timezone: Asia/Taipei
     target_type: task
-    target: demo-direct-python
+    target: demo-direct

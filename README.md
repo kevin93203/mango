@@ -74,10 +74,10 @@ The main implementation areas are organized under `internal/`:
 ## Requirements
 
 - Go 1.23 or newer.
-- Windows, Linux, or macOS.
+- Windows 10/11, Linux, or macOS.
 - The executables referenced by your configuration must be available on the
-  host. Shell and Python examples in the sample configuration require the
-  corresponding tools.
+  host. The canonical examples use the Go toolchain, and the sample HTTP
+  healthchecks also require `curl`.
 
 ## Quick start
 
@@ -121,9 +121,9 @@ In another terminal, generate, validate, register, and apply the example project
 Inspect the sample service and its logs:
 
 ```sh
-./bin/mango status demo/api
-./bin/mango logs demo/api --stream all --tail 50
-./bin/mango logs demo/api --follow
+./bin/mango status demo/api-single
+./bin/mango logs demo/api-single --stream all --tail 50
+./bin/mango logs demo/api-single --follow
 ```
 
 To run the daemon in the background, use `mango daemon start`. This command
@@ -133,8 +133,9 @@ The example configuration contains services, tasks, workflows, schedules,
 health checks, retries, timeouts, and dependency examples. See
 [`mango.example.yaml`](mango.example.yaml) and
 [`examples/tasks/README.md`](examples/tasks/README.md) for guided examples.
-On Windows, adapt or remove the sample's POSIX shell and `python3` commands if
-those tools are not available.
+The canonical examples use Go source files and are intended to run on
+Windows, macOS, and Linux. The HTTP healthchecks use `curl`, which must be
+available on the host.
 
 ## Configuration
 
@@ -151,7 +152,7 @@ defaults:
 services:
   api:
     command: go
-    args: [run, ./examples/api, --port, "8080"]
+    args: [run, ./examples/api/main.go, --port, "8080"]
     autostart: true
     restart: always
     healthcheck:
@@ -232,10 +233,11 @@ mango <command> [subcommand] [arguments] [options]
 mango init [PATH] [--force]
 ```
 
-Creates a complete example configuration. The default output path is
+Creates a complete example configuration and copies the Go source files it
+uses into `examples/` beside the YAML. The default output path is
 `./mango.yaml`; a parent directory is created when needed. Existing files are
-not overwritten unless `--force` is provided. `init` only writes the YAML; it
-does not register or apply a project.
+not overwritten unless `--force` is provided. `PATH` must use the `.yaml`
+extension. `init` does not register or apply a project.
 
 ```sh
 mango init
@@ -381,7 +383,7 @@ Each key under `services` is a service name:
 services:
   api:
     command: go
-    args: [run, ./examples/api, --port, "8080"]
+    args: [run, ./examples/api/main.go, --port, "8080"]
     working_dir: .
     environment:
       APP_ENV: development
@@ -625,7 +627,7 @@ Notation used below:
 - `[value]` is optional.
 - `...` accepts one or more additional values.
 - `PROJECT/NAME` means a project-qualified resource, such as
-  `demo/api` or `demo/nightly`.
+  `demo/api-single` or `demo/nightly`.
 
 Project names must start with an ASCII letter and may then contain letters,
 digits, `.`, `_`, and `-`. Service, task, workflow, schedule, and workflow-node
@@ -647,7 +649,7 @@ Both forms are accepted:
 
 ```sh
 mango --color=never ls
-mango status demo/api --json
+mango status demo/api-single --json
 mango --json workflow history --tail 20
 ```
 
@@ -661,6 +663,22 @@ install/uninstall.
 
 `--` ends global-option parsing and passes remaining values as command
 arguments.
+
+### `mango init`
+
+```text
+mango init [PATH] [--force]
+```
+
+`init` writes the complete embedded `mango.example.yaml` to `PATH` (default
+`./mango.yaml`) with mode `0600`, creates missing parent directories, and
+copies the Go sources used by the configuration into `PATH`'s adjacent
+`examples/` directory. It supports only `.yaml` paths and never registers or
+applies a project. An existing YAML causes an error unless `--force` is
+supplied. Without `--force`, existing example sources are preserved and
+missing sources are added; with `--force`, matching embedded sources are
+updated. Extra files in `examples/` are never removed. `--json` is not
+supported.
 
 ### `mangod`
 
@@ -797,14 +815,14 @@ mango ls --json > services.json
 mango status PROJECT/SERVICE|ID [--json]
 ```
 
-The single target may be a stable service key such as `demo/api` or a
+The single target may be a stable service key such as `demo/api-single` or a
 non-negative runtime ID such as `2`. The detailed view includes state, health,
 OS state, PID, ports, start time, uptime, CPU, RSS, memory percentage, restart
 count, last exit code, disabled state, command line, stdout/stderr log paths,
 last error, and unsatisfied dependencies.
 
 ```sh
-mango status demo/api
+mango status demo/api-single
 mango status 2 --json
 ```
 
@@ -828,10 +846,10 @@ Multiple targets are accepted:
 
 ```sh
 mango start demo
-mango stop demo/api 2 other/web
-mango restart demo/api
-mango disable demo/api
-mango enable demo/api
+mango stop demo/api-single 2 other/web
+mango restart demo/api-single
+mango disable demo/api-single
+mango enable demo/api-single
 ```
 
 | Command | Behavior |
@@ -875,7 +893,7 @@ Log targets are:
 
 | Target form | Example | Resolves to |
 | --- | --- | --- |
-| `PROJECT/SERVICE` | `demo/api` | Service stdout/stderr logs. |
+| `PROJECT/SERVICE` | `demo/api-single` | Service stdout/stderr logs. |
 | service ID | `2` | A service found by runtime ID. |
 | `PROJECT/task/TASK` | `demo/task/cleanup` | Direct task execution logs. |
 | `PROJECT/workflow/WORKFLOW/NODE` | `demo/workflow/release/build` | One workflow node's logs. |
@@ -891,12 +909,12 @@ Flags:
 Examples:
 
 ```sh
-mango logs demo/api
-mango logs demo/api --stream stdout --tail 50
-mango logs demo/api --stream stderr
-mango logs demo/api --follow
-mango logs demo/api demo/task/cleanup --stream all --tail 20
-mango logs clear demo/api
+mango logs demo/api-single
+mango logs demo/api-single --stream stdout --tail 50
+mango logs demo/api-single --stream stderr
+mango logs demo/api-single --follow
+mango logs demo/api-single demo/task/cleanup --stream all --tail 20
+mango logs clear demo/api-single
 ```
 
 When multiple targets or streams are requested, each line is prefixed with its
@@ -1085,27 +1103,35 @@ tasks, logs, retries, and timeouts:
 ### API service
 
 ```text
-go run ./examples/api [--port PORT] [--interval DURATION]
+go run ./examples/api/main.go [--port PORT] [--interval DURATION]
+go run ./examples/api/main.go --supervise --port PORT --port PORT [--interval DURATION]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--port` | `8080` | HTTP listening port from `1` to `65535`. |
+| `--port` | `8080` | HTTP listening port from `1` to `65535`; may be repeated. In supervisor mode, each port is served by a separate child process. |
 | `--interval` | `5s` | Heartbeat interval. |
+| `--supervise` | off | Starts one independent `go run` API child per specified port. |
 
 The server provides `GET /` for a successful response and `GET /error` for an
 intentional HTTP 500 plus stderr output.
 
 ```sh
-go run ./examples/api --port 8080 --interval 3s
+go run ./examples/api/main.go --port 8080 --interval 3s
+go run ./examples/api/main.go --supervise --port 9000 --port 9090 --interval 3s
 curl http://127.0.0.1:8080/
 curl http://127.0.0.1:8080/error
 ```
 
+The supervisor mode is used by `api-supervisor` in `mango.example.yaml`. It preserves the
+process-tree demonstration: Mango starts one Go supervisor, which starts two
+independent Go API processes listening on ports `9000` and `9090`. This stays
+cross-platform because all levels are implemented with Go and `go run`.
+
 ### One-off task
 
 ```text
-go run ./examples/one-task [--iterations N] [--interval DURATION] [--fail]
+go run ./examples/one-task/main.go [--iterations N] [--interval DURATION] [--fail]
 ```
 
 | Option | Default | Description |
@@ -1117,36 +1143,27 @@ go run ./examples/one-task [--iterations N] [--interval DURATION] [--fail]
 Example:
 
 ```sh
-go run ./examples/one-task --iterations 3 --interval 200ms --fail
+go run ./examples/one-task/main.go --iterations 3 --interval 200ms --fail
 ```
 
 ### Workflow task helpers
 
-`examples/tasks/emit.go` and `examples/tasks/transform.py` accept the same
-logical options:
+`examples/tasks/emit.go` is the cross-platform task helper used by the sample.
+It accepts:
 
 ```text
-emit.go / transform.py [--name NAME] [--steps N] [--delay DURATION_OR_SECONDS] [--fail]
+go run ./examples/tasks/emit.go [--name NAME] [--steps N] [--delay DURATION] [--fail]
 ```
 
-| Option | Go default | Python default | Description |
-| --- | --- | --- | --- |
-| `--name` | `go-task` | `python-task` | Name written to the task log. |
-| `--steps` | `3` | `3` | Number of steps; must be positive. |
-| `--delay` | `250ms` | `0.25` | Delay between steps. Python uses seconds as a float. |
-| `--fail` | off | off | Write a failure message and exit with code `7`. |
+| Option | Default | Description |
+| --- | --- | --- |
+| `--name` | `go-task` | Name written to the task log. |
+| `--steps` | `3` | Number of steps; must be positive. |
+| `--delay` | `250ms` | Delay between steps using Go duration syntax. |
+| `--fail` | off | Write a failure message and exit with code `7`. |
 
-The shell helpers accept positional arguments:
-
-```text
-load.sh [NAME]
-fail.sh [NAME]
-slow.sh [NAME] [SECONDS]
-```
-
-`fail.sh` exits with code `7`; `slow.sh` is useful for testing task timeouts.
-`run_api.sh` has no options and starts example API servers on ports `9000` and
-`9090`. These scripts require a POSIX shell.
+The sample uses this helper for normal tasks, intentional failures, retries,
+parallel branches, and timeout demonstrations.
 
 ## Runtime files
 
