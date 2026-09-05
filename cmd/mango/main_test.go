@@ -643,8 +643,8 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		layout.Logs,
 		"daemon log",
 		layout.DaemonLog,
-		"execution history",
-		filepath.Join(layout.State, "execution-history.json"),
+		"history database",
+		filepath.Join(layout.State, "history.db"),
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("doctor output = %q, want %q", text, want)
@@ -663,7 +663,7 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 	for key, want := range map[string]string{
 		"logs":              layout.Logs,
 		"daemon_log":        layout.DaemonLog,
-		"execution_history": filepath.Join(layout.State, "execution-history.json"),
+		"execution_history": filepath.Join(layout.State, "history.db"),
 	} {
 		if report[key] != want {
 			t.Fatalf("doctor JSON %s = %v, want %q", key, report[key], want)

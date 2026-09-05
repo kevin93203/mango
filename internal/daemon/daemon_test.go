@@ -76,6 +76,57 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	}
 }
 
+func TestOpenHistoryRepositoryDefaultsToSQLiteAndIgnoresLegacyJSON(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	legacyPath := filepath.Join(layout.State, "execution-history.json")
+	if err := os.MkdirAll(layout.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err := openHistoryRepository(layout, config.DatabaseConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	if err := repository.Record(context.Background(), scheduler.Record{RunID: "run-1", Project: "demo", TargetType: "task", Target: "job"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	records, err := repository.Query(context.Background(), scheduler.HistoryQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].RunID != "run-1" {
+		t.Fatalf("records = %+v, want SQLite history independent of legacy JSON", records)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy JSON was not preserved: %v", err)
+	}
+}
+
+func TestOpenHistoryRepositoryResolvesRelativeSQLitePath(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	repository, err := openHistoryRepository(layout, config.DatabaseConfig{Driver: "sqlite", Path: "custom/history.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	if _, err := os.Stat(filepath.Join(root, "custom", "history.db")); err != nil {
+		t.Fatalf("custom history path was not created: %v", err)
+	}
+}
+
+func TestOpenHistoryRepositoryRequiresConfiguredDSN(t *testing.T) {
+	_, err := openHistoryRepository(testLayout(t.TempDir()), config.DatabaseConfig{Driver: "postgres", DSNEnv: "MANGO_TEST_MISSING_DSN"})
+	if err == nil || !strings.Contains(err.Error(), "environment variable") {
+		t.Fatalf("error = %v, want missing DSN environment error", err)
+	}
+}
+
 func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
 	if os.Getenv("MANGO_SCHEDULE_HELPER") == "1" {
 		fmt.Fprintln(os.Stderr, "Traceback (most recent call last):")
@@ -627,7 +678,7 @@ func TestNextRunIncludesDirectAndIndirectSchedules(t *testing.T) {
 		}},
 	})
 	schedules := []config.EffectiveSchedule{
-		{Project: "demo", Name: "direct-later", Cron: "*/5 * * * *", Timezone: time.UTC, TargetType: "task", Target: "compile"},
+		{Project: "demo", Name: "direct-later", Cron: "0 0 1 1 *", Timezone: time.UTC, TargetType: "task", Target: "compile"},
 		{Project: "demo", Name: "workflow-earlier", Cron: "* * * * *", Timezone: time.UTC, TargetType: "workflow", Target: "pipeline"},
 	}
 	if err := d.scheduler.Apply(schedules); err != nil {

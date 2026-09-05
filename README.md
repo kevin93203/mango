@@ -1181,19 +1181,41 @@ MANGO_HOME/
 │   └── mango.sock              # Unix; Windows uses a named pipe
 ├── logs/
 └── state/
-    └── execution-history.json
+    └── history.db
 ```
 
-The optional `daemon.yaml` currently supports `schedule_history_limit`.
+The optional `daemon.yaml` supports execution-history retention and database
+configuration. SQLite is used by default and the database is created with
+GORM's automatic schema migration.
 
 ```yaml
 # MANGO_HOME/daemon.yaml
 schedule_history_limit: 1000
+
+history:
+  database:
+    driver: sqlite
+    # Relative paths are resolved from MANGO_HOME.
+    path: state/history.db
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schedule_history_limit` | non-negative integer | `0` | Maximum number of execution records to retain. `0` keeps all records. |
+
+Supported database drivers are `sqlite`, `postgres`, and `mysql`. PostgreSQL
+and MySQL require a DSN, preferably supplied through an environment variable:
+
+```yaml
+history:
+  database:
+    driver: postgres
+    dsn_env: MANGO_HISTORY_DATABASE_DSN
+```
+
+For SQLite, omitting `path` uses `MANGO_HOME/state/history.db`. Existing
+`state/execution-history.json` files are preserved as backups but are not
+imported or read.
 
 ## Platform behavior
 

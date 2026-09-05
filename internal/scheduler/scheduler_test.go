@@ -1,13 +1,10 @@
 package scheduler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -294,26 +291,10 @@ func TestListSnapshotsReportsFailedOutcome(t *testing.T) {
 }
 
 func TestListSnapshotsRestoresLastRunFromHistory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "schedule-history.json")
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	finished := started.Add(1250 * time.Millisecond)
-	data, err := json.Marshal(HistoryFile{Version: historyVersion, Records: []Record{{
-		Project: "demo", Name: "job", Started: started, Finished: finished,
-	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	s := New(nil)
-	if err := s.LoadHistory(path, 0); err != nil {
-		t.Fatal(err)
-	}
+	s.RecordExecution(Record{Project: "demo", Name: "job", Trigger: ScheduleTrigger("job"), Started: started, Finished: finished})
 	if err := s.Apply([]config.EffectiveSchedule{{
 		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
 	}}); err != nil {
@@ -418,14 +399,10 @@ func TestRunNowRejectsAfterStop(t *testing.T) {
 	s.Wait()
 }
 
-func TestHistoryPersistsAndLoads(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "schedule-history.json")
+func TestHistoryRecordsAndCounters(t *testing.T) {
 	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
 		return ExecutionResult{ExitCode: 1, Err: errors.New("exit status 1"), Stderr: "Traceback\nZeroDivisionError: division by zero\n"}
 	})
-	if err := s.LoadHistory(path, 0); err != nil {
-		t.Fatal(err)
-	}
 	schedule := config.EffectiveSchedule{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC}
 	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
 		t.Fatal(err)
@@ -435,73 +412,18 @@ func TestHistoryPersistsAndLoads(t *testing.T) {
 	}
 	s.Wait()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var file HistoryFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		t.Fatal(err)
-	}
-	if len(file.Records) != 1 || file.Records[0].Stderr != "Traceback\nZeroDivisionError: division by zero\n" || len(file.Records[0].Attempts) != 1 {
-		t.Fatalf("persisted records = %+v", file.Records)
-	}
-
-	loaded := New(nil)
-	if err := loaded.LoadHistory(path, 0); err != nil {
-		t.Fatal(err)
-	}
-	history := loaded.History()
-	if len(history) != 1 || history[0].Error != "exit status 1" || len(history[0].Attempts) != 1 {
-		t.Fatalf("loaded history = %+v", history)
-	}
-	if history[0].RunID == "" || loaded.TriggerRunCount("demo", ScheduleTrigger("job")) != 1 {
-		t.Fatalf("loaded history = %+v, counts = %d; want run id and counter", history, loaded.TriggerRunCount("demo", ScheduleTrigger("job")))
-	}
-}
-
-func TestLoadHistoryKeepsLegacyAttemptsUnknown(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "schedule-history.json")
-	data := []byte(`{"version":1,"records":[{"Project":"demo","Name":"job","Trigger":"job","ExitCode":0}]}`)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	s := New(nil)
-	if err := s.LoadHistory(path, 0); err != nil {
-		t.Fatal(err)
-	}
 	history := s.History()
-	if len(history) != 1 || history[0].Attempts != nil {
-		t.Fatalf("history = %+v, want nil attempts for legacy record", history)
+	if len(history) != 1 || history[0].Error != "exit status 1" || len(history[0].Attempts) != 1 {
+		t.Fatalf("history = %+v", history)
 	}
-	encoded, err := json.Marshal(history[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(encoded, []byte(`"Attempts":null`)) {
-		t.Fatalf("legacy record JSON = %s, want null Attempts", encoded)
-	}
-	if history[0].Trigger.Type != TriggerSchedule || history[0].Trigger.Name != "job" || history[0].Trigger.Mode != TriggerAutomatic {
-		t.Fatalf("legacy trigger = %+v, want migrated schedule trigger", history[0].Trigger)
-	}
-	var migrated HistoryFile
-	data, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(data, &migrated); err != nil {
-		t.Fatal(err)
-	}
-	if migrated.Version != historyVersion || migrated.Counters[counterKey("trigger:"+TriggerSchedule, "demo", "job")] != 1 {
-		t.Fatalf("migrated history = %+v, want version 2 counter", migrated)
+	if history[0].RunID == "" || s.TriggerRunCount("demo", ScheduleTrigger("job")) != 1 {
+		t.Fatalf("history = %+v, counts = %d; want run id and counter", history, s.TriggerRunCount("demo", ScheduleTrigger("job")))
 	}
 }
 
-func TestHistoryCountersSurviveRetentionAndRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "execution-history.json")
+func TestHistoryCountersSurviveRetention(t *testing.T) {
 	s := New(nil)
-	if err := s.LoadHistory(path, 2); err != nil {
+	if err := s.SetHistoryLimit(2); err != nil {
 		t.Fatal(err)
 	}
 	for index := 0; index < 3; index++ {
@@ -522,16 +444,6 @@ func TestHistoryCountersSurviveRetentionAndRestart(t *testing.T) {
 	}
 	if got := len(s.History()); got != 2 {
 		t.Fatalf("retained history length = %d, want 2", got)
-	}
-	loaded := New(nil)
-	if err := loaded.LoadHistory(path, 2); err != nil {
-		t.Fatal(err)
-	}
-	if got := loaded.RunCount("task", "demo", "compile"); got != 3 {
-		t.Fatalf("reloaded task runs = %d, want 3", got)
-	}
-	if got := len(loaded.History()); got != 2 {
-		t.Fatalf("reloaded history length = %d, want 2", got)
 	}
 }
 
@@ -574,45 +486,25 @@ func TestWebhookTriggerIsSerializable(t *testing.T) {
 	}
 }
 
-func TestLoadHistoryTrimsToLatestLimit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "schedule-history.json")
-	file := HistoryFile{Version: historyVersion, Records: []Record{
-		{Name: "one"}, {Name: "two"}, {Name: "three"},
-	}}
-	data, err := json.Marshal(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+func TestHistoryLimitKeepsLatestRecords(t *testing.T) {
 	s := New(nil)
-	if err := s.LoadHistory(path, 2); err != nil {
+	if err := s.SetHistoryLimit(2); err != nil {
 		t.Fatal(err)
 	}
+	s.RecordExecution(Record{Name: "one"})
+	s.RecordExecution(Record{Name: "two"})
+	s.RecordExecution(Record{Name: "three"})
 	history := s.History()
 	if len(history) != 2 || history[0].Name != "two" || history[1].Name != "three" {
 		t.Fatalf("history = %+v", history)
-	}
-	data, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var compacted HistoryFile
-	if err := json.Unmarshal(data, &compacted); err != nil {
-		t.Fatal(err)
-	}
-	if len(compacted.Records) != 2 || compacted.Records[0].Name != "two" || compacted.Records[1].Name != "three" {
-		t.Fatalf("compacted history = %+v", compacted.Records)
 	}
 }
 
 func TestHistoryTailReturnsLatestRecords(t *testing.T) {
 	s := New(nil)
-	s.mu.Lock()
-	s.history = []Record{{Name: "one"}, {Name: "two"}, {Name: "three"}}
-	s.mu.Unlock()
+	s.RecordExecution(Record{Name: "one"})
+	s.RecordExecution(Record{Name: "two"})
+	s.RecordExecution(Record{Name: "three"})
 
 	history := s.HistoryTail(2)
 	if len(history) != 2 || history[0].Name != "two" || history[1].Name != "three" {
@@ -626,20 +518,5 @@ func TestHistoryTailReturnsLatestRecords(t *testing.T) {
 func TestHistoryTailReturnsEmptySliceWhenHistoryIsEmpty(t *testing.T) {
 	if history := New(nil).HistoryTail(100); history == nil || len(history) != 0 {
 		t.Fatalf("history = %#v, want non-nil empty slice", history)
-	}
-}
-
-func TestLoadHistoryCorruptFileReturnsErrorAndStartsEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "schedule-history.json")
-	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	s := New(nil)
-	if err := s.LoadHistory(path, 0); err == nil {
-		t.Fatal("expected corrupt history error")
-	}
-	if history := s.History(); len(history) != 0 {
-		t.Fatalf("history = %+v, want empty", history)
 	}
 }
