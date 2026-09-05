@@ -394,6 +394,86 @@ func TestWorkflowHistoryWithoutTargetFiltersAndPreservesTasks(t *testing.T) {
 	}
 }
 
+func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+		Started: base, Finished: base.Add(time.Second), Status: scheduler.StatusSuccess,
+		Attempts: []scheduler.Attempt{{Number: 1, Started: base, Finished: base.Add(time.Second), ExitCode: 0}},
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: "nightly",
+		Started: base.Add(time.Minute), Finished: base.Add(2 * time.Minute), Status: scheduler.StatusSuccess,
+		Tasks: []scheduler.TaskRecord{{
+			Node: "build", Task: "compile", Status: scheduler.StatusSuccess,
+			Started: base.Add(time.Minute), Finished: base.Add(90 * time.Second),
+			Attempts: []scheduler.Attempt{{Number: 1, Started: base.Add(time.Minute), Finished: base.Add(90 * time.Second), ExitCode: 0}},
+		}},
+	})
+	d.scheduler.RecordExecution(scheduler.Record{
+		Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+		Started: base.Add(2 * time.Minute), Finished: base.Add(3 * time.Minute), Status: scheduler.StatusSuccess,
+	})
+
+	request, err := ipc.NewRequest("task.history", struct {
+		Tail int `json:"tail"`
+	}{Tail: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("task.history failed: %+v", response.Error)
+	}
+	var records []scheduler.TaskHistoryRecord
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Source != "workflow/pipeline/build" || records[1].Source != "direct" {
+		t.Fatalf("records = %+v, want workflow and newest direct sources", records)
+	}
+	if records[0].Target != "compile" || len(records[0].Attempts) != 1 {
+		t.Fatalf("workflow task record = %+v, want task and attempt details", records[0])
+	}
+
+	request, err = ipc.NewRequest("task.history", struct {
+		Key  string `json:"key"`
+		Tail int    `json:"tail"`
+	}{Key: "demo/compile", Tail: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("targeted task.history failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 || records[0].Source != "direct" || records[1].Source != "workflow/pipeline/build" {
+		t.Fatalf("targeted records = %+v, want all task sources", records)
+	}
+	var legacyRecords []scheduler.Record
+	if err := decodeTestData(response.Data, &legacyRecords); err != nil {
+		t.Fatalf("targeted task history legacy decode failed: %v", err)
+	}
+	if len(legacyRecords) != 3 || legacyRecords[1].Target != "compile" || len(legacyRecords[1].Attempts) != 1 {
+		t.Fatalf("legacy records = %+v, want compatible task records", legacyRecords)
+	}
+
+	request, err = ipc.NewRequest("task.history", struct {
+		Tail int `json:"tail"`
+	}{Tail: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
+		t.Fatalf("negative task history tail response = %+v, want BAD_PARAMS", response)
+	}
+}
+
 func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

@@ -87,39 +87,7 @@ func RunWorkflowHistory(output *cliui.Renderer, load WorkflowHistoryLoader, init
 	if err != nil {
 		return err
 	}
-	state, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return err
-	}
-	defer term.Restore(int(os.Stdin.Fd()), state)
-	output.SetLineEnding("\r\n")
-	defer output.SetLineEnding("\n")
-	output.Printf("\x1b[?1049h\x1b[?25l")
-	defer func() {
-		output.Printf("\x1b[?1049l\x1b[?25h\x1b[0m\n")
-	}()
-
-	input := make(chan byte, 8)
-	go readInput(input)
-	draw := func() {
-		output.Printf("\x1b[H\x1b[2J")
-		renderWorkflowHistory(output, model)
-		if model.lastError != "" {
-			output.Printf("\n%s\n", output.ErrorText("error: "+model.lastError))
-		}
-	}
-	draw()
-	for {
-		key := readWorkflowHistoryKey(input)
-		quit, err := model.handleKey(key)
-		if err != nil {
-			model.lastError = err.Error()
-		}
-		if quit {
-			return nil
-		}
-		draw()
-	}
+	return runHistoryInteractive(output, model)
 }
 
 // LoadWorkflowHistory is the default IPC-backed loader used by the CLI.
@@ -267,6 +235,22 @@ func (m *workflowHistoryModel) handleKey(key int) (bool, error) {
 		m.enter()
 	}
 	return false, nil
+}
+
+func (m *workflowHistoryModel) historyHandleKey(key int) (bool, error) {
+	return m.handleKey(key)
+}
+
+func (m *workflowHistoryModel) historyRender(output *cliui.Renderer) {
+	renderWorkflowHistory(output, m)
+}
+
+func (m *workflowHistoryModel) historyError() string {
+	return m.lastError
+}
+
+func (m *workflowHistoryModel) historySetError(message string) {
+	m.lastError = message
 }
 
 func (m *workflowHistoryModel) enter() {

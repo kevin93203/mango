@@ -1204,6 +1204,160 @@ func TestWorkflowHistoryWithoutTargetJSONDoesNotEnterTUI(t *testing.T) {
 	}
 }
 
+func TestTaskHistoryWithoutTargetUsesTaskHistoryLoader(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	var method string
+	var params interface{}
+	err := taskCommandWithCaller([]string{"history"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		params = gotParams
+		return ipc.Response{Data: []scheduler.TaskHistoryRecord{{
+			Record: scheduler.Record{
+				Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+				Started: started, Finished: started.Add(time.Second), Status: scheduler.StatusSuccess,
+			}, Source: "direct",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "task.history" {
+		t.Fatalf("method = %q, want task.history", method)
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"tail":100}` {
+		t.Fatalf("params = %s, want {\"tail\":100}", encoded)
+	}
+	if !strings.Contains(output.String(), "demo/compile") || !strings.Contains(output.String(), "direct") {
+		t.Fatalf("output = %q, want task history table", output.String())
+	}
+}
+
+func TestTaskHistoryAttemptsTextOutput(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	err := taskCommandWithCaller([]string{"history", "--attempts", "demo/compile"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []scheduler.TaskHistoryRecord{{
+			Record: scheduler.Record{Project: "demo", TargetType: "task", Target: "compile", Started: started,
+				Attempts: []scheduler.Attempt{{Number: 1, Started: started, Finished: started.Add(time.Second), DurationSeconds: 1, ExitCode: 1, Error: "failed", Stderr: "details\n"}}},
+			Source: "direct",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"SOURCE", "ATTEMPT", "direct", "failed", "details"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output = %q, want %q", text, want)
+		}
+	}
+}
+
+func TestTaskHistoryAllowsFlagsAfterTarget(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	called := false
+	err := taskCommandWithCaller([]string{"history", "demo/compile", "--attempts", "--tail", "20"}, func(method string, params interface{}) (ipc.Response, error) {
+		called = true
+		if method != "task.history" {
+			t.Fatalf("method = %q, want task.history", method)
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != `{"key":"demo/compile","tail":20}` {
+			t.Fatalf("params = %s, want target and tail", encoded)
+		}
+		return ipc.Response{Data: []scheduler.TaskHistoryRecord{}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("task history caller was not invoked")
+	}
+}
+
+func TestTaskHistoryWithoutTargetJSONDoesNotEnterTUI(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+
+	called := false
+	err := taskCommandWithCaller([]string{"history", "--tail", "7"}, func(method string, params interface{}) (ipc.Response, error) {
+		called = true
+		if method != "task.history" {
+			t.Fatalf("method = %q, want task.history", method)
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != `{"tail":7}` {
+			t.Fatalf("params = %s, want {\"tail\":7}", encoded)
+		}
+		return ipc.Response{Data: []scheduler.TaskHistoryRecord{{
+			Record: scheduler.Record{Project: "demo", TargetType: "task", Target: "compile"}, Source: "direct",
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("task history caller was not invoked")
+	}
+	var records []scheduler.TaskHistoryRecord
+	if err := json.Unmarshal(output.Bytes(), &records); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(records) != 1 || records[0].Source != "direct" {
+		t.Fatalf("records = %+v, want source metadata", records)
+	}
+}
+
+func TestTaskHistoryRejectsNegativeTail(t *testing.T) {
+	err := taskCommandWithCaller([]string{"history", "--tail", "-1"}, func(_ string, _ interface{}) (ipc.Response, error) {
+		t.Fatal("caller should not be invoked for a negative tail")
+		return ipc.Response{}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("error = %v, want non-negative validation", err)
+	}
+}
+
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
