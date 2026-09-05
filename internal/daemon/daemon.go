@@ -2113,6 +2113,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if p.Tail < 0 {
 			return failure(request, "BAD_PARAMS", errors.New("task history tail must be non-negative"))
 		}
+		if p.Key == "" && p.Project == "" && p.Name == "" {
+			return success(request, filterTaskHistory(d.scheduler.HistoryTail(0), "", "", p.Tail))
+		}
 		project, name, err := splitExecutionTarget(p.Key, p.Project, p.Name)
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
@@ -2257,32 +2260,49 @@ func filterWorkflowHistory(history []scheduler.Record, project, workflowName str
 	return tailRecords(result, tail)
 }
 
-func filterTaskHistory(history []scheduler.Record, project, taskName string, tail int) []scheduler.Record {
-	result := make([]scheduler.Record, 0)
+func filterTaskHistory(history []scheduler.Record, project, taskName string, tail int) []scheduler.TaskHistoryRecord {
+	result := make([]scheduler.TaskHistoryRecord, 0)
 	for _, record := range history {
-		if record.Project != project {
+		if project != "" && record.Project != project {
 			continue
 		}
-		if record.TargetType == "task" && record.Target == taskName {
-			result = append(result, record)
+		if record.TargetType == "task" {
+			if taskName != "" && record.Target != taskName {
+				continue
+			}
+			result = append(result, scheduler.TaskHistoryRecord{Record: record, Source: "direct"})
 			continue
 		}
 		if record.TargetType != "workflow" {
 			continue
 		}
 		for _, task := range record.Tasks {
-			if task.Task != taskName {
+			if taskName != "" && task.Task != taskName {
 				continue
 			}
-			result = append(result, scheduler.Record{
-				Project: record.Project, Name: taskName, TargetType: "task", Target: taskName,
-				Trigger: record.Trigger, Status: task.Status, Started: task.Started, Finished: task.Finished,
-				ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr, Attempts: task.Attempts,
-				Tasks: []scheduler.TaskRecord{task},
+			workflowName := record.Target
+			if workflowName == "" {
+				workflowName = record.Name
+			}
+			result = append(result, scheduler.TaskHistoryRecord{
+				Record: scheduler.Record{
+					Project: record.Project, Name: task.Task, TargetType: "task", Target: task.Task,
+					Trigger: record.Trigger, Status: task.Status, Started: task.Started, Finished: task.Finished,
+					ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr, Attempts: task.Attempts,
+					Tasks: []scheduler.TaskRecord{task},
+				},
+				Source: "workflow/" + workflowName + "/" + task.Node,
 			})
 		}
 	}
-	return tailRecords(result, tail)
+	return tailTaskHistoryRecords(result, tail)
+}
+
+func tailTaskHistoryRecords(records []scheduler.TaskHistoryRecord, tail int) []scheduler.TaskHistoryRecord {
+	if tail <= 0 || tail >= len(records) {
+		return records
+	}
+	return records[len(records)-tail:]
 }
 
 func tailRecords(records []scheduler.Record, tail int) []scheduler.Record {

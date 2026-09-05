@@ -30,6 +30,14 @@ type Record struct {
 	Tasks    []TaskRecord
 }
 
+// TaskHistoryRecord is the response representation returned by task history
+// queries. Source is derived while querying history and is intentionally not
+// part of the persisted execution Record.
+type TaskHistoryRecord struct {
+	Record
+	Source string `json:"source,omitempty"`
+}
+
 // TaskRecord is the execution record for one direct task invocation or one
 // workflow node. Node is the workflow node name; Task is the task definition
 // referenced by that node.
