@@ -1459,6 +1459,34 @@ func TestTaskHistoryAttemptsTextOutput(t *testing.T) {
 	}
 }
 
+func TestTaskHistoryTextOutputShowsSafeExecutionMetadata(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput := cliOutput
+	defer func() { cliOutput = previousOutput }()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+
+	printTaskHistory([]scheduler.TaskHistoryRecord{{
+		Record: scheduler.Record{
+			Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
+			Tasks: []scheduler.TaskRecord{{
+				Command: "compiler", Args: []string{"--token", "<redacted>"}, WorkingDir: "/workspace",
+				EnvKeys: []string{"API_TOKEN"}, ArgsRedacted: true,
+			}},
+		},
+		Source: "direct",
+	}})
+
+	text := output.String()
+	for _, want := range []string{"COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "compiler", "<redacted>", "API_TOKEN"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output = %q, want %q", text, want)
+		}
+	}
+	if strings.Contains(text, "secret-token") {
+		t.Fatalf("output = %q, must not contain raw secret", text)
+	}
+}
+
 func TestTaskHistoryAllowsFlagsAfterTarget(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

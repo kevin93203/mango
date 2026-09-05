@@ -2287,9 +2287,11 @@ func filterTaskHistory(history []scheduler.Record, project, taskName string, tai
 			result = append(result, scheduler.TaskHistoryRecord{
 				Record: scheduler.Record{
 					Project: record.Project, Name: task.Task, TargetType: "task", Target: task.Task,
+					// Keep the task execution metadata when projecting a workflow node
+					// into the task history view.
+					Tasks:   []scheduler.TaskRecord{task},
 					Trigger: record.Trigger, Status: task.Status, Started: task.Started, Finished: task.Finished,
 					ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr, Attempts: task.Attempts,
-					Tasks: []scheduler.TaskRecord{task},
 				},
 				Source: "workflow/" + workflowName + "/" + task.Node,
 			})

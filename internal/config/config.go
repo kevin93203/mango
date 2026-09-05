@@ -195,12 +195,15 @@ type EffectiveSchedule struct {
 }
 
 type EffectiveTask struct {
-	Project     string
-	Name        string
-	Command     string
-	Args        []string
-	WorkingDir  string
-	Env         map[string]string
+	Project    string
+	Name       string
+	Command    string
+	Args       []string
+	WorkingDir string
+	Env        map[string]string
+	// DeclaredEnv contains only values explicitly configured on the task. Env
+	// may additionally contain inherited process environment values.
+	DeclaredEnv map[string]string
 	Timeout     time.Duration
 	Concurrency string
 	RetryCount  int
@@ -624,7 +627,7 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 		}
 		result[name] = EffectiveTask{
 			Project: projectName, Name: name, Command: command, Args: append([]string(nil), task.Args...),
-			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), Timeout: timeout,
+			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), DeclaredEnv: cloneStringMap(task.Env), Timeout: timeout,
 			Concurrency: defaultString(task.Concurrency, "forbid"), RetryCount: retryCount, RetryDelay: retryDelay,
 		}
 	}
@@ -688,6 +691,17 @@ func taskEnvironment(extra map[string]string, inherit bool) map[string]string {
 	}
 	for k, v := range extra {
 		result[k] = v
+	}
+	return result
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
 	}
 	return result
 }

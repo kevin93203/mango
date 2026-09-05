@@ -62,6 +62,62 @@ func TestRunWorkflowExecutesReadyNodesInParallelAndSkipsDescendants(t *testing.T
 	}
 }
 
+func TestTaskRecordsPersistSafeExecutionMetadata(t *testing.T) {
+	task := testTask("demo", "compile")
+	task.Command = "/usr/bin/compiler"
+	task.Args = []string{"--token", "secret-token", "--mode", "release"}
+	task.WorkingDir = "/workspace/demo"
+	task.DeclaredEnv = map[string]string{"API_TOKEN": "secret-token", "MODE": "release"}
+	e := New(func(context.Context, config.EffectiveTask, Invocation) scheduler.ExecutionResult {
+		return scheduler.ExecutionResult{}
+	}, nil)
+	e.Apply(map[string]config.EffectiveTask{"demo/compile": task}, map[string]config.EffectiveWorkflow{
+		"demo/build": testWorkflow("demo", "build", map[string]config.EffectiveWorkflowTask{
+			"compile": {Name: "compile", Uses: "compile"},
+		}),
+	})
+
+	direct := e.RunTask(context.Background(), "demo", "compile", "manual")
+	if direct.Record == nil || len(direct.Record.Tasks) != 1 {
+		t.Fatalf("direct result = %+v, want one task record", direct)
+	}
+	assertSafeTaskRecord(t, direct.Record.Tasks[0])
+
+	workflowRun := e.Run(context.Background(), "demo", "build", "manual")
+	if workflowRun.Record == nil || len(workflowRun.Record.Tasks) != 1 {
+		t.Fatalf("workflow result = %+v, want one task record", workflowRun.Record)
+	}
+	assertSafeTaskRecord(t, workflowRun.Record.Tasks[0])
+}
+
+func assertSafeTaskRecord(t *testing.T, record scheduler.TaskRecord) {
+	t.Helper()
+	if record.Command != "/usr/bin/compiler" || record.WorkingDir != "/workspace/demo" {
+		t.Fatalf("record metadata = %+v, want command and working directory", record)
+	}
+	if len(record.Args) != 4 || record.Args[0] != "--token" || record.Args[1] != "<redacted>" || record.Args[3] != "release" {
+		t.Fatalf("record args = %#v, want sanitized args", record.Args)
+	}
+	if len(record.EnvKeys) != 2 || record.EnvKeys[0] != "API_TOKEN" || record.EnvKeys[1] != "MODE" {
+		t.Fatalf("record env keys = %#v, want sorted keys", record.EnvKeys)
+	}
+	if record.ArgsRedacted != true {
+		t.Fatal("record ArgsRedacted = false, want true")
+	}
+	if containsString(record.Args, "secret-token") {
+		t.Fatal("record contains raw environment value")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTaskForbidQueuesAcrossDirectRuns(t *testing.T) {
 	var mu sync.Mutex
 	active, maximum := 0, 0

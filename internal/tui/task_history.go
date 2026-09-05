@@ -454,10 +454,15 @@ func renderTaskRuns(output *cliui.Renderer, model *taskHistoryModel) {
 	rows := make([][]cliui.Cell, 0, len(group.Records))
 	for index, record := range group.Records {
 		status := historyStatus(record.Status, record.ExitCode, record.Error)
+		task := historyTaskRecord(record.Record)
 		rows = append(rows, []cliui.Cell{
 			{Text: historyMarker(index == model.selected)},
 			{Text: historyDisplay(record.Source)},
 			{Text: historyDisplay(record.Trigger)},
+			{Text: historyDisplay(task.Command)},
+			{Text: historyTaskArgs(task.Args)},
+			{Text: historyDisplay(task.WorkingDir)},
+			{Text: historyEnvKeys(task.EnvKeys)},
 			{Text: historyTime(record.Started)},
 			{Text: historyTime(record.Finished)},
 			{Text: historyRecordDuration(record.Record)},
@@ -466,7 +471,7 @@ func renderTaskRuns(output *cliui.Renderer, model *taskHistoryModel) {
 			{Text: historyCompact(record.Error), Style: historyErrorStyle(record.Error)},
 		})
 	}
-	output.Table([]string{"", "SOURCE", "TRIGGER", "STARTED", "FINISHED", "DURATION", "EXIT", "STATUS", "ERROR"}, rows)
+	output.Table([]string{"", "SOURCE", "TRIGGER", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "FINISHED", "DURATION", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func renderTaskRunDetail(output *cliui.Renderer, model *taskHistoryModel) {
@@ -476,10 +481,15 @@ func renderTaskRunDetail(output *cliui.Renderer, model *taskHistoryModel) {
 		return
 	}
 	status := historyStatus(run.Status, run.ExitCode, run.Error)
+	task := historyTaskRecord(run.Record)
 	output.KeyValues([][]cliui.Cell{
 		{{Text: "task"}, {Text: run.Project + "/" + run.Target}},
 		{{Text: "source"}, {Text: historyDisplay(run.Source)}},
 		{{Text: "trigger"}, {Text: historyDisplay(run.Trigger)}},
+		{{Text: "command"}, {Text: historyDisplay(task.Command)}},
+		{{Text: "args"}, {Text: historyTaskArgs(task.Args)}},
+		{{Text: "working_dir"}, {Text: historyDisplay(task.WorkingDir)}},
+		{{Text: "env_keys"}, {Text: historyEnvKeys(task.EnvKeys)}},
 		{{Text: "started"}, {Text: historyTime(run.Started)}},
 		{{Text: "finished"}, {Text: historyTime(run.Finished)}},
 		{{Text: "duration"}, {Text: historyRecordDuration(run.Record)}},
@@ -587,10 +597,15 @@ func renderTaskHistoryText(output *cliui.Renderer, records []scheduler.TaskHisto
 	rows := make([][]cliui.Cell, 0, len(records))
 	for _, record := range records {
 		status := historyStatus(record.Status, record.ExitCode, record.Error)
+		task := historyTaskRecord(record.Record)
 		rows = append(rows, []cliui.Cell{
 			{Text: record.Project + "/" + record.Target},
 			{Text: historyDisplay(record.Source)},
 			{Text: historyDisplay(record.Trigger)},
+			{Text: historyDisplay(task.Command)},
+			{Text: historyTaskArgs(task.Args)},
+			{Text: historyDisplay(task.WorkingDir)},
+			{Text: historyEnvKeys(task.EnvKeys)},
 			{Text: historyTime(record.Started)},
 			{Text: historyTime(record.Finished)},
 			{Text: fmt.Sprintf("%d", record.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
@@ -598,12 +613,13 @@ func renderTaskHistoryText(output *cliui.Renderer, records []scheduler.TaskHisto
 			{Text: historyCompact(record.Error), Style: historyErrorStyle(record.Error)},
 		})
 	}
-	output.Table([]string{"TASK", "SOURCE", "TRIGGER", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
+	output.Table([]string{"TASK", "SOURCE", "TRIGGER", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func renderTaskAttemptText(output *cliui.Renderer, records []scheduler.TaskHistoryRecord) {
 	rows := make([][]cliui.Cell, 0)
 	for _, record := range records {
+		task := historyTaskRecord(record.Record)
 		if len(record.Attempts) == 0 {
 			rows = append(rows, []cliui.Cell{
 				{Text: record.Project + "/" + record.Target},
@@ -612,6 +628,8 @@ func renderTaskAttemptText(output *cliui.Renderer, records []scheduler.TaskHisto
 				{Text: historyTime(record.Started)},
 				{Text: historyTime(record.Finished)},
 				{Text: historyRecordDuration(record.Record)},
+				{Text: historyDisplay(task.Command)}, {Text: historyTaskArgs(task.Args)},
+				{Text: historyDisplay(task.WorkingDir)}, {Text: historyEnvKeys(task.EnvKeys)},
 				{Text: fmt.Sprintf("%d", record.ExitCode), Style: cliui.StateStyle(historyStatus(record.Status, record.ExitCode, record.Error)), Align: cliui.AlignRight},
 				{Text: historyStatus(record.Status, record.ExitCode, record.Error), Style: cliui.StateStyle(historyStatus(record.Status, record.ExitCode, record.Error))},
 				{Text: historyCompact(record.Error), Style: historyErrorStyle(record.Error)},
@@ -628,6 +646,8 @@ func renderTaskAttemptText(output *cliui.Renderer, records []scheduler.TaskHisto
 				{Text: historyTime(attempt.Started)},
 				{Text: historyTime(attempt.Finished)},
 				{Text: historyDuration(attempt.DurationSeconds)},
+				{Text: historyDisplay(task.Command)}, {Text: historyTaskArgs(task.Args)},
+				{Text: historyDisplay(task.WorkingDir)}, {Text: historyEnvKeys(task.EnvKeys)},
 				{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
 				{Text: status, Style: cliui.StateStyle(status)},
 				{Text: historyCompact(attempt.Error), Style: historyErrorStyle(attempt.Error)},
@@ -639,5 +659,5 @@ func renderTaskAttemptText(output *cliui.Renderer, records []scheduler.TaskHisto
 		output.Println(output.Text(cliui.StyleMuted, "No task execution history."))
 		return
 	}
-	output.Table([]string{"TASK", "SOURCE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
+	output.Table([]string{"TASK", "SOURCE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
 }

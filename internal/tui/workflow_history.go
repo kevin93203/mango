@@ -464,6 +464,13 @@ func historyWorkflowTarget(record scheduler.Record) string {
 	return record.Name
 }
 
+func historyTaskRecord(record scheduler.Record) scheduler.TaskRecord {
+	if len(record.Tasks) == 0 {
+		return scheduler.TaskRecord{}
+	}
+	return record.Tasks[0]
+}
+
 func renderWorkflowHistory(output *cliui.Renderer, model *workflowHistoryModel) {
 	help := "(q quit, ↑/↓ or j/k select, Enter detail, Esc back, r refresh, n older)"
 	switch model.screen {
@@ -556,6 +563,10 @@ func renderWorkflowRunDetail(output *cliui.Renderer, model *workflowHistoryModel
 			{Text: historyMarker(index == model.selected)},
 			{Text: task.Node},
 			{Text: task.Task},
+			{Text: historyDisplay(task.Command)},
+			{Text: historyTaskArgs(task.Args)},
+			{Text: historyDisplay(task.WorkingDir)},
+			{Text: historyEnvKeys(task.EnvKeys)},
 			{Text: status, Style: cliui.StateStyle(status)},
 			{Text: historyTime(task.Started)},
 			{Text: historyDuration(task.DurationSeconds)},
@@ -564,7 +575,7 @@ func renderWorkflowRunDetail(output *cliui.Renderer, model *workflowHistoryModel
 			{Text: historyCompact(task.Error), Style: historyErrorStyle(task.Error)},
 		})
 	}
-	output.Table([]string{"", "NODE", "TASK", "STATUS", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "ERROR"}, rows)
+	output.Table([]string{"", "NODE", "TASK", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STATUS", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "ERROR"}, rows)
 }
 
 func renderWorkflowTaskDetail(output *cliui.Renderer, model *workflowHistoryModel) {
@@ -577,6 +588,10 @@ func renderWorkflowTaskDetail(output *cliui.Renderer, model *workflowHistoryMode
 	output.KeyValues([][]cliui.Cell{
 		{{Text: "node"}, {Text: task.Node}},
 		{{Text: "task"}, {Text: task.Task}},
+		{{Text: "command"}, {Text: historyDisplay(task.Command)}},
+		{{Text: "args"}, {Text: historyTaskArgs(task.Args)}},
+		{{Text: "working_dir"}, {Text: historyDisplay(task.WorkingDir)}},
+		{{Text: "env_keys"}, {Text: historyEnvKeys(task.EnvKeys)}},
 		{{Text: "started"}, {Text: historyTime(task.Started)}},
 		{{Text: "finished"}, {Text: historyTime(task.Finished)}},
 		{{Text: "duration"}, {Text: historyDuration(task.DurationSeconds)}},
@@ -711,6 +726,10 @@ func renderWorkflowTaskText(output *cliui.Renderer, records []scheduler.Record) 
 				{Text: historyTime(record.Started)},
 				{Text: task.Node},
 				{Text: task.Task},
+				{Text: historyDisplay(task.Command)},
+				{Text: historyTaskArgs(task.Args)},
+				{Text: historyDisplay(task.WorkingDir)},
+				{Text: historyEnvKeys(task.EnvKeys)},
 				{Text: historyTime(task.Started)},
 				{Text: historyDuration(task.DurationSeconds)},
 				{Text: fmt.Sprintf("%d", len(task.Attempts)), Align: cliui.AlignRight},
@@ -724,7 +743,7 @@ func renderWorkflowTaskText(output *cliui.Renderer, records []scheduler.Record) 
 		output.Println(output.Text(cliui.StyleMuted, "No task records."))
 		return
 	}
-	output.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
+	output.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func historyMarker(selected bool) string {
@@ -774,6 +793,28 @@ func historyDisplay(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func historyTaskArgs(args []string) string {
+	if len(args) == 0 {
+		return "-"
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return "-"
+	}
+	return historyCompact(unescapeHistoryJSON(string(data)))
+}
+
+func historyEnvKeys(keys []string) string {
+	if len(keys) == 0 {
+		return "-"
+	}
+	return strings.Join(keys, ",")
+}
+
+func unescapeHistoryJSON(value string) string {
+	return strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(value)
 }
 
 func historyCompact(value string) string {

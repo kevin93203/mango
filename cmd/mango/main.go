@@ -2067,6 +2067,10 @@ func printWorkflowHistoryTasks(history []scheduler.Record) {
 				{Text: formatTime(record.Started)},
 				{Text: task.Node},
 				{Text: task.Task},
+				{Text: historyValue(task.Command)},
+				{Text: formatHistoryArgs(task.Args)},
+				{Text: historyValue(task.WorkingDir)},
+				{Text: formatHistoryEnvKeys(task.EnvKeys)},
 				{Text: formatTime(task.Started)},
 				{Text: formatScheduleDuration(task.DurationSeconds), Style: zeroStyle(task.DurationSeconds)},
 				{Text: fmt.Sprintf("%d", len(task.Attempts)), Align: cliui.AlignRight},
@@ -2080,7 +2084,7 @@ func printWorkflowHistoryTasks(history []scheduler.Record) {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task records."))
 		return
 	}
-	cliOutput.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
+	cliOutput.Table([]string{"WORKFLOW", "RUN", "NODE", "TASK", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "DURATION", "ATTEMPTS", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func printTaskHistory(history []scheduler.TaskHistoryRecord) {
@@ -2105,10 +2109,15 @@ func printTaskHistory(history []scheduler.TaskHistoryRecord) {
 		if source == "" {
 			source = "-"
 		}
+		task := historyTaskRecord(item.Record)
 		rows = append(rows, []cliui.Cell{
 			{Text: item.Project + "/" + taskName},
 			{Text: source, Style: zeroStyle(source)},
 			{Text: item.Trigger, Style: zeroStyle(item.Trigger)},
+			{Text: historyValue(task.Command)},
+			{Text: formatHistoryArgs(task.Args)},
+			{Text: historyValue(task.WorkingDir)},
+			{Text: formatHistoryEnvKeys(task.EnvKeys)},
 			{Text: formatTime(item.Started)},
 			{Text: formatTime(item.Finished)},
 			{Text: fmt.Sprintf("%d", item.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
@@ -2116,7 +2125,7 @@ func printTaskHistory(history []scheduler.TaskHistoryRecord) {
 			{Text: compactScheduleText(item.Error), Style: errorStyle(item.Error)},
 		})
 	}
-	cliOutput.Table([]string{"TASK", "SOURCE", "TRIGGER", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
+	cliOutput.Table([]string{"TASK", "SOURCE", "TRIGGER", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "STARTED", "FINISHED", "EXIT", "STATUS", "ERROR"}, rows)
 }
 
 func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
@@ -2134,6 +2143,7 @@ func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
 		if source == "" {
 			source = "-"
 		}
+		task := historyTaskRecord(item.Record)
 		if len(item.Attempts) == 0 {
 			status := item.Status
 			if status == "" {
@@ -2150,6 +2160,8 @@ func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
 				{Text: item.Project + "/" + taskName}, {Text: source, Style: zeroStyle(source)},
 				{Text: "-", Style: cliui.StyleMuted}, {Text: formatTime(item.Started)},
 				{Text: formatTime(item.Finished)}, {Text: formatHistoryRecordDuration(item.Record)},
+				{Text: historyValue(task.Command)}, {Text: formatHistoryArgs(task.Args)},
+				{Text: historyValue(task.WorkingDir)}, {Text: formatHistoryEnvKeys(task.EnvKeys)},
 				{Text: fmt.Sprintf("%d", item.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
 				{Text: status, Style: cliui.StateStyle(status)},
 				{Text: compactScheduleText(item.Error), Style: errorStyle(item.Error)},
@@ -2171,6 +2183,8 @@ func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
 				{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight},
 				{Text: formatTime(attempt.Started)}, {Text: formatTime(attempt.Finished)},
 				{Text: formatScheduleDuration(attempt.DurationSeconds)},
+				{Text: historyValue(task.Command)}, {Text: formatHistoryArgs(task.Args)},
+				{Text: historyValue(task.WorkingDir)}, {Text: formatHistoryEnvKeys(task.EnvKeys)},
 				{Text: fmt.Sprintf("%d", attempt.ExitCode), Style: cliui.StateStyle(status), Align: cliui.AlignRight},
 				{Text: status, Style: cliui.StateStyle(status)},
 				{Text: compactScheduleText(attempt.Error), Style: errorStyle(attempt.Error)},
@@ -2182,7 +2196,43 @@ func printTaskHistoryAttempts(history []scheduler.TaskHistoryRecord) {
 		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No task execution history."))
 		return
 	}
-	cliOutput.Table([]string{"TASK", "SOURCE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
+	cliOutput.Table([]string{"TASK", "SOURCE", "ATTEMPT", "STARTED", "FINISHED", "DURATION", "COMMAND", "ARGS", "WORKING_DIR", "ENV_KEYS", "EXIT", "RESULT", "ERROR", "STDERR"}, rows)
+}
+
+func historyTaskRecord(record scheduler.Record) scheduler.TaskRecord {
+	if len(record.Tasks) == 0 {
+		return scheduler.TaskRecord{}
+	}
+	return record.Tasks[0]
+}
+
+func formatHistoryArgs(args []string) string {
+	if len(args) == 0 {
+		return "-"
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "-"
+	}
+	return compactScheduleText(unescapeHistoryJSON(string(encoded)))
+}
+
+func formatHistoryEnvKeys(keys []string) string {
+	if len(keys) == 0 {
+		return "-"
+	}
+	return strings.Join(keys, ",")
+}
+
+func historyValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func unescapeHistoryJSON(value string) string {
+	return strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(value)
 }
 
 func formatHistoryRecordDuration(record scheduler.Record) string {
