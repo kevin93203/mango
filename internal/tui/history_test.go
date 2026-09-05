@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -132,5 +133,228 @@ func TestUnifiedHistoryTaskDetailPreservesSafeExecutionMetadata(t *testing.T) {
 	}
 	if strings.Contains(text, "secret-token") {
 		t.Fatalf("output = %q, must not contain raw secret", text)
+	}
+}
+
+func TestUnifiedHistoryRunsPaginateNewestFirstAndLoadOlderPages(t *testing.T) {
+	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	allRecords := make([]scheduler.Record, 31)
+	for index := range allRecords {
+		allRecords[index] = scheduler.Record{
+			RunID:   fmt.Sprintf("run-%02d", index),
+			Project: "demo", TargetType: "task", Target: "task",
+			Started: started.Add(time.Duration(index) * time.Hour),
+		}
+	}
+
+	model := &unifiedHistoryModel{
+		filter: HistoryFilter{Tail: 15},
+		load: func(filter HistoryFilter) ([]scheduler.Record, error) {
+			begin := len(allRecords) - filter.Tail
+			if begin < 0 || filter.Tail == 0 {
+				begin = 0
+			}
+			return append([]scheduler.Record(nil), allRecords[begin:]...), nil
+		},
+	}
+	if err := model.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.records) != 15 || model.currentPage() != 0 || historyPageCount(len(model.records)) != 1 {
+		t.Fatalf("initial pagination = records %d, page %d, pages %d", len(model.records), model.currentPage(), historyPageCount(len(model.records)))
+	}
+	if model.records[0].RunID != "run-30" {
+		t.Fatalf("first run = %q, want newest run", model.records[0].RunID)
+	}
+
+	var firstPage bytes.Buffer
+	renderer := cliui.New(&firstPage, &firstPage, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	renderUnifiedRuns(renderer, model)
+	text := firstPage.String()
+	if !strings.Contains(text, "run-30") || strings.Contains(text, "run-15") || !strings.Contains(text, "page 1/1, rows 1-15 of 15") {
+		t.Fatalf("first page = %q, want newest 15 rows and page status", text)
+	}
+
+	if _, err := model.historyHandleKey('n'); err != nil {
+		t.Fatal(err)
+	}
+	if model.filter.Tail != 15 || len(model.records) != 15 {
+		t.Fatalf("n changed pagination state: tail=%d records=%d", model.filter.Tail, len(model.records))
+	}
+	if _, err := model.historyHandleKey(historyKeyRight); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.records) != 31 || model.currentPage() != 1 || model.selected != 15 || model.filter.Tail != 115 {
+		t.Fatalf("older page = records %d, page %d, selected %d, tail %d; want loaded second page", len(model.records), model.currentPage(), model.selected, model.filter.Tail)
+	}
+
+	var secondPage bytes.Buffer
+	renderer = cliui.New(&secondPage, &secondPage, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	renderUnifiedRuns(renderer, model)
+	text = secondPage.String()
+	if !strings.Contains(text, "run-15") || strings.Contains(text, "run-30") || !strings.Contains(text, "page 2/3, rows 16-30 of 31") {
+		t.Fatalf("second page = %q, want middle 15 rows and page status", text)
+	}
+
+	for range historyPageSize {
+		if _, err := model.historyHandleKey(historyKeyDown); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if model.selected != 29 {
+		t.Fatalf("down at page boundary selected %d, want 29", model.selected)
+	}
+	if _, err := model.historyHandleKey(historyKeyRight); err != nil {
+		t.Fatal(err)
+	}
+	if model.currentPage() != 2 || model.selected != 30 {
+		t.Fatalf("last page = page %d, selected %d, want page 2 and final row", model.currentPage(), model.selected)
+	}
+	if _, err := model.historyHandleKey(historyKeyDown); err != nil {
+		t.Fatal(err)
+	}
+	if model.selected != 30 {
+		t.Fatalf("down on final page moved selection to %d", model.selected)
+	}
+	if _, err := model.historyHandleKey(historyKeyLeft); err != nil {
+		t.Fatal(err)
+	}
+	if model.currentPage() != 1 || model.selected != 15 {
+		t.Fatalf("left page = page %d, selected %d, want page 1 row 1", model.currentPage(), model.selected)
+	}
+}
+
+func TestUnifiedHistoryNestedTablesPaginateOldestFirst(t *testing.T) {
+	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	tasks := make([]scheduler.TaskRecord, 16)
+	for index := range tasks {
+		tasks[index] = scheduler.TaskRecord{
+			Node:    fmt.Sprintf("task-%02d", index),
+			Task:    fmt.Sprintf("task-%02d", index),
+			Started: started.Add(time.Duration(index) * time.Hour),
+		}
+	}
+	// Deliberately reverse the stored order to verify display sorting.
+	for left, right := 0, len(tasks)-1; left < right; left, right = left+1, right-1 {
+		tasks[left], tasks[right] = tasks[right], tasks[left]
+	}
+	attempts := make([]scheduler.Attempt, 16)
+	for index := range attempts {
+		attempts[index] = scheduler.Attempt{
+			Number:  index + 1,
+			Started: started.Add(time.Duration(index) * time.Hour),
+		}
+	}
+	tasks[len(tasks)-1].Attempts = attempts
+	record := scheduler.Record{
+		RunID: "workflow-run", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Started: started, Tasks: tasks,
+	}
+	model := &unifiedHistoryModel{
+		records: []scheduler.Record{record},
+		screen:  unifiedHistoryWorkflowTasks,
+	}
+
+	visible := model.visibleTasks()
+	if visible[0].Node != "task-00" || visible[15].Node != "task-15" {
+		t.Fatalf("visible task order = %q, %q, want oldest first", visible[0].Node, visible[15].Node)
+	}
+	var taskPage bytes.Buffer
+	renderer := cliui.New(&taskPage, &taskPage, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	renderUnifiedWorkflowTasks(renderer, model)
+	text := taskPage.String()
+	if !strings.Contains(text, "task-00") || strings.Contains(text, "task-15") || !strings.Contains(text, "page 1/2, rows 1-15 of 16") {
+		t.Fatalf("task page = %q, want oldest 15 rows and page status", text)
+	}
+	if _, err := model.historyHandleKey(historyKeyRight); err != nil {
+		t.Fatal(err)
+	}
+	if model.selected != 15 || model.currentPage() != 1 {
+		t.Fatalf("task second page = selected %d, page %d", model.selected, model.currentPage())
+	}
+	if _, err := model.historyHandleKey(historyKeyDown); err != nil {
+		t.Fatal(err)
+	}
+	if model.selected != 15 {
+		t.Fatalf("task down crossed page boundary to %d", model.selected)
+	}
+
+	model.screen = unifiedHistoryAttempts
+	model.taskIndex = 0
+	model.selected = 0
+	if model.currentAttempt().Number != 1 {
+		t.Fatalf("first attempt = %d, want oldest attempt", model.currentAttempt().Number)
+	}
+	if _, err := model.historyHandleKey(historyKeyRight); err != nil {
+		t.Fatal(err)
+	}
+	if model.selected != 15 || model.currentAttempt().Number != 16 {
+		t.Fatalf("attempt second page = selected %d, attempt %d, want final attempt", model.selected, model.currentAttempt().Number)
+	}
+}
+
+func TestUnifiedHistoryDirectTaskAttemptTablePaginatesAndPreservesSelection(t *testing.T) {
+	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	attempts := make([]scheduler.Attempt, 16)
+	for index := range attempts {
+		attempts[index] = scheduler.Attempt{
+			Number:  index + 1,
+			Started: started.Add(time.Duration(index) * time.Hour),
+		}
+	}
+	model := &unifiedHistoryModel{
+		records: []scheduler.Record{{
+			RunID: "task-run", Project: "demo", TargetType: "task", Target: "task",
+			Tasks: []scheduler.TaskRecord{{Task: "task", Attempts: attempts}},
+		}},
+	}
+
+	model.enter()
+	if model.screen != unifiedHistoryTask {
+		t.Fatalf("screen after run enter = %d, want task detail", model.screen)
+	}
+	if _, err := model.historyHandleKey(historyKeyRight); err != nil {
+		t.Fatal(err)
+	}
+	if model.currentPage() != 1 || model.selected != 15 {
+		t.Fatalf("direct task attempts page = page %d, selected %d", model.currentPage(), model.selected)
+	}
+
+	var output bytes.Buffer
+	renderer := cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	renderUnifiedTask(renderer, model)
+	text := output.String()
+	if !strings.Contains(text, "16") || !strings.Contains(text, "page 2/2, rows 16-16 of 16") {
+		t.Fatalf("direct task detail = %q, want final attempt page", text)
+	}
+
+	model.enter()
+	if model.screen != unifiedHistoryAttempts || model.selected != 15 || model.currentAttempt().Number != 16 {
+		t.Fatalf("direct task attempts selection = screen %d, selected %d, attempt %d", model.screen, model.selected, model.currentAttempt().Number)
+	}
+	model.back()
+	if model.screen != unifiedHistoryTask || model.selected != 15 {
+		t.Fatalf("direct task back selection = screen %d, selected %d", model.screen, model.selected)
+	}
+}
+
+func TestReadWorkflowHistoryKeyRecognizesHorizontalArrows(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		code byte
+		want int
+	}{
+		{name: "left", code: 'D', want: historyKeyLeft},
+		{name: "right", code: 'C', want: historyKeyRight},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := make(chan byte, 3)
+			input <- 27
+			input <- '['
+			input <- test.code
+			if got := readWorkflowHistoryKey(input); got != test.want {
+				t.Fatalf("key = %d, want %d", got, test.want)
+			}
+		})
 	}
 }

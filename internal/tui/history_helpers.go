@@ -19,6 +19,8 @@ const (
 	historyKeyHome
 	historyKeyEnd
 	historyKeyBack
+	historyKeyLeft
+	historyKeyRight
 )
 
 type historyOutputLine struct {
@@ -143,6 +145,10 @@ func readWorkflowHistoryKey(input <-chan byte) int {
 		return historyKeyUp
 	case 'B':
 		return historyKeyDown
+	case 'C':
+		return historyKeyRight
+	case 'D':
+		return historyKeyLeft
 	case 'H':
 		return historyKeyHome
 	case 'F':
