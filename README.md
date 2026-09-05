@@ -1,530 +1,330 @@
 # Mango
 
-mango 是使用 Go 開發的跨平台 service manager：`mango` CLI 透過 `mangod` 背景 daemon 管理任何可執行檔，不限定 Node.js。
+Mango is a cross-platform service and workflow manager written in Go. It runs
+long-lived processes, executes one-off tasks, connects tasks into workflows,
+and triggers them on a cron schedule.
 
-支援 Windows、Linux 與 macOS，主要功能包括：
+Mango manages any executable. It does not require Node.js, containers, or a
+shell-based process definition.
 
-- 多 project、多 service 管理
-- service 啟動、停止、重啟與 crash-loop 保護
-- stdout／stderr 日誌與大小輪替
-- CPU、RSS memory、uptime 監控
-- 五欄位 cron 排程與 IANA timezone
-- Unix Domain Socket／Windows Named Pipe 本機 IPC
-- Windows Task Scheduler、Linux systemd user、macOS launchd 每使用者開機自啟
-- 互動式 mango monitor
+## Contents
 
-## 安裝與建置
+- [What Mango provides](#what-mango-provides)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Command overview](#command-overview)
+- [Complete YAML reference](#complete-yaml-reference)
+- [Complete CLI reference](#complete-cli-reference)
+- [Repository examples](#repository-examples)
+- [Runtime files](#runtime-files)
+- [Platform behavior](#platform-behavior)
+- [Development](#development)
 
-直接執行：
+## What Mango provides
 
-~~~powershell
-go run ./cmd/mango --help
-~~~
+- Service lifecycle management: start, stop, restart, enable, and disable.
+- Crash recovery with restart policies, backoff, and crash-loop protection.
+- Service dependencies with started, healthy, and completed-successfully conditions.
+- Health checks, process-tree inspection, CPU/RSS metrics, uptime, and ports.
+- Separate stdout and stderr logs with size-based rotation and retention.
+- One-off tasks with timeouts, retries, and concurrency control.
+- DAG workflows that run task nodes sequentially or in parallel.
+- Five-field cron schedules with IANA time zones.
+- A terminal monitor and interactive execution-history browsers.
+- Per-user startup integration on Windows, Linux, and macOS.
+- JSON output for automation and CI where supported.
 
-建置可執行檔：
+## How it works
 
-~~~powershell
-New-Item -ItemType Directory -Force bin
-go build -o bin/mango.exe ./cmd/mango
-go build -o bin/mangod.exe ./cmd/mangod
-~~~
+Mango has a small client/daemon architecture:
 
-Linux／macOS：
+```text
+                    local IPC
+  mango CLI  -------------------------->  mangod
+     |                                      |
+     |                                      +-- service supervisor
+     |                                      +-- task/workflow executor
+     |                                      +-- cron scheduler
+     |                                      +-- logs, health, and metrics
+     |                                      +-- execution history
+     |
+     +-- project registry and YAML configuration
+```
 
-~~~bash
+- `mango` is the command-line client.
+- `mangod` is the background daemon. It owns process state and executes all
+  service, task, workflow, and schedule operations.
+- The client and daemon communicate through a Unix domain socket on Unix-like
+  systems and a Windows named pipe on Windows.
+- A project is a name registered to a YAML configuration file. The project
+  name is stored in Mango's registry; it is not written inside the YAML file.
+
+The main implementation areas are organized under `internal/`:
+
+| Package | Responsibility |
+| --- | --- |
+| `config` | YAML v3 loading, validation, and default resolution |
+| `daemon` | Project reconciliation, IPC handling, and service supervision |
+| `process` | Cross-platform process and process-tree control |
+| `scheduler` / `workflow` | Cron execution, task runs, DAGs, retries, and history |
+| `health` / `metrics` / `logging` | Probes, process metrics, and rotating logs |
+| `registry` / `startup` / `tui` | Project registry, OS startup integration, and terminal UI |
+
+## Requirements
+
+- Go 1.23 or newer.
+- Windows, Linux, or macOS.
+- The executables referenced by your configuration must be available on the
+  host. Shell and Python examples in the sample configuration require the
+  corresponding tools.
+
+## Quick start
+
+Build both binaries and keep them in the same directory:
+
+macOS/Linux:
+
+```sh
 mkdir -p bin
 go build -o bin/mango ./cmd/mango
 go build -o bin/mangod ./cmd/mangod
+```
 
-正式安裝時請同時提供兩個 binary，並放在同一個目錄，讓 `mango daemon start` 能優先找到相同版本的 `mangod`。
-~~~
+Windows PowerShell:
 
-測試與靜態檢查：
+```powershell
+New-Item -ItemType Directory -Force bin
+go build -o bin/mango.exe ./cmd/mango
+go build -o bin/mangod.exe ./cmd/mangod
+```
 
-~~~powershell
-go test ./...
-go vet ./...
-~~~
+Start the daemon in one terminal:
 
-## 資料目錄
+```sh
+./bin/mangod run
+```
 
-預設使用作業系統的 user config／cache 目錄：
+In Windows PowerShell, use `.\bin\mangod.exe run` and replace
+`./bin/mango` in the examples below with `.\bin\mango.exe`.
 
-- Windows：%APPDATA%\mango 與 %LOCALAPPDATA%\mango
-- Linux：$XDG_CONFIG_HOME/mango、$XDG_CACHE_HOME/mango 或 user home fallback
-- macOS：~/Library/Application Support/mango 與 user cache 目錄
+In another terminal, register and apply the example project:
 
-測試或需要隔離環境時，可以設定 MANGO_HOME：
+```sh
+./bin/mango config validate mango.example.yaml
+./bin/mango project add demo mango.example.yaml
+./bin/mango project apply demo
+./bin/mango ls
+```
 
-~~~powershell
-$env:MANGO_HOME = "C:\temp\mango-test"
-~~~
+Inspect the sample service and its logs:
 
-此時 registry、runtime、logs、state 都會放在該目錄下。
+```sh
+./bin/mango status demo/api
+./bin/mango logs demo/api --stream all --tail 50
+./bin/mango logs demo/api --follow
+```
 
-主要內容：
+To run the daemon in the background, use `mango daemon start`. This command
+expects `mangod` next to `mango` or somewhere on `PATH`.
 
-~~~text
-MANGO_HOME/
-├─ projects.json
-├─ daemon.yaml           # daemon 全域設定（可選）
-├─ runtime/
-│  ├─ daemon.pid
-│  └─ mango.sock       # Unix；Windows 使用 Named Pipe
-├─ logs/
-│  └─ <project>/<service-or-execution-kind>/
-└─ state/
-	└─ execution-history.json
-~~~
+The example configuration contains services, tasks, workflows, schedules,
+health checks, retries, timeouts, and dependency examples. See
+[`mango.example.yaml`](mango.example.yaml) and
+[`examples/tasks/README.md`](examples/tasks/README.md) for guided examples.
+On Windows, adapt or remove the sample's POSIX shell and `python3` commands if
+those tools are not available.
 
-## 快速開始
+## Configuration
 
-### 1. 驗證設定並註冊 project
+Mango configuration files use YAML schema version 3. Only `.yaml` files are
+supported:
 
-~~~powershell
-mango config validate .\mango.example.yaml
-mango project add demo .\mango.example.yaml
-~~~
+```yaml
+version: 3
 
-project add 會把 project name 與 YAML 的絕對路徑寫入 project registry。設定檔仍由使用者自行管理，mango 不會覆蓋原始 YAML。
-若 registry 已有相同 project name，`project add` 會拒絕此次加入並保留既有註冊內容；如需改用其他設定檔，請先執行 `mango project remove NAME`。
+defaults:
+  restart: on-failure
+  stop_timeout: 10s
 
-設定檔目前僅支援 `.yaml`。舊 `.toml` 設定不會自動轉換；請手動轉換後重新執行 `project remove` 與 `project add`。
+services:
+  api:
+    command: go
+    args: [run, ./examples/api, --port, "8080"]
+    autostart: true
+    restart: always
+    healthcheck:
+      test: [CMD, curl, -f, "http://127.0.0.1:8080/"]
 
-### 2. 啟動 daemon
+tasks:
+  cleanup:
+    command: ./bin/cleanup
+    timeout: 5m
+    retry:
+      retries: 2
+      delay: 10s
 
-前景執行，適合開發與除錯：
+workflows:
+  nightly:
+    concurrency: forbid
+    tasks:
+      clean:
+        uses: cleanup
 
-~~~powershell
-mangod run
-~~~
+schedules:
+  - name: nightly
+    cron: "0 2 * * *"
+    timezone: Asia/Taipei
+    target_type: workflow
+    target: nightly
+```
 
-背景執行：
+### Services
 
-~~~powershell
-mango daemon start
-~~~
+Services represent long-running processes. A service command is executed
+directly, without shell parsing. Use the shell executable explicitly when you
+need shell features such as pipes or redirection.
 
-### 3. 套用設定與查看 service
+Common service settings include:
 
-~~~powershell
-mango project apply demo
-mango ls
-mango status demo/api
-~~~
+- `command`, `args`, `working_dir`, and `environment`.
+- `autostart` when the daemon starts or a project is applied.
+- `restart`: `never`, `on-failure`, or `always`.
+- `stop_timeout`, restart limits, and crash-loop protection.
+- `healthcheck` and `depends_on`.
 
-### 4. 查看日誌與監控
+Health is reported separately from the service lifecycle. A failed health check
+does not automatically restart the service.
 
-~~~powershell
-mango logs demo/api --stream all --tail 50
-mango logs demo/api --stream stdout --follow
-mango logs demo/api demo/nightly-job 2 --stream all
-mango monitor
-~~~
+### Tasks
 
-## CLI 指令總覽
+Tasks are one-off command executions. They support their own working directory,
+environment (`env`), timeout, retry policy, and concurrency mode:
 
-一般語法：
+- `forbid` prevents overlapping runs of the same task.
+- `allow` permits overlapping runs.
 
-~~~text
+### Workflows
+
+Workflows are directed acyclic graphs of task nodes. Each node uses a task from
+the same project and can declare `needs` dependencies. Independent nodes may
+run in parallel; downstream nodes are skipped when a required upstream node
+fails or is skipped.
+
+### Schedules
+
+Schedules are cron triggers. Each schedule targets either one task or one
+workflow using `target_type` and `target`. Cron expressions use five fields and
+the optional `timezone` value must be an IANA time zone.
+
+## Command overview
+
+The general form is:
+
+```text
 mango <command> [subcommand] [arguments] [options]
-~~~
+```
 
-所有指令成功時通常回傳 exit code 0；參數錯誤、daemon 無法連線或操作失敗時回傳非零 exit code。
+### Projects and configuration
 
-### 全域輸出選項
-
-所有 command 都可以在 command 前或後使用以下選項：
-
-~~~text
---color=auto|always|never
---json
-~~~
-
-範例：
-
-~~~powershell
-mango --color=always ls
-mango ls --color=never
-mango status demo/api --json
-~~~
-
-`--color=auto` 是預設值。當 stdout／stderr 連接互動式 TTY 時會啟用顏色；輸出被 pipe、redirect 或執行於 CI 時會自動停用。設定 `NO_COLOR` 環境變數也會停用 auto 模式的顏色；明確指定 `--color=always` 時仍會使用顏色。
-
-`--json` 會將支援 structured output 的指令轉為 JSON，且 JSON 永遠不包含 ANSI 顏色控制碼，適合 CI 與腳本使用。支援的指令包括 `daemon status`、`project ls`、`apply`、`ls`、`status`、service lifecycle、`schedule`、`workflow`、`task`、`startup status` 與 `doctor`。
-
-`logs`、`monitor`、`config validate` 與 startup install/uninstall 維持文字或互動式輸出，不支援 `--json`。
-
-### daemon
-
-管理背景 daemon。
-
-~~~text
-mangod run
-mango daemon start
-mango daemon stop
-mango daemon restart
-mango daemon status
-mango daemon logs [--tail 50]
-mango daemon logs --follow
-~~~
-
-| 指令 | 說明 |
-| --- | --- |
-| `mangod run` | 在目前終端以前景模式啟動 daemon，按 Ctrl+C 停止。 |
-| start | 背景啟動 daemon；若已執行則顯示 already running。 |
-| stop | 透過本機 IPC 要求 daemon 停止。 |
-| restart | 停止目前 daemon，等待 IPC endpoint 關閉後重新背景啟動。 |
-| status | 顯示 daemon PID、API version 與狀態；daemon 未執行時顯示 stopped。若個別 project 設定無法載入，會顯示 degraded 與 config_errors，但 daemon 仍會繼續服務其他 project。 |
-| logs | 直接讀取本機 `daemon.log`；daemon 未執行時仍可查看既有內容。 |
-
-`mangod` 目前只有 `run` 入口，沒有其他參數。`mango daemon` 負責控制、查詢 daemon，以及直接查看本機 daemon log。
-
-`mango daemon logs` 預設顯示最後 15 行；`--tail 0` 顯示完整 `daemon.log`，`--follow` 先顯示目前內容後追蹤新增內容。daemon.log 不存在時視為空 log；每行以 `｜daemon｜` 前綴輸出，互動式 TTY 下前綴為青色。
-
-daemon IPC 的 service lifecycle method 為 `service.ls`、`service.get`、`service.start`、`service.stop`、`service.restart`、`service.enable`、`service.disable` 與 `service.bulk`；舊的 `process.*` method 不再接受。
-
-daemon start 會等待本機 IPC health check 成功後才回報啟動成功；若 daemon 在啟動期間失敗，CLI 會回傳錯誤並顯示 daemon log 的最近內容。
-
-人類可讀輸出：
-
-~~~text
-Daemon status
-FIELD       | VALUE
-------------+---------
-status      | ok
-pid         | 12345
-api version | 1
-~~~
-
-若需要原始結構化資料：
-
-~~~powershell
-mango daemon status --json
-~~~
-
-需要 daemon 提供服務的指令（例如 `list`、`status`、service action 與 service `logs`）若無法連線，會提示：
-
-~~~text
-daemon is not running; start it with: mango daemon start
-~~~
-
-請先啟動 daemon，再執行上述需要 IPC 的指令。`mango daemon logs` 直接讀取本機檔案，不需要 daemon 執行；`--follow` 可用於兩種 `logs` 指令，例如：
-
-~~~powershell
-mango logs demo/api --follow
-~~~
-
-`status`、`start`、`stop`、`restart`、`enable`、`disable` 與 service `logs` 的目標參數可使用 `PROJECT/SERVICE` 或 `ID`；service lifecycle 另外支援直接指定 `PROJECT` 以操作該 project 的全部 service。Task logs 使用 `PROJECT/task/TASK`，workflow node logs 使用 `PROJECT/workflow/WORKFLOW/NODE`。id 可從 `mango ls` 或 `mango status PROJECT/SERVICE` 取得，例如 `mango stop 2`。
-
-### project
-
-註冊、移除與列出 project。
-
-#### project add
-
-~~~text
-mango project add NAME PATH
-~~~
-
-參數：
-
-| 參數 | 必填 | 預設值 | 說明 |
-| --- | --- | --- | --- |
-| NAME | 是 | 無 | 要註冊的 project 名稱。 |
-| PATH | 是 | 無 | YAML 設定檔路徑，可使用相對路徑。 |
-
-project name 必須以英文字母開頭，後續只能使用英數字、.、_、-；數字開頭的 project name 不允許，裸數字 target 保留給 service ID。
-
-範例：
-
-~~~powershell
-mango project add demo .\mango.example.yaml
-mango project add demo C:\apps\demo\mango.yaml
-~~~
-
-#### project remove
-
-~~~text
-mango project remove NAME
-~~~
-
-| 參數 | 必填 | 說明 |
-| --- | --- | --- |
-| NAME | 是 | 要從 registry 移除的 project 名稱。 |
-
-此指令不會刪除 YAML、日誌或應用程式檔案。
-
-#### project rename
-
-~~~text
-mango project rename OLD NEW
-~~~
-
-以 OLD 的設定檔路徑重新註冊為 NEW，效果等同於 `project remove OLD` 後再 `project add NEW PATH`。YAML 不會被修改；daemon 執行中時會重新載入 registry。
-
-#### project ls
-
-~~~text
-mango project ls
-~~~
-
-列出 registry 中的 project、設定檔路徑、啟用狀態與最後套用時間，需要 daemon 執行。
-
-使用 `mango project ls --json` 可輸出 JSON。
-
-#### project apply
-
-重新讀取 project YAML 並套用變更。
-
-~~~text
-mango project apply NAME
-~~~
-
-| 參數 | 必填 | 說明 |
-| --- | --- | --- |
-| NAME | 是 | 已註冊的 project 名稱。 |
-
-設定驗證失敗時，不應套用該次設定。新增 service 會依 autostart 決定是否啟動；設定變更或刪除 service 時，舊 service 會被停止。
-
-### config validate
-
-只解析與驗證 YAML，不啟動或停止 service。
-
-~~~text
+```sh
 mango config validate PATH
-~~~
+mango project add NAME PATH
+mango project apply NAME
+mango project ls
+mango project rename OLD NEW
+mango project remove NAME
+```
 
-| 參數 | 必填 | 說明 |
-| --- | --- | --- |
-| PATH | 是 | 要驗證的 YAML 設定檔。 |
+`project add` stores the absolute YAML path in the registry. It does not copy
+or modify the configuration file. `project apply` reloads the file and
+reconciles the daemon with the new definition.
 
-驗證項目包括：
+### Services
 
-- version 是否為目前支援的版本 3（version 2 不會自動轉換）
-- project、service、task、workflow、schedule 名稱是否有效且不重複
-- command 是否有指定；實際 executable 是否可啟動會在 service start 時檢查
-- restart、duration、log size 設定格式
-- healthcheck 與 depends_on 的條件、未知服務及循環依賴
-- cron 表達式與 timezone
-- task、workflow DAG 引用與 schedule target
-
-### ls
-
-列出所有 project 的 service 與全域 service id。每次 daemon 啟動或重啟時，id 會重新從 0 開始分配；daemon 執行期間重新 apply 則會保留現有 service 的 id。
-
-~~~text
+```sh
 mango ls
-~~~
+mango status PROJECT/SERVICE
+mango start PROJECT/SERVICE
+mango stop PROJECT/SERVICE
+mango restart PROJECT/SERVICE
+mango enable PROJECT/SERVICE
+mango disable PROJECT/SERVICE
+```
 
-顯示：
+Lifecycle commands also accept a project name to operate on all services in
+that project, a numeric service ID, or multiple targets. Service IDs are
+convenient for a running daemon but can change after a daemon restart; project
+and service names are the stable form.
 
-- service id
-- `SERVICE`：project/service，也就是 YAML 定義的 managed service
-- `PROCESS`：root process 的作業系統程序名稱
-- mango lifecycle state
-- health
-- root PID 的 OS state
-- PID
-- listening TCP／UDP ports
-- CPU percentage
-- RSS memory
-- memory percentage
-- restart count
+### Logs and monitoring
 
-若 service 產生子 process，`ls` 會以縮排階層列出所有 descendants。父列的 `SERVICE` 顯示 managed service key，子列的 `SERVICE` 顯示 `-`；`PROCESS` 則分別顯示 root 與 descendant 的作業系統程序名稱。子列顯示子 process 的 PID、OS state、port、CPU、RSS 與 memory；子 process 不會分配 mango service id，也不能直接執行 lifecycle 操作。service 的 PORTS 會彙總 root 與 descendants 的 listening ports。`--json` 會在 managed service 的 `Children` 欄位保留巢狀結構。
-
-`STATE` 是 mango lifecycle，`HEALTH` 是明確設定的 healthcheck 結果，`OS STATE` 是 root PID 的作業系統狀態，三者彼此獨立。未設定 healthcheck 時 HEALTH 顯示 `-`，JSON 為 `null`。
-
-文字表格欄位順序為：`ID | SERVICE | PROCESS | STATE | HEALTH | OS STATE | PID | PORTS | CPU% | RSS | MEM% | RESTART`。
-
-預設使用彩色表格；可用 `mango ls --color=never` 取得不含顏色的穩定文字輸出，或使用 `mango ls --json` 取得 JSON。
-
-### status
-
-查看單一 service 的完整狀態。
-
-~~~text
-mango status PROJECT/SERVICE|ID
-~~~
-
-必要參數：
-
-| 參數 | 說明 |
-| --- | --- |
-| PROJECT/SERVICE\|ID | service key（例如 demo/api）或全域非負整數 id。 |
-
-輸出還包含啟動時間、uptime、最後退出碼、最後錯誤、command line、stdout／stderr 日誌路徑與 disabled 狀態。
-
-`status` 預設輸出 key/value detail table；使用 `mango status PROJECT/SERVICE|ID --json` 可取得原始 JSON。
-
-### service lifecycle
-
-以下指令都使用相同語法：
-
-~~~text
-mango start PROJECT|PROJECT/SERVICE|ID [TARGET ...]
-mango stop PROJECT|PROJECT/SERVICE|ID [TARGET ...]
-mango restart PROJECT|PROJECT/SERVICE|ID [TARGET ...]
-mango enable PROJECT|PROJECT/SERVICE|ID [TARGET ...]
-mango disable PROJECT|PROJECT/SERVICE|ID [TARGET ...]
-~~~
-
-| 指令 | 說明 |
-| --- | --- |
-| start | 啟動 service，並清除本次 crash-loop 計數。若 dependency 尚未滿足，會先進入 waiting。 |
-| stop | 暫時停止 service，不修改 YAML 的 autostart。 |
-| restart | 先停止再啟動 service；depends_on.restart=true 的 dependent 也會依序重啟。 |
-| enable | 清除 disabled 狀態並啟動 service。 |
-| disable | 設為 disabled 並停止 service；直到 enable 或重新套用設定前不會 autostart。 |
-
-service lifecycle 可一次指定多個 target，例如 `mango stop demo/api 2 other/web`；成功時預設逐筆輸出簡短訊息，例如 `Service demo/api stopped`，使用 id 操作時仍會輸出 canonical key。加上 `--json` 可取得結構化結果；純 service 或 ID target 的單一操作輸出物件，多個 target 輸出陣列；project target 會依展開後的每個 service 輸出結果陣列。
-
-也可以直接指定 project，例如 `mango restart demo`，daemon 會依 dependency order 操作該 project 的全部 service。`start` 與 `enable` 使用 dependency-first 順序；`stop` 與 `disable` 使用 dependent-first 順序；`restart` 先反向停止，再依 dependency-first 順序啟動。批次操作會繼續處理其他 service，最後彙整錯誤並以 non-zero status 結束；`--json` 會回傳每個 service 的結果陣列。
-
-Unix 會先對 service process group 發送 SIGTERM，逾時後強制終止。Windows 使用 Job Object 管理 process tree；由於 Go 的 `os.Process.Signal(os.Interrupt)` 不支援 Windows，stop 會立即終止 Job Object，若 Job Object 無法建立才以 `taskkill /T /F` 作為 fallback，避免無效等待 stop timeout。
-
-### logs
-
-查看 service 的 stdout／stderr。
-
-~~~text
-mango logs TARGET [TARGET ...] [--stream STREAM] [--tail N] [--follow]
-mango logs clear TARGET
-~~~
-
-參數：
-
-| 參數 | 預設值 | 說明 |
-| --- | --- | --- |
-| TARGET | 無 | 一個以上的 service key、task/workflow log key 或全域整數 service id。 |
-| --stream | all | 可選 stdout、stderr 或 all。 |
-| --tail | 15 | 顯示最後幾行；必須是整數。 |
-| --follow | false | 持續追蹤新增內容，按 Ctrl+C 結束。 |
-
-指定多個 target 時，各 target 的 stdout／stderr 會並行追蹤並依事件抵達順序交錯輸出；每個完整輸出行都會使用解析後的 canonical target 前綴，例如
-`｜demo/api｜ log content`。互動式 TTY 會將 stdout 前綴顯示為綠色、stderr 前綴顯示為紅色，其他輸出環境不加入 ANSI 色碼。
-
-`mango logs clear TARGET` 會清除指定 service、task 或 workflow node 的 stdout／stderr。
-目前日誌與所有輪替檔。若 service 仍在執行，會保留開啟中的 writer，清除後的
-新輸出仍會繼續寫入；沒有日誌檔時視為成功。
-
-日誌位置：
-
-~~~text
-<logs>/<project>/<service>/stdout.log
-<logs>/<project>/<service>/stderr.log
-~~~
-
-預設單檔大小為 100MiB，保留 10 個輪替檔；可在 YAML 的 defaults 或 service 欄位調整。
-
-### monitor
-
-啟動互動式終端監控：
-
-~~~text
+```sh
+mango logs PROJECT/SERVICE --stream all --tail 15
+mango logs PROJECT/SERVICE --follow
+mango logs clear PROJECT/SERVICE
 mango monitor
-~~~
+mango daemon logs --follow
+```
 
-主畫面每秒更新 service、process、狀態、health、OS state、PID、port、CPU、RSS、memory、uptime 與 restart count；子 process 以唯讀階層列顯示，並使用與 `mango ls` 相同的 `SERVICE`/`PROCESS` 欄位。
+Task logs use `PROJECT/task/TASK`. Workflow-node logs use
+`PROJECT/workflow/WORKFLOW/NODE`.
 
-| 按鍵 | 操作 |
-| --- | --- |
-| ↑／↓ | 上下選取 service。 |
-| j／k | 上下選取 service 的替代按鍵。 |
-| s | stop。 |
-| r | restart。 |
-| e | enable。 |
-| d | disable。 |
-| l | 以與 `mango logs TARGET --follow` 相同的格式追蹤選取 service 的日誌；按任意鍵返回。 |
-| Enter | 查看選取 service 的詳細資訊。 |
-| q | 離開 monitor。 |
+### Tasks, workflows, and schedules
 
-若 stdout 或 stdin 不是 TTY，monitor 會退化成輸出一次 service table。
+```sh
+mango task ls
+mango task run PROJECT/TASK
+mango task history [PROJECT/TASK]
 
-### schedule、workflow 與 task
+mango workflow ls
+mango workflow run PROJECT/WORKFLOW
+mango workflow status PROJECT/WORKFLOW
+mango workflow history [PROJECT/WORKFLOW]
 
-Schedule 只負責 cron trigger；它透過 `target_type`／`target` 觸發 workflow 或單一 task。執行定義與 DAG 編排分別放在 tasks 與 workflows：
-
-~~~text
 mango schedule ls
 mango schedule run PROJECT/SCHEDULE
-mango workflow ls|run|status|history [PROJECT/WORKFLOW]
-mango task ls|run|history [PROJECT/TASK]
-~~~
+mango schedule history
+```
 
-`schedule ls` 只顯示 schedule、cron、timezone、target type、target 與 next run。`workflow history` 和 `task history` 查詢共用的 `state/execution-history.json`；`schedule_history_limit` 仍是這個檔案的 retention 設定。
+When the target is omitted from `task history` or `workflow history` in an
+interactive terminal, Mango opens a hierarchical history browser. Use
+`--json` for machine-readable history and status data.
 
-不指定 workflow 時，`mango workflow history` 在 TTY 中會啟動互動式 history browser，可依序瀏覽 workflow、歷次 run、task/node、attempt 與完整 error/stderr。使用 `j`／`k` 或方向鍵移動，Enter 進入下一層，Esc／Backspace 返回，`r` 重新載入，`n` 或 PageDown 載入較舊紀錄，`q` 離開。指定 `PROJECT/WORKFLOW` 時仍輸出純文字表格；`--tasks` 會額外輸出該 workflow 的 task/node 執行資料。非 TTY 環境則輸出最近 100 筆 workflow run 表格。
+## Complete YAML reference
 
-不指定 task 時，`mango task history` 在 TTY 中會啟動互動式 history browser，可依序瀏覽 task、歷次 run、attempt 與完整 error/stderr；workflow node 執行會標示來源 `workflow/<workflow>/<node>`。按鍵與 workflow history 相同：使用 `j`／`k` 或方向鍵移動，Enter 進入下一層，Esc／Backspace 返回，`r` 重新載入，`n` 或 PageDown 載入較舊紀錄，`q` 離開。指定 `PROJECT/TASK` 時仍輸出純文字表格；`--attempts` 會改以每次 attempt 顯示。非 TTY 環境則輸出最近 100 筆 task run 表格，`--json` 會輸出包含 source 的完整紀錄。
+### File rules
 
-Task 的 `timeout` 從 process 成功啟動後開始計時。逾時會以 exit code 124 強制終止整個 process tree，並視為失敗，沿用 task 的 retry；每次 retry 都有獨立 timeout。daemon shutdown 則維持 graceful cancellation。
+- Configuration files must use the `.yaml` extension.
+- `version` must be `3`; older versions are rejected and are not converted.
+- Unknown YAML fields are rejected, so misspelled options fail validation.
+- A file must define at least one service, task, workflow, or schedule.
+- Names use letters, digits, `.`, `_`, and `-`, and must start with a letter or
+  digit. Project names are stricter: they must start with an ASCII letter.
+- Relative paths are resolved from the directory containing the YAML file.
 
-Task logs 使用 `PROJECT/task/TASK`，workflow node logs 使用 `PROJECT/workflow/WORKFLOW/NODE`，例如：
+Validate a file before registering or applying it:
 
-~~~powershell
-mango logs demo/workflow/nightly-pipeline/run-nightly-job --stream all
-~~~
+```sh
+mango config validate ./mango.yaml
+```
 
-### startup
+### Top-level fields
 
-管理每使用者開機自啟：
-
-~~~text
-mango startup install
-mango startup uninstall
-mango startup status
-~~~
-
-| 指令 | Windows | Linux | macOS |
+| Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| install | User-level Task Scheduler | systemd --user | launchd LaunchAgent |
-| uninstall | 移除 mango task | 停用並移除 user service | unload 並移除 LaunchAgent |
-| status | 查詢 task | 檢查 user service 檔案 | 檢查 plist 檔案 |
+| `version` | integer | yes | Must be `3`. |
+| `defaults` | mapping | no | Defaults shared by services and tasks. |
+| `services` | mapping | no | Long-running processes keyed by service name. |
+| `tasks` | mapping | no | One-off commands keyed by task name. |
+| `workflows` | mapping | no | DAGs of task nodes keyed by workflow name. |
+| `schedules` | sequence | no | Cron triggers targeting a task or workflow. |
 
-startup service 只會啟動 daemon；service 是否啟動仍由 YAML 的 autostart 決定。
+### `defaults`
 
-### doctor
-
-檢查目前環境：
-
-~~~text
-mango doctor
-~~~
-
-會顯示作業系統、mango root、registry、logs 根目錄、daemon.log、execution history 路徑、daemon 是否可連線與 startup 是否已安裝。
-
-### help
-
-~~~text
-mango help
-mango --help
-~~~
-
-顯示 CLI 指令總覽。
-
-## YAML 設定參考
-
-完整範例請參考 [mango.example.yaml](mango.example.yaml)。
-
-### 根欄位
-
-~~~yaml
-version: 3
-~~~
-
-| 欄位 | 必填 | 說明 |
-| --- | --- | --- |
-| version | 是 | 目前必須為 3；version 2 會直接拒絕，不自動轉換。 |
-
-project name 不再寫在 YAML，而是在 `mango project add NAME PATH` 指定。舊設定檔中的 `project:` 欄位會被視為未知欄位，請移除後再重新註冊。
-
-### defaults
-
-~~~yaml
+```yaml
 defaults:
-  working_dir: "."
+  working_dir: .
   restart: on-failure
   stop_timeout: 10s
   log_max_size: 100MiB
@@ -534,304 +334,873 @@ defaults:
   restart_window: 5m
   stable_after: 1m
   inherit_env: true
-~~~
+```
 
-| 欄位 | 預設值 | 說明 |
-| --- | --- | --- |
-| working_dir | . | 相對 YAML 所在目錄解析。 |
-| restart | on-failure | 可選 never、on-failure、always。 |
-| stop_timeout | 10s | graceful stop 等待時間，逾時後強制終止。 |
-| log_max_size | 100MiB | 單一 stdout／stderr 日誌檔的最大大小。 |
-| log_max_files | 10 | 輪替檔數量。 |
-| metrics_interval | 1s | metrics 取樣間隔。 |
-| max_restarts | 10 | restart window 內允許的最大重啟次數；0 會使用預設值。 |
-| restart_window | 5m | crash-loop 計數時間窗。 |
-| stable_after | 1m | 穩定執行多久後清除 restart 計數。 |
-| inherit_env | true | 是否繼承 daemon 的環境變數。 |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `working_dir` | string | `.` | Base working directory for services and tasks. Relative paths are resolved from the YAML file directory. |
+| `restart` | string | `on-failure` | Service restart policy: `never`, `on-failure`, or `always`. |
+| `stop_timeout` | duration | `10s` | Graceful-stop timeout before Mango force-stops a service. |
+| `log_max_size` | size | `100MiB` | Maximum size of each service stdout/stderr log before rotation. |
+| `log_max_files` | integer | `10` | Number of rotated log files to retain. |
+| `metrics_interval` | duration | `1s` | Process metrics sampling interval. |
+| `max_restarts` | integer | `10` | Maximum restart failures within `restart_window`. |
+| `restart_window` | duration | `5m` | Time window used for crash-loop counting. |
+| `stable_after` | duration | `1m` | Stable runtime after which the restart counter is cleared. |
+| `inherit_env` | boolean | `true` | Whether services and tasks inherit the daemon's environment. Explicit variables override inherited values. |
 
-duration 使用 Go duration 格式，例如 500ms、10s、5m、1h。
+Defaults are applied where the field is relevant: restart, stop timeout, log,
+metrics, and crash-loop settings apply to services, while working directory
+and environment inheritance also apply to tasks. Service fields override
+service defaults. Task-specific settings are defined on each task; tasks do
+not use service restart settings.
 
-size 支援 bytes、KB／MB／GB 與 KiB／MiB／GiB，例如 100MiB。
+### `services`
 
-### services
+Each key under `services` is a service name:
 
-~~~yaml
+```yaml
 services:
   api:
     command: go
     args: [run, ./examples/api, --port, "8080"]
-    working_dir: "."
-    autostart: true
-    restart: always
-    stop_timeout: 10s
+    working_dir: .
     environment:
       APP_ENV: development
-~~~
+    autostart: true
+    restart: always
+    stop_timeout: 15s
+    max_restarts: 5
+    restart_window: 2m
+    stable_after: 30s
+```
 
-| 欄位 | 必填 | 預設值 | 說明 |
+| Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| service mapping key | 是 | 無 | project 內唯一的 service 名稱。 |
-| command | 是 | 無 | executable 名稱或路徑，不經 shell。 |
-| args | 否 | [] | 傳給 executable 的參數陣列。 |
-| working_dir | 否 | defaults 值 | service 的工作目錄。 |
-| environment | 否 | 繼承環境 | 要覆寫或新增的環境變數。 |
-| autostart | 否 | false | daemon 啟動或 apply 後是否自動啟動。 |
-| restart | 否 | defaults 值 | never、on-failure 或 always。 |
-| stop_timeout | 否 | defaults 值 | graceful stop timeout。 |
-| max_restarts | 否 | defaults 值 | crash-loop 重啟上限。 |
-| restart_window | 否 | defaults 值 | crash-loop 計數時間窗。 |
-| stable_after | 否 | defaults 值 | 清除 crash counter 的穩定時間。 |
+| `<service-name>` | mapping key | — | Unique service name within the project. |
+| `command` | string | — | Required executable name or path. It is executed directly, without a shell. |
+| `args` | sequence of strings | `[]` | Arguments passed to `command`. |
+| `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the process. |
+| `environment` | string map | inherited environment | Variables to add or override. Set `defaults.inherit_env: false` for a clean environment. |
+| `autostart` | boolean | `false` | Start when the daemon starts or the project is applied. |
+| `restart` | string | `defaults.restart` or `on-failure` | `never`, `on-failure`, or `always`. |
+| `stop_timeout` | duration | `defaults.stop_timeout` | Graceful-stop timeout. |
+| `max_restarts` | integer | `defaults.max_restarts` or `10` | Restart limit used with crash-loop protection. |
+| `restart_window` | duration | `defaults.restart_window` or `5m` | Restart failure counting window. |
+| `stable_after` | duration | `defaults.stable_after` or `1m` | Time required to clear the restart counter. |
+| `healthcheck` | mapping | disabled | Optional command-based health monitoring. |
+| `depends_on` | mapping | none | Optional service dependencies. |
 
-command 執行規則：
+Command resolution follows two rules:
 
-- 不支援管線、重導向、&& 等 shell 語法。
-- command 中含 / 或 \ 時，會依 service working directory 解析相對路徑。
-- 不含路徑分隔符時，會從作業系統 PATH 尋找 executable。
-- 若需要 shell，請把 shell 本身當成 command，例如 Windows 使用 cmd.exe，Unix 使用 sh，並自行在 args 中傳入參數。
+1. If `command` contains `/` or `\\`, a relative path is resolved from the
+   service working directory.
+2. Otherwise, Mango searches the host `PATH`.
 
-### healthcheck 與 depends_on
+Shell syntax is not parsed. To use a shell, make the shell the command:
 
-healthcheck 綁定 service，而不是 process tree。單一 probe 使用 Compose 風格的 `test`：
-
-~~~yaml
+```yaml
 services:
-  db:
-    healthcheck:
-      test: [CMD-SHELL, "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-      start_interval: 5s
-~~~
+  report:
+    command: sh
+    args: [-c, "generate-report | gzip > report.gz"]
+```
 
-腳本若提供多個應用，可使用多個 checks；`policy` 可為 `all`（預設）或 `any`：
+### `healthcheck`
 
-~~~yaml
-services:
-  stack:
-    healthcheck:
-      policy: all
-      interval: 10s
-      timeout: 2s
-      retries: 3
-      checks:
-        - test: [CMD, curl, -f, "http://127.0.0.1:8080/health"]
-        - test: [CMD, curl, -f, "http://127.0.0.1:9090/metrics"]
-~~~
+Use one direct probe with `test`:
 
-`test` 與 `checks` 互斥；`checks` 會依 YAML 順序執行，並在 health API 中依序命名為 `check-1`、`check-2` 等；`["NONE"]` 會停用 healthcheck。probe 在 host 執行，沿用 service 的 working directory 與 environment。健康度只影響 `HEALTH`，不會自動改變 lifecycle 或觸發 restart。
+```yaml
+healthcheck:
+  test: [CMD, curl, -f, http://127.0.0.1:8080/health]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 30s
+  start_interval: 5s
+```
 
-service 啟動依賴使用巢狀 mapping：
+Or define multiple probes with `checks`:
 
-~~~yaml
+```yaml
+healthcheck:
+  policy: all
+  checks:
+    - test: [CMD, curl, -f, http://127.0.0.1:8080/]
+    - test: [CMD, curl, -f, http://127.0.0.1:9090/metrics]
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `test` | sequence of strings | — | One probe. The first item must be `CMD`, `CMD-SHELL`, or `NONE`. |
+| `policy` | string | `all` | With multiple checks, `all` requires every check to pass; `any` requires one. |
+| `checks` | sequence of mappings | — | Multiple probes. Cannot be combined with `test`. |
+| `interval` | duration | `10s` | Normal interval between probe rounds. |
+| `timeout` | duration | `5s` | Maximum time allowed for one probe. |
+| `retries` | integer | `3` | Consecutive failures required to mark a probe unhealthy. |
+| `start_period` | non-negative duration | `0s` | Startup grace period during which failures do not increase the failing streak. |
+| `start_interval` | duration | `interval` | Probe interval during startup. |
+
+Probe forms:
+
+- `CMD` runs the first command item directly and passes the remaining items as
+  arguments: `[CMD, curl, -f, URL]`.
+- `CMD-SHELL` joins the remaining items into a shell command. It uses `/bin/sh`
+  on Unix-like systems and `cmd /C` on Windows.
+- `test: [NONE]` disables the health check. `NONE` is not allowed inside
+  `checks`.
+
+Probes run on the host with the service's working directory and environment.
+Health is reported independently from lifecycle state; an unhealthy result
+does not by itself restart the service. A single `test` is shown as the
+`default` check; entries in `checks` are named `check-1`, `check-2`, and so on.
+
+### `depends_on`
+
+```yaml
 services:
   web:
+    command: ./bin/web
     depends_on:
       db:
         condition: service_healthy
         restart: true
-~~~
+```
 
-`condition` 支援 `service_started`、`service_healthy` 與 `service_completed_successfully`。條件未滿足時 dependent 顯示 `waiting` 且不建立 PID；設定錯誤、未知 dependency 與 cycle 會在 apply 前拒絕。
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `<service-name>` | mapping key | — | Must refer to another service in the same project. |
+| `condition` | string | `service_started` | `service_started`, `service_healthy`, or `service_completed_successfully`. |
+| `restart` | boolean | `false` | Restart this dependent when the dependency is explicitly restarted or recreated by an apply. |
 
-### tasks
+When a dependency condition is not met, the dependent stays in `waiting` and
+does not receive a PID. `service_healthy` requires the dependency to have an
+enabled health check. `service_completed_successfully` requires the dependency
+to use `restart: never`. Unknown dependencies and dependency cycles are
+rejected during validation.
 
-Task 是最小的 command 執行單元；timeout、retry 與 concurrency 都在這裡定義，且不包含 service lifecycle：
+### `tasks`
 
-~~~yaml
+Tasks are one-off commands and do not have service lifecycle state:
+
+```yaml
 tasks:
-  extract:
-    command: ./bin/extract
-    timeout: 10m
+  nightly-job:
+    command: ./bin/backup
+    args: [--database, app]
+    working_dir: .
+    env:
+      APP_ENV: production
+    timeout: 30m
     concurrency: forbid
     retry:
-      retries: 2
-      delay: 5s
-~~~
+      retries: 3
+      delay: 10s
+```
 
-`command`、`args`、`working_dir`、`env`、`timeout`、`retry` 與 `concurrency` 可用於 task。timeout 未設定時不設期限；明確值必須是正數 duration。`forbid` 會讓相同 task invocation 排隊，`allow` 允許平行執行。
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `<task-name>` | mapping key | — | Unique task name within the project. |
+| `command` | string | — | Required executable name or path. It follows the same direct-execution rules as services. |
+| `args` | sequence of strings | `[]` | Arguments passed to `command`. |
+| `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the task. |
+| `env` | string map | inherited environment | Variables to add or override. |
+| `timeout` | duration | no limit | Starts after the process starts. A timeout force-stops the process tree and records exit code `124`. |
+| `concurrency` | string | `forbid` | `forbid` queues overlapping invocations; `allow` runs them in parallel. |
+| `retry` | mapping | no retries | Retry settings for failed or timed-out attempts. |
 
-### workflows
+`retry` fields:
 
-Workflow 是由 task node 組成的 DAG。每個 node 必須明確用 `uses` 指向同一 project 的 task，`needs` 指向同一 workflow 的 node：
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `retries` | non-negative integer | `0` | Number of retries after the initial attempt. Total attempts are `retries + 1`. |
+| `delay` | non-negative duration | `0` | Wait between failed attempts. |
 
-~~~yaml
+Task and workflow execution logs are separate from service logs. A direct task
+named `cleanup` writes to `PROJECT/task/cleanup`; a workflow node writes to
+`PROJECT/workflow/WORKFLOW/NODE`.
+
+### `workflows`
+
+Workflows are DAGs made from task nodes:
+
+```yaml
 workflows:
-  nightly-pipeline:
+  release:
     concurrency: forbid
     tasks:
-      extract:
-        uses: extract
-      transform:
-        uses: transform
-        needs: [extract]
-      load:
-        uses: load
-        needs: [transform]
-~~~
+      build:
+        uses: build
+      test:
+        uses: test
+        needs: [build]
+      publish:
+        uses: publish
+        needs: [test]
+```
 
-所有 `needs` 成功後 node 才會執行；上游失敗或 skipped 時 descendant 會 skipped，獨立分支仍會繼續。workflow `forbid` 會跳過重疊 trigger，`allow` 允許 workflow run 重疊。
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `<workflow-name>` | mapping key | — | Unique workflow name within the project. |
+| `concurrency` | string | `forbid` | `forbid` skips a new run while the same workflow is active; `allow` permits overlap. |
+| `tasks` | mapping | — | At least one workflow node. |
+| `<node-name>` | mapping key | — | Unique node name within the workflow. |
+| `uses` | string | — | Required name of a task in the same project. |
+| `needs` | sequence of strings | `[]` | Other node names that must finish successfully before this node runs. |
 
-### schedules
+Independent nodes can run in parallel. If a node fails, its descendants are
+skipped while independent branches continue. Workflow and task definitions are
+validated for unknown references, duplicate dependencies, self-dependencies,
+and cycles.
 
-Schedule 只負責 cron trigger，可觸發 workflow 或單一 task：
+### `schedules`
 
-~~~yaml
+Schedules trigger an existing task or workflow; they do not define a command:
+
+```yaml
 schedules:
-  - name: nightly
+  - name: nightly-release
     cron: "0 2 * * *"
     timezone: Asia/Taipei
     target_type: workflow
-    target: nightly-pipeline
+    target: release
 
-  - name: manual-extract
+  - name: hourly-cleanup
     cron: "0 * * * *"
     target_type: task
-    target: extract
-~~~
+    target: cleanup
+```
 
-| 欄位 | 必填 | 預設值 | 說明 |
+| Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| name | 是 | 無 | project 內唯一的 schedule 名稱。 |
-| cron | 是 | 無 | 五欄位 cron。第一版只支援 cron trigger。 |
-| timezone | 否 | Local | IANA timezone。 |
-| target_type | 是 | 無 | 只能是 `workflow` 或 `task`。 |
-| target | 是 | 無 | 同一 project 內的 workflow 或 task 名稱。 |
+| `name` | string | yes | Unique schedule name within the project. |
+| `cron` | string | yes | Five-field standard cron expression. |
+| `timezone` | string | no | IANA time zone, such as `UTC` or `Asia/Taipei`; defaults to local time. |
+| `target_type` | string | yes | `task` or `workflow`. |
+| `target` | string | yes | Existing task or workflow name in the same project. |
 
-daemon 離線期間錯過的排程不補執行。排程執行結果會建立統一 execution record；Workflow／Task history 都從 `state/execution-history.json` 查詢，保留上限沿用 daemon 的 `schedule_history_limit`。
+Schedules use the daemon's cron scheduler. Missed runs are not backfilled
+after the daemon has been offline. In v3, schedule-level `command`, `args`,
+`working_dir`, `timeout`, `retry`, and `concurrency` fields are not supported;
+put execution settings on the target task instead.
 
-## Service 狀態與重啟
+### Value formats
 
-可能的 service lifecycle state：
+Durations use Go duration syntax, for example `500ms`, `10s`, `5m`, or `1h`.
+Most duration fields must be positive when present. `start_period` and retry
+delays may be zero.
 
-~~~text
-stopped
-starting
-waiting
-running
-stopping
-exited
-backing_off
-crash_loop
-failed
-disabled
-unknown
-~~~
+Sizes are plain positive bytes or use `KB`, `MB`, `GB`, `KiB`, `MiB`, or `GiB`:
 
-`waiting` 表示 depends_on 條件尚未滿足；它不代表 service unhealthy，也不會建立 PID。
+```yaml
+defaults:
+  log_max_size: 100MiB
+```
 
-restart policy：
+## Complete CLI reference
 
-- never：退出後保持 exited。
-- on-failure：只有非零退出碼或異常退出才重啟。
-- always：正常退出與異常退出都重啟。
+### Command-line conventions
 
-自動重啟使用 exponential backoff，初始約 1 秒，最大 60 秒。超過 restart limit 後進入 crash_loop，人工 restart 或 start 可重新嘗試。
+Notation used below:
 
-## 測試程式
+- `<value>` is required.
+- `[value]` is optional.
+- `...` accepts one or more additional values.
+- `PROJECT/NAME` means a project-qualified resource, such as
+  `demo/api` or `demo/nightly`.
 
-### API server
+Project names must start with an ASCII letter and may then contain letters,
+digits, `.`, `_`, and `-`. Service, task, workflow, schedule, and workflow-node
+names may also start with a digit.
 
-原始碼：[examples/api/main.go](examples/api/main.go)
+Most commands require the daemon. If it is unavailable, Mango reports:
+`daemon is not running; start it with: mango daemon start`.
 
-~~~powershell
-go run ./examples/api --port 8080 --interval 3s
-~~~
+### Global options
 
-參數：
+Global options may appear before or after the command:
 
-| 參數 | 預設值 | 說明 |
+| Option | Values / default | Description |
 | --- | --- | --- |
-| --port | 8080 | HTTP listen port，範圍為 1～65535。 |
-| --interval | 5s | heartbeat 輸出間隔。 |
+| `--color` | `auto` (default), `always`, `never` | Controls ANSI colors. `auto` enables colors for interactive terminals and disables them for pipes/CI. |
+| `--json` | off by default | Prints structured JSON where the command supports it. JSON output never contains ANSI color codes. |
 
-endpoint：
+Both forms are accepted:
 
-~~~text
-GET /
-GET /error
-~~~
+```sh
+mango --color=never ls
+mango status demo/api --json
+mango --json workflow history --tail 20
+```
 
-- GET /：回傳成功訊息並寫入 stdout request log。
-- GET /error：回傳 HTTP 500，並寫入 stderr。
-- 每次 heartbeat 會寫入 stdout；每三次 heartbeat 會額外寫入 stderr。
-- 收到 Ctrl+C／SIGTERM 時會 graceful shutdown。
+Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
+that setting. `--json` is supported by daemon status, project listing/apply,
+service inspection and lifecycle commands, task/workflow/schedule queries,
+startup status, and `doctor`. It is not supported by interactive monitor/log
+commands, configuration validation, daemon start/stop/restart/logs, project
+add/remove/rename, or startup install/uninstall.
 
-測試：
+`--` ends global-option parsing and passes remaining values as command
+arguments.
 
-~~~powershell
-Invoke-WebRequest http://127.0.0.1:8080/
-Invoke-WebRequest http://127.0.0.1:8080/error
-~~~
+### `mangod`
 
-### one-task
+```text
+mangod run
+```
 
-原始碼：[examples/one-task/main.go](examples/one-task/main.go)
+`mangod` has one entry point. `run` starts the daemon in the foreground; press
+Ctrl+C to stop it. The daemon owns service processes, schedules, task/workflow
+execution, local IPC, logs, and execution history.
 
-~~~powershell
-go run ./examples/one-task --iterations 5 --interval 500ms
-~~~
+### `mango daemon`
 
-參數：
-
-| 參數 | 預設值 | 說明 |
-| --- | --- | --- |
-| --iterations | 5 | 執行次數，必須至少為 1。 |
-| --interval | 500ms | 每次 iteration 間的等待時間。 |
-| --fail | false | 完成輸出後以 exit code 2 結束。 |
-
-輸出行為：
-
-- 啟動資訊與完成資訊寫入 stdout。
-- task diagnostic 與奇數 iteration 訊息寫入 stderr。
-- --fail 可測試 on-failure／always restart policy 與非零退出碼。
-
-## 常見操作流程
-
-啟動 API 與註冊 task：
-
-~~~powershell
-mango project add demo .\mango.example.yaml
+```text
 mango daemon start
+mango daemon stop
+mango daemon restart
+mango daemon status [--json]
+mango daemon logs [--tail N] [--follow]
+```
+
+| Command | Arguments / flags | Description |
+| --- | --- | --- |
+| `start` | none | Starts `mangod` in the background and waits for its health endpoint. `mangod` must be next to `mango` or on `PATH`. |
+| `stop` | none | Requests a graceful daemon shutdown. |
+| `restart` | none | Stops the daemon, waits for the IPC endpoint to close, then starts it again. |
+| `status` | `--json` | Shows daemon status, PID, API version, and project configuration errors. A stopped daemon is reported as `stopped`. |
+| `logs` | `--tail N`, `--follow` | Reads the local daemon log without requiring a running daemon. |
+
+`daemon logs` defaults to the last 15 lines. `--tail 0` prints the complete
+daemon log. `--follow` prints the initial tail and then waits for new lines;
+press Ctrl+C to stop following.
+
+If a registered project cannot be loaded, the daemon continues serving other
+projects and reports `degraded` status. Fix the YAML and run
+`mango project apply PROJECT` to recover it.
+
+Examples:
+
+```sh
+mango daemon start
+mango daemon status
+mango daemon status --json
+mango daemon logs --tail 50
+mango daemon logs --follow
+mango daemon restart
+mango daemon stop
+```
+
+### `mango project`
+
+```text
+mango project add NAME PATH
+mango project remove NAME
+mango project rename OLD NEW
+mango project apply NAME [--json]
+mango project ls [--json]
+```
+
+| Command | Parameters | Description |
+| --- | --- | --- |
+| `add` | `NAME`, `PATH` | Validates and registers a `.yaml` file. The stored path is absolute. Duplicate names are rejected. |
+| `remove` | `NAME` | Removes the project from the registry. It does not delete the YAML file, application files, or logs. A running daemon unloads the project's services and execution definitions. |
+| `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
+| `apply` | `NAME` | Reloads and validates the YAML, then reconciles services, tasks, workflows, and schedules. Changed or removed services are stopped; autostart services are started. |
+| `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last applied time. Requires the daemon. |
+
+Examples:
+
+```sh
+mango config validate ./mango.yaml
+mango project add demo ./mango.yaml
+mango project ls
 mango project apply demo
+mango project rename demo staging
+mango project remove staging
+```
+
+`project add`, `remove`, and `rename` update the local registry even if the
+daemon is not running; they attempt to notify a running daemon to reload.
+
+### `mango config validate`
+
+```text
+mango config validate PATH
+```
+
+`PATH` is required and must point to a `.yaml` file. This command parses and
+validates the complete schema without starting or stopping anything. It checks
+version, names, required commands, duration/size formats, restart/concurrency
+values, health checks, dependencies, workflow DAGs, cron expressions, time
+zones, and schedule targets.
+
+```sh
+mango config validate mango.example.yaml
+```
+
+### Service inspection
+
+#### `mango ls`
+
+```text
+mango ls [--json]
+```
+
+Lists every managed service. The text table contains:
+
+| Column | Meaning |
+| --- | --- |
+| `ID` | Runtime service ID. IDs are reassigned from zero when the daemon starts. |
+| `SERVICE` | Stable `PROJECT/SERVICE` key. |
+| `PROCESS` | Root executable name; child processes are shown as indented rows. |
+| `STATE` | Mango lifecycle state. |
+| `HEALTH` | Health-check result, or `-` when no check is configured. |
+| `OS STATE` | Operating-system process state. |
+| `PID` | Root or child process ID. |
+| `PORTS` | Listening TCP and bound UDP ports. |
+| `CPU%` / `RSS` / `MEM%` | Best-effort process resource metrics. |
+| `RESTART` | Automatic restart count for managed services. |
+
+Child processes are informational only and cannot be controlled individually.
+The parent service aggregates listening ports from its process tree where the
+operating system permits inspection; child CPU and memory values are shown in
+their own rows.
+
+```sh
 mango ls
-~~~
+mango ls --json > services.json
+```
 
-執行一次性 task：
+#### `mango status`
 
-~~~powershell
-mango start demo/one-task
-mango logs demo/one-task --stream all --follow
-~~~
+```text
+mango status PROJECT/SERVICE|ID [--json]
+```
 
-測試排程 task：
+The single target may be a stable service key such as `demo/api` or a
+non-negative runtime ID such as `2`. The detailed view includes state, health,
+OS state, PID, ports, start time, uptime, CPU, RSS, memory percentage, restart
+count, last exit code, disabled state, command line, stdout/stderr log paths,
+last error, and unsatisfied dependencies.
 
-~~~powershell
+```sh
+mango status demo/api
+mango status 2 --json
+```
+
+### Service lifecycle commands
+
+```text
+mango start   TARGET [TARGET ...] [--json]
+mango stop    TARGET [TARGET ...] [--json]
+mango restart TARGET [TARGET ...] [--json]
+mango enable  TARGET [TARGET ...] [--json]
+mango disable TARGET [TARGET ...] [--json]
+```
+
+`TARGET` can be:
+
+- `PROJECT`, which selects every service in that project.
+- `PROJECT/SERVICE`, which selects one service.
+- A non-negative numeric service `ID`.
+
+Multiple targets are accepted:
+
+```sh
+mango start demo
+mango stop demo/api 2 other/web
+mango restart demo/api
+mango disable demo/api
+mango enable demo/api
+```
+
+| Command | Behavior |
+| --- | --- |
+| `start` | Starts the service and clears its disabled/crash-loop state. If dependencies are not ready, it enters `waiting`. |
+| `stop` | Stops the service without changing its YAML `autostart` value. |
+| `restart` | Stops and starts the service. A single-service restart also propagates to dependents whose dependency entry has `restart: true`. |
+| `enable` | Clears the disabled state and starts the service. |
+| `disable` | Marks the service disabled and stops it. It remains disabled until `enable` or an apply that recreates the service from a changed definition. |
+
+For a project target, `start`/`enable` use dependency-first order and
+`stop`/`disable` use dependent-first order. A project `restart` stops in reverse
+order and starts in dependency-first order. Bulk operations continue after an
+individual failure and return a non-zero exit status if any target failed.
+These commands have no command-specific flags; `--follow` belongs to `logs`.
+
+Possible lifecycle states are `stopped`, `starting`, `waiting`, `running`,
+`stopping`, `exited`, `backing_off`, `crash_loop`, `failed`, `disabled`, and
+`unknown`.
+
+Restart policies behave as follows:
+
+- `never`: keep the service in `exited` after it stops.
+- `on-failure`: restart only after a non-zero exit or another abnormal exit.
+- `always`: restart after any exit, including a clean exit.
+
+Automatic restarts use exponential backoff from about one second up to one
+minute. When the restart limit is exceeded, the service enters `crash_loop`.
+`start` or `restart` can be used to try again.
+
+### `mango logs`
+
+Read service, task, or workflow-node output:
+
+```text
+mango logs TARGET [TARGET ...] [--stream STREAM] [--tail N] [--follow]
+mango logs clear TARGET
+```
+
+Log targets are:
+
+| Target form | Example | Resolves to |
+| --- | --- | --- |
+| `PROJECT/SERVICE` | `demo/api` | Service stdout/stderr logs. |
+| service ID | `2` | A service found by runtime ID. |
+| `PROJECT/task/TASK` | `demo/task/cleanup` | Direct task execution logs. |
+| `PROJECT/workflow/WORKFLOW/NODE` | `demo/workflow/release/build` | One workflow node's logs. |
+
+Flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--stream` | `all` | Select `stdout`, `stderr`, or `all`. |
+| `--tail` | `15` | Number of lines to read initially. |
+| `--follow` | off | Continue reading new output until Ctrl+C. |
+
+Examples:
+
+```sh
+mango logs demo/api
+mango logs demo/api --stream stdout --tail 50
+mango logs demo/api --stream stderr
+mango logs demo/api --follow
+mango logs demo/api demo/task/cleanup --stream all --tail 20
+mango logs clear demo/api
+```
+
+When multiple targets or streams are requested, each line is prefixed with its
+canonical target. `stdout` and `stderr` are color-coded in interactive output.
+`logs clear` truncates current stdout/stderr files and removes their numeric
+rotation files; a running service can continue writing after the clear.
+
+Service log files use the configured `defaults.log_max_size` and
+`defaults.log_max_files` values. `logs` does not support `--json`.
+
+### `mango monitor`
+
+```text
+mango monitor
+```
+
+With a TTY, `monitor` redraws the service table every second and allows actions
+on the selected service. Without a TTY it prints one service table and exits.
+It does not support `--json`.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` or `k` / `j` | Select the previous/next service. |
+| `s` | Stop selected service. |
+| `r` | Restart selected service. |
+| `e` | Enable selected service. |
+| `d` | Disable selected service. |
+| `l` | Follow selected service logs; press any key to return. |
+| `Enter` | Show selected service details; press any key to return. |
+| `q` or Ctrl+C | Quit. |
+
+### Tasks
+
+```text
+mango task ls [--json]
+mango task run PROJECT/TASK [--json]
+mango task history [PROJECT/TASK] [--tail N] [--attempts] [--json]
+```
+
+| Command / flag | Description |
+| --- | --- |
+| `task ls` | Lists task name, command, timeout, concurrency, retry count, and latest status. |
+| `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
+| `task history` | Lists recent task executions. Without a target, it includes tasks across projects. |
+| `--tail N` | Maximum records to return; default `100`; `0` returns all retained records. Must be non-negative. |
+| `--attempts` | Shows one row per retry attempt, including exit code, error, and captured stderr. |
+
+History flags may appear before or after the optional target:
+
+```sh
+mango task history
+mango task history demo/cleanup --tail 20
+mango task history --attempts demo/cleanup
+mango task history demo/cleanup --attempts --tail 50 --json
+```
+
+Task history records include the source (`direct` or a workflow node), trigger
+(`manual` or a schedule name), start/finish times, exit code, status, error,
+stderr, and attempt details. In an interactive terminal, omitting the target
+opens a browser with task → runs → attempts → output levels. Use arrows or
+`j`/`k` to move, `Enter` to descend, `Esc` to go back, `r` to refresh, `n` or
+PageDown to load older records, and `q` to quit.
+
+### Workflows
+
+```text
+mango workflow ls [--json]
+mango workflow run PROJECT/WORKFLOW [--json]
+mango workflow status PROJECT/WORKFLOW [--json]
+mango workflow history [PROJECT/WORKFLOW] [--tail N] [--tasks] [--json]
+```
+
+| Command / flag | Description |
+| --- | --- |
+| `workflow ls` | Lists workflow name, concurrency mode, node count, and latest status. |
+| `workflow run` | Starts a workflow asynchronously with trigger `manual`. |
+| `workflow status` | Shows one workflow's status, node count, last run, duration, and node definitions. |
+| `workflow history` | Lists recent workflow runs, optionally filtered by project/workflow. |
+| `--tail N` | Maximum records; default `100`; `0` returns all retained records. Must be non-negative. |
+| `--tasks` | Includes per-node task records, attempts, exit codes, and errors in text output. |
+
+Examples:
+
+```sh
+mango workflow ls
+mango workflow run demo/release
+mango workflow status demo/release
+mango workflow history demo/release --tail 20
+mango workflow history --tasks demo/release
+mango workflow history --json
+```
+
+When no workflow target is given in an interactive terminal, the history
+browser navigates workflow → runs → task nodes → attempts → captured output.
+Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go back, `r` to
+refresh, `n` or PageDown to load older records, and `q` to quit.
+
+### Schedules
+
+```text
+mango schedule ls [--json]
+mango schedule run PROJECT/SCHEDULE [--json]
+mango schedule history [--tail N] [--attempts] [--json]
+```
+
+| Command / flag | Description |
+| --- | --- |
+| `schedule ls` | Lists schedule, cron expression, time zone, target type, target, and next run. |
+| `schedule run` | Triggers a configured schedule immediately; the target runs asynchronously. |
+| `schedule history` | Lists recent execution records retained by the daemon. |
+| `--tail N` | Maximum history records; default `100`; `0` returns all retained records. Must be non-negative. |
+| `--attempts` | Shows one row per recorded attempt with timing, result, error, and stderr. |
+
+Examples:
+
+```sh
 mango schedule ls
-mango schedule run demo/nightly-job
-mango workflow history demo/nightly-pipeline
-~~~
+mango schedule run demo/nightly-release
+mango schedule history --tail 20
+mango schedule history --attempts --json
+```
 
-開機自啟：
+`schedule history` is an aggregate compatibility view. Use `task history` or
+`workflow history` when you need to filter by a specific target type or inspect
+workflow nodes.
 
-~~~powershell
+### Startup integration
+
+```text
+mango startup install
+mango startup uninstall
+mango startup status [--json]
+```
+
+| Command | Description |
+| --- | --- |
+| `install` | Installs per-user daemon startup integration for the current OS. |
+| `uninstall` | Removes the integration. It does not remove project files or logs. |
+| `status` | Reports whether integration is installed and where it is configured. |
+
+The platform mechanisms are Windows Task Scheduler, Linux `systemd --user`,
+and a macOS `launchd` LaunchAgent. Startup integration launches only `mangod`;
+service startup still depends on each service's `autostart` setting. The daemon
+binary must be available next to `mango` or on `PATH` when installing.
+
+```sh
 mango startup install
 mango startup status
-~~~
+mango startup uninstall
+```
 
-## 開發與驗證
+### `mango doctor`
 
-~~~powershell
+```text
+mango doctor [--json]
+```
+
+Checks and prints the current platform, Mango root, registry path, log root,
+daemon log, execution-history path, registry readability, daemon status,
+resolved `mangod` path, and startup integration status. It is useful when a
+daemon cannot start or a project is missing from the service list.
+
+```sh
+mango doctor
+mango doctor --json
+```
+
+### Help and exit status
+
+```text
+mango help
+mango -h
+mango --help
+```
+
+Successful commands normally exit with `0`. Invalid arguments, validation
+errors, daemon connection failures, and failed operations exit non-zero. Bulk
+service operations may perform successful targets while still returning a
+non-zero status if another target fails.
+
+## Repository examples
+
+The repository includes small programs that are useful for testing services,
+tasks, logs, retries, and timeouts:
+
+### API service
+
+```text
+go run ./examples/api [--port PORT] [--interval DURATION]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--port` | `8080` | HTTP listening port from `1` to `65535`. |
+| `--interval` | `5s` | Heartbeat interval. |
+
+The server provides `GET /` for a successful response and `GET /error` for an
+intentional HTTP 500 plus stderr output.
+
+```sh
+go run ./examples/api --port 8080 --interval 3s
+curl http://127.0.0.1:8080/
+curl http://127.0.0.1:8080/error
+```
+
+### One-off task
+
+```text
+go run ./examples/one-task [--iterations N] [--interval DURATION] [--fail]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--iterations` | `5` | Number of iterations; must be at least `1`. |
+| `--interval` | `500ms` | Delay between iterations. |
+| `--fail` | off | Exit with code `2` after writing output. |
+
+Example:
+
+```sh
+go run ./examples/one-task --iterations 3 --interval 200ms --fail
+```
+
+### Workflow task helpers
+
+`examples/tasks/emit.go` and `examples/tasks/transform.py` accept the same
+logical options:
+
+```text
+emit.go / transform.py [--name NAME] [--steps N] [--delay DURATION_OR_SECONDS] [--fail]
+```
+
+| Option | Go default | Python default | Description |
+| --- | --- | --- | --- |
+| `--name` | `go-task` | `python-task` | Name written to the task log. |
+| `--steps` | `3` | `3` | Number of steps; must be positive. |
+| `--delay` | `250ms` | `0.25` | Delay between steps. Python uses seconds as a float. |
+| `--fail` | off | off | Write a failure message and exit with code `7`. |
+
+The shell helpers accept positional arguments:
+
+```text
+load.sh [NAME]
+fail.sh [NAME]
+slow.sh [NAME] [SECONDS]
+```
+
+`fail.sh` exits with code `7`; `slow.sh` is useful for testing task timeouts.
+`run_api.sh` has no options and starts example API servers on ports `9000` and
+`9090`. These scripts require a POSIX shell.
+
+## Runtime files
+
+By default, Mango uses the operating system's per-user configuration and cache
+directories. Set `MANGO_HOME` to isolate a development or test environment:
+
+```sh
+MANGO_HOME=/tmp/mango-test ./bin/mango doctor
+```
+
+PowerShell:
+
+```powershell
+$env:MANGO_HOME = "C:\temp\mango-test"
+```
+
+An isolated home contains the registry, optional daemon configuration, runtime
+files, logs, and execution history:
+
+```text
+MANGO_HOME/
+├── projects.json
+├── daemon.yaml                 # optional daemon settings
+├── daemon.log
+├── runtime/
+│   ├── daemon.pid
+│   └── mango.sock              # Unix; Windows uses a named pipe
+├── logs/
+└── state/
+    └── execution-history.json
+```
+
+The optional `daemon.yaml` currently supports `schedule_history_limit`.
+
+```yaml
+# MANGO_HOME/daemon.yaml
+schedule_history_limit: 1000
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `schedule_history_limit` | non-negative integer | `0` | Maximum number of execution records to retain. `0` keeps all records. |
+
+## Platform behavior
+
+- Unix systems stop services through their process group and force-stop them
+  after the configured timeout.
+- Windows uses Job Objects to manage a service's process tree.
+- `mango startup install` uses Windows Task Scheduler, Linux `systemd --user`,
+  or a macOS `launchd` LaunchAgent.
+
+## Development
+
+Run the test suite and static checks:
+
+```sh
 go test ./...
 go test -race ./...
 go vet ./...
-~~~
+```
 
-跨平台 build：
+Build binaries for another platform by setting `GOOS` and `GOARCH`:
 
-~~~powershell
-$env:GOOS = "windows"; $env:GOARCH = "amd64"; go build -o bin/mango-windows-amd64.exe ./cmd/mango; go build -o bin/mangod-windows-amd64.exe ./cmd/mangod
-$env:GOOS = "linux";   $env:GOARCH = "amd64"; go build -o bin/mango-linux-amd64 ./cmd/mango; go build -o bin/mangod-linux-amd64 ./cmd/mangod
-$env:GOOS = "darwin";  $env:GOARCH = "arm64"; go build -o bin/mango-darwin-arm64 ./cmd/mango; go build -o bin/mangod-darwin-arm64 ./cmd/mangod
-~~~
+```sh
+GOOS=linux GOARCH=amd64 go build -o bin/mango-linux-amd64 ./cmd/mango
+GOOS=linux GOARCH=amd64 go build -o bin/mangod-linux-amd64 ./cmd/mangod
+GOOS=darwin GOARCH=arm64 go build -o bin/mango-darwin-arm64 ./cmd/mango
+GOOS=darwin GOARCH=arm64 go build -o bin/mangod-darwin-arm64 ./cmd/mangod
+GOOS=windows GOARCH=amd64 go build -o bin/mango-windows-amd64.exe ./cmd/mango
+GOOS=windows GOARCH=amd64 go build -o bin/mangod-windows-amd64.exe ./cmd/mangod
+```
+
+The two executable entry points are:
+
+- `cmd/mango`: CLI client.
+- `cmd/mangod`: daemon entry point; its only command is `mangod run`.
