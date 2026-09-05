@@ -401,12 +401,14 @@ func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t 
 		Project: "demo", TargetType: "task", Target: "compile", Trigger: "manual",
 		Started: base, Finished: base.Add(time.Second), Status: scheduler.StatusSuccess,
 		Attempts: []scheduler.Attempt{{Number: 1, Started: base, Finished: base.Add(time.Second), ExitCode: 0}},
+		Tasks:    []scheduler.TaskRecord{{Task: "compile", Command: "compiler", Args: []string{"--mode", "release"}, WorkingDir: "/workspace", EnvKeys: []string{"MODE"}}},
 	})
 	d.scheduler.RecordExecution(scheduler.Record{
 		Project: "demo", TargetType: "workflow", Target: "pipeline", Trigger: "nightly",
 		Started: base.Add(time.Minute), Finished: base.Add(2 * time.Minute), Status: scheduler.StatusSuccess,
 		Tasks: []scheduler.TaskRecord{{
 			Node: "build", Task: "compile", Status: scheduler.StatusSuccess,
+			Command: "compiler", Args: []string{"--mode", "release"}, WorkingDir: "/workspace", EnvKeys: []string{"MODE"},
 			Started: base.Add(time.Minute), Finished: base.Add(90 * time.Second),
 			Attempts: []scheduler.Attempt{{Number: 1, Started: base.Add(time.Minute), Finished: base.Add(90 * time.Second), ExitCode: 0}},
 		}},
@@ -435,6 +437,9 @@ func TestTaskHistoryWithoutTargetIncludesSourcesAndAppliesTailAfterExtraction(t 
 	}
 	if records[0].Target != "compile" || len(records[0].Attempts) != 1 {
 		t.Fatalf("workflow task record = %+v, want task and attempt details", records[0])
+	}
+	if len(records[0].Tasks) != 1 || records[0].Tasks[0].Command != "compiler" || records[0].Tasks[0].WorkingDir != "/workspace" || len(records[0].Tasks[0].EnvKeys) != 1 {
+		t.Fatalf("workflow task metadata = %+v, want projected execution metadata", records[0].Tasks)
 	}
 
 	request, err = ipc.NewRequest("task.history", struct {

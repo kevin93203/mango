@@ -972,11 +972,13 @@ mango task history demo/cleanup --attempts --tail 50 --json
 ```
 
 Task history records include the source (`direct` or a workflow node), trigger
-(`manual` or a schedule name), start/finish times, exit code, status, error,
-stderr, and attempt details. In an interactive terminal, omitting the target
-opens a browser with task → runs → attempts → output levels. Use arrows or
-`j`/`k` to move, `Enter` to descend, `Esc` to go back, `r` to refresh, `n` or
-PageDown to load older records, and `q` to quit.
+(`manual` or a schedule name), the resolved command, sanitized args, working
+directory, explicitly configured environment variable names, start/finish
+times, exit code, status, error, stderr, and attempt details. Environment
+values are never persisted in execution history. In an interactive terminal,
+omitting the target opens a browser with task → runs → attempts → output
+levels. Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go back,
+`r` to refresh, `n` or PageDown to load older records, and `q` to quit.
 
 ### Workflows
 
@@ -994,7 +996,7 @@ mango workflow history [PROJECT/WORKFLOW] [--tail N] [--tasks] [--json]
 | `workflow status` | Shows one workflow's status, node count, last run, duration, and node definitions. |
 | `workflow history` | Lists recent workflow runs, optionally filtered by project/workflow. |
 | `--tail N` | Maximum records; default `100`; `0` returns all retained records. Must be non-negative. |
-| `--tasks` | Includes per-node task records, attempts, exit codes, and errors in text output. |
+| `--tasks` | Includes per-node task records, execution metadata, attempts, exit codes, and errors in text output. |
 
 Examples:
 
@@ -1009,8 +1011,10 @@ mango workflow history --json
 
 When no workflow target is given in an interactive terminal, the history
 browser navigates workflow → runs → task nodes → attempts → captured output.
-Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go back, `r` to
-refresh, `n` or PageDown to load older records, and `q` to quit.
+Task details include the resolved command, sanitized args, working directory,
+and explicitly configured environment variable names; environment values are
+not persisted. Use arrows or `j`/`k` to move, `Enter` to descend, `Esc` to go
+back, `r` to refresh, `n` or PageDown to load older records, and `q` to quit.
 
 ### Schedules
 

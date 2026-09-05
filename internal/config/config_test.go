@@ -298,6 +298,35 @@ func TestEffectiveTaskTimeoutDefaultsToDisabled(t *testing.T) {
 	}
 }
 
+func TestEffectiveTaskSeparatesDeclaredAndEffectiveEnvironment(t *testing.T) {
+	file := File{
+		Version:  3,
+		Path:     filepath.Join(t.TempDir(), "mango.yaml"),
+		Defaults: Defaults{InheritEnv: boolPtr(false)},
+		Tasks: map[string]Task{"job": {
+			Command: "echo",
+			Env:     map[string]string{"API_TOKEN": "secret", "REGION": "prod"},
+		}},
+	}
+	tasks, err := file.TasksEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := tasks["job"]
+	if task.Env["API_TOKEN"] != "secret" || task.Env["REGION"] != "prod" {
+		t.Fatalf("effective env = %#v, want declared values", task.Env)
+	}
+	if task.DeclaredEnv["API_TOKEN"] != "secret" || task.DeclaredEnv["REGION"] != "prod" {
+		t.Fatalf("declared env = %#v, want task env values", task.DeclaredEnv)
+	}
+	task.DeclaredEnv["API_TOKEN"] = "changed"
+	if file.Tasks["job"].Env["API_TOKEN"] != "secret" {
+		t.Fatalf("source config env mutated through effective task")
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
 func TestValidateRejectsInvalidTaskTimeout(t *testing.T) {
 	for _, timeout := range []string{"not-a-duration", "0s", "-1s"} {
 		t.Run(timeout, func(t *testing.T) {

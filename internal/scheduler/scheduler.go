@@ -42,8 +42,17 @@ type TaskHistoryRecord struct {
 // workflow node. Node is the workflow node name; Task is the task definition
 // referenced by that node.
 type TaskRecord struct {
-	Node            string
-	Task            string
+	Node string
+	Task string
+	// Command, Args, and WorkingDir describe the resolved task invocation.
+	Command    string
+	Args       []string
+	WorkingDir string
+	// EnvKeys contains explicitly configured environment names; values are
+	// intentionally never persisted in execution history.
+	EnvKeys []string
+	// ArgsRedacted indicates that command metadata contains redacted values.
+	ArgsRedacted    bool
 	Status          string
 	Started         time.Time
 	Finished        time.Time

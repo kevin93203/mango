@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -90,6 +91,9 @@ func (e *Executor) Apply(tasks map[string]config.EffectiveTask, workflows map[st
 	e.mu.Lock()
 	deferred := make(map[string]config.EffectiveTask, len(tasks))
 	for key, task := range tasks {
+		task.Args = append([]string(nil), task.Args...)
+		task.Env = maps.Clone(task.Env)
+		task.DeclaredEnv = maps.Clone(task.DeclaredEnv)
 		deferred[key] = task
 	}
 	e.tasks = deferred
@@ -227,7 +231,7 @@ func (e *Executor) RunTask(ctx context.Context, project, taskName, trigger strin
 	if len(attempts) > 0 {
 		started = attempts[0].Started
 	}
-	taskRecord := makeTaskRecord(taskName, taskName, started, now, result, attempts, taskStatus(ctx, result))
+	taskRecord := makeTaskRecord(taskName, task, started, now, result, attempts, taskStatus(ctx, result))
 	e.setTaskLatest(key, taskRecord)
 	record := scheduler.Record{
 		Project: project, Name: taskName, TargetType: "task", Target: taskName, Trigger: trigger,
@@ -328,7 +332,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 				if len(attempts) > 0 {
 					begin = attempts[0].Started
 				}
-				taskRecord := makeTaskRecord(node, task.Name, begin, now, result, attempts, taskStatus(ctx, result))
+				taskRecord := makeTaskRecord(node, task, begin, now, result, attempts, taskStatus(ctx, result))
 				e.setTaskLatest(wf.Project+"/"+task.Name, taskRecord)
 				results <- nodeResult{node: node, record: taskRecord}
 			}(node, task)
@@ -500,8 +504,15 @@ func sortedWorkflowNodes(wf config.EffectiveWorkflow) []string {
 	return result
 }
 
-func makeTaskRecord(node, task string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
-	record := scheduler.TaskRecord{Node: node, Task: task, Status: status, Started: started, Finished: finished, DurationSeconds: nonNegativeSeconds(finished.Sub(started)), ExitCode: result.ExitCode, Stderr: result.Stderr, Attempts: attempts}
+func makeTaskRecord(node string, task config.EffectiveTask, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
+	metadata := scheduler.SafeTaskMetadata(task.Command, task.Args, task.WorkingDir, task.DeclaredEnv)
+	record := scheduler.TaskRecord{
+		Node: node, Task: task.Name, Command: metadata.Command, Args: metadata.Args,
+		WorkingDir: metadata.WorkingDir, EnvKeys: metadata.EnvKeys, ArgsRedacted: metadata.ArgsRedacted,
+		Status: status, Started: started, Finished: finished,
+		DurationSeconds: nonNegativeSeconds(finished.Sub(started)), ExitCode: result.ExitCode,
+		Stderr: result.Stderr, Attempts: attempts,
+	}
 	if result.Err != nil {
 		record.Error = result.Err.Error()
 	}
