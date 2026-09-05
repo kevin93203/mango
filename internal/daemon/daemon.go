@@ -57,6 +57,7 @@ type Daemon struct {
 	configErrors          map[string]string
 	ctx                   context.Context
 	cancel                context.CancelFunc
+	shutdownDone          chan struct{}
 	healthExecutorFactory func(config.EffectiveService) health.Executor
 }
 
@@ -180,9 +181,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if runtime.GOOS != "windows" {
 		_ = os.Remove(d.layout.SocketPath)
 	}
-	d.ctx, d.cancel = context.WithCancel(ctx)
-	d.scheduler.SetContext(d.ctx)
-	defer d.shutdown()
+	d.mu.Lock()
+	runCtx, cancel := context.WithCancel(ctx)
+	d.ctx, d.cancel = runCtx, cancel
+	d.shutdownDone = make(chan struct{})
+	shutdownDone := d.shutdownDone
+	d.mu.Unlock()
+	d.scheduler.SetContext(runCtx)
+	defer func() {
+		d.shutdown()
+		close(shutdownDone)
+	}()
 	if err := d.scheduler.SetHistoryLimit(daemonConfig.ScheduleHistoryLimit); err != nil {
 		return err
 	}
@@ -1917,8 +1926,15 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			"status": status, "pid": os.Getpid(), "version": 1, "config_errors": configErrors,
 		})
 	case "daemon.stop":
-		if d.cancel != nil {
-			d.cancel()
+		d.mu.RLock()
+		cancel := d.cancel
+		shutdownDone := d.shutdownDone
+		d.mu.RUnlock()
+		if cancel != nil {
+			cancel()
+			if shutdownDone != nil {
+				<-shutdownDone
+			}
 		}
 		return success(request, map[string]string{"status": "stopping"})
 	case "project.ls":
