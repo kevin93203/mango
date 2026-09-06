@@ -1,4 +1,6 @@
 use crate::state::Bootstrap;
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::fs::File;
 use std::io;
 use std::os::unix::process::CommandExt;
