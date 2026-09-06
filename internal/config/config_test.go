@@ -64,6 +64,49 @@ services:
 	}
 }
 
+func TestServiceSupervisorDefaultsAndOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mango.yaml")
+	content := `version: 3
+
+defaults:
+  supervisor: shim
+
+services:
+  api:
+    command: api
+  worker:
+    command: worker
+    supervisor: legacy
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := file.ServicesEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if services[0].Supervisor != "shim" || services[1].Supervisor != "legacy" {
+		t.Fatalf("supervisors = %q, %q", services[0].Supervisor, services[1].Supervisor)
+	}
+}
+
+func TestValidateRejectsUnknownSupervisor(t *testing.T) {
+	file := File{
+		Version:  3,
+		Path:     filepath.Join(t.TempDir(), "x.yaml"),
+		Defaults: Defaults{Supervisor: "unknown"},
+		Services: map[string]Service{"api": {Command: "api"}},
+	}
+	if err := Validate(file); err == nil || !strings.Contains(err.Error(), "supervisor") {
+		t.Fatalf("error = %v, want supervisor validation error", err)
+	}
+}
+
 func TestValidateRejectsHealthDependencyWithoutEnabledCheck(t *testing.T) {
 	file := File{
 		Version: 3, Path: filepath.Join(t.TempDir(), "x.yaml"),

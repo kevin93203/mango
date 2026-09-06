@@ -43,18 +43,24 @@ Mango has a small client/daemon architecture:
                     local IPC
   mango CLI  -------------------------->  mangod
      |                                      |
-     |                                      +-- service supervisor
+     |                                      +-- config/dependencies/health
      |                                      +-- task/workflow executor
      |                                      +-- cron scheduler
-     |                                      +-- logs, health, and metrics
-     |                                      +-- execution history
+     |                                      +-- shim client/reconciliation
+     |                                             |
+     |                                      mango-shim (one per shim service)
+     |                                             |
+     |                                      service process tree + logs
      |
      +-- project registry and YAML configuration
 ```
 
 - `mango` is the command-line client.
-- `mangod` is the background daemon. It owns process state and executes all
-  service, task, workflow, and schedule operations.
+- `mangod` is the background daemon. It owns configuration, dependencies,
+  health, tasks, workflows, schedules, and reconciliation.
+- `mango-shim` is a small per-service supervisor used when a service opts into
+  `supervisor: shim`. It owns that service's process tree, logs, restart policy,
+  and durable state independently of `mangod`.
 - The client and daemon communicate through a Unix domain socket on Unix-like
   systems and a Windows named pipe on Windows.
 - Each `MANGO_HOME` is one daemon instance. `mangod` takes an OS-level lock at
@@ -69,6 +75,7 @@ The main implementation areas are organized under `internal/`:
 | --- | --- |
 | `config` | YAML v3 loading, validation, and default resolution |
 | `daemon` | Project reconciliation, IPC handling, and service supervision |
+| `mango-shim/` | Rust per-service process-tree supervision, restart, logs, and durable state |
 | `process` | Cross-platform process and process-tree control |
 | `scheduler` / `workflow` | Cron execution, task runs, DAGs, retries, and history |
 | `health` / `metrics` / `logging` | Probes, process metrics, and rotating logs |
@@ -77,6 +84,7 @@ The main implementation areas are organized under `internal/`:
 ## Requirements
 
 - Go 1.23 or newer.
+- Stable Rust toolchain for building `mango-shim`.
 - Windows 10/11, Linux, or macOS.
 - The executables referenced by your configuration must be available on the
   host. The canonical examples use the Go toolchain, and the sample HTTP
@@ -84,7 +92,7 @@ The main implementation areas are organized under `internal/`:
 
 ## Quick start
 
-Build both binaries and keep them in the same directory:
+Build the CLI, daemon, and shim together:
 
 macOS/Linux:
 
@@ -92,6 +100,8 @@ macOS/Linux:
 mkdir -p bin
 go build -o bin/mango ./cmd/mango
 go build -o bin/mangod ./cmd/mangod
+cargo build --release --manifest-path mango-shim/Cargo.toml
+cp mango-shim/target/release/mango-shim bin/mango-shim
 ```
 
 Windows PowerShell:
@@ -100,6 +110,8 @@ Windows PowerShell:
 New-Item -ItemType Directory -Force bin
 go build -o bin/mango.exe ./cmd/mango
 go build -o bin/mangod.exe ./cmd/mangod
+cargo build --release --manifest-path mango-shim/Cargo.toml
+Copy-Item mango-shim/target/release/mango-shim.exe bin/mango-shim.exe
 ```
 
 Start the daemon in one terminal:
@@ -149,6 +161,7 @@ supported:
 version: 3
 
 defaults:
+  supervisor: legacy
   restart: on-failure
   stop_timeout: 10s
 
@@ -193,6 +206,7 @@ need shell features such as pipes or redirection.
 Common service settings include:
 
 - `command`, `args`, `working_dir`, and `environment`.
+- `supervisor`: `legacy` or `shim`; the default is `legacy` during rollout.
 - `autostart` when the daemon starts or a project is applied.
 - `restart`: `never`, `on-failure`, or `always`.
 - `stop_timeout`, restart limits, and crash-loop protection.
@@ -366,6 +380,7 @@ defaults:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `working_dir` | string | `.` | Base working directory for services and tasks. Relative paths are resolved from the YAML file directory. |
+| `supervisor` | string | `legacy` | Service supervisor: `legacy` or `shim`. Shim services survive an unexpected `mangod` exit and can be reattached by a new daemon. |
 | `restart` | string | `on-failure` | Service restart policy: `never`, `on-failure`, or `always`. |
 | `stop_timeout` | duration | `10s` | Graceful-stop timeout before Mango force-stops a service. |
 | `log_max_size` | size | `100MiB` | Maximum size of each service stdout/stderr log before rotation. |
@@ -406,6 +421,7 @@ services:
 | --- | --- | --- | --- |
 | `<service-name>` | mapping key | — | Unique service name within the project. |
 | `command` | string | — | Required executable name or path. It is executed directly, without a shell. |
+| `supervisor` | string | `defaults.supervisor` or `legacy` | `legacy` uses the daemon-owned backend; `shim` delegates process-tree ownership to a per-service `mango-shim`. |
 | `args` | sequence of strings | `[]` | Arguments passed to `command`. |
 | `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the process. |
 | `environment` | string map | inherited environment | Variables to add or override. Set `defaults.inherit_env: false` for a clean environment. |
@@ -1215,7 +1231,16 @@ MANGO_HOME/
 ├── runtime/
 │   ├── daemon.lock              # persistent file; lock is released on close
 │   ├── daemon.pid
-│   └── mango.sock              # Unix; Windows uses a named pipe
+│   ├── mango.sock              # Unix; Windows uses a named pipe
+│   └── shims/
+│       └── <service-key-hash>/
+│           └── <incarnation>/
+│               ├── bootstrap.json
+│               ├── status.json
+│               ├── exit.json
+│               ├── endpoint
+│               ├── shim.pid
+│               └── instance.lock
 ├── logs/
 └── state/
     ├── history.db
@@ -1257,9 +1282,23 @@ imported or read.
 
 ## Platform behavior
 
-- Unix systems stop services through their process group and force-stop them
-  after the configured timeout.
-- Windows uses Job Objects to manage a service's process tree.
+- Legacy services are still owned by `mangod` and use the existing process
+  backend.
+- Shim services are owned by one `mango-shim` process per service. The shim
+  writes service stdout/stderr directly to the configured log files, so daemon
+  failure does not interrupt service logging.
+- On Linux, the shim uses a dedicated process group and a child subreaper to
+  collect adopted descendants. On macOS it uses a dedicated process group;
+  descendants that deliberately escape the group are outside the guarantee.
+- On Windows, the shim assigns the service to a dedicated Job Object and uses
+  job termination for process-tree containment.
+- An unexpected `mangod` exit leaves shim services running. A new daemon scans
+  `runtime/shims`, validates the service key, incarnation, fingerprint, and
+  process identity, then attaches to a matching shim without starting a
+  duplicate service.
+- `mango daemon stop` and explicit SIGTERM/SIGINT shutdowns stop shim services
+  first. Arbitrary daemonization, `setsid`, namespace escape, and Windows
+  breakaway processes are not covered by the v1 containment guarantee.
 - `mango startup install` uses Windows Task Scheduler, Linux `systemd --user`,
   or a macOS `launchd` LaunchAgent.
 
@@ -1271,6 +1310,9 @@ Run the test suite and static checks:
 go test ./...
 go test -race ./...
 go vet ./...
+cargo fmt --manifest-path mango-shim/Cargo.toml -- --check
+cargo test --manifest-path mango-shim/Cargo.toml
+cargo clippy --manifest-path mango-shim/Cargo.toml --all-targets -- -D warnings
 ```
 
 Build binaries for another platform by setting `GOOS` and `GOARCH`:
@@ -1282,6 +1324,7 @@ GOOS=darwin GOARCH=arm64 go build -o bin/mango-darwin-arm64 ./cmd/mango
 GOOS=darwin GOARCH=arm64 go build -o bin/mangod-darwin-arm64 ./cmd/mangod
 GOOS=windows GOARCH=amd64 go build -o bin/mango-windows-amd64.exe ./cmd/mango
 GOOS=windows GOARCH=amd64 go build -o bin/mangod-windows-amd64.exe ./cmd/mangod
+cargo build --release --manifest-path mango-shim/Cargo.toml
 ```
 
 The two executable entry points are:

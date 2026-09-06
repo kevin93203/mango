@@ -58,3 +58,32 @@ func TestSaveAndLoadProcessIDMetadata(t *testing.T) {
 		t.Fatalf("loaded metadata = %+v", got)
 	}
 }
+
+func TestSaveAndLoadShimInstanceMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projects.json")
+	want := File{
+		Version: 1,
+		Projects: map[string]Project{
+			"demo": {
+				Name: "demo",
+				ShimInstances: map[string]ServiceInstance{
+					"api": {
+						ServiceKey: "demo/api", InstanceID: "instance-1", Incarnation: "inc-1",
+						ConfigFingerprint: "fingerprint", StateDir: "/tmp/shim-state",
+					},
+				},
+			},
+		},
+	}
+	if err := Save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := got.Projects["demo"].ShimInstances["api"]
+	if instance.ServiceKey != "demo/api" || instance.Incarnation != "inc-1" || instance.StateDir != "/tmp/shim-state" {
+		t.Fatalf("loaded shim metadata = %+v", instance)
+	}
+}

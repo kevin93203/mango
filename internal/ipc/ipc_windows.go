@@ -20,7 +20,14 @@ func Listen(endpoint string) (net.Listener, error) {
 }
 
 func dial(ctx context.Context) (net.Conn, error) {
-	return winio.DialPipeContext(ctx, pipeNameForEndpoint(endpointForCurrentUser()))
+	return dialEndpoint(ctx, endpointForCurrentUser())
+}
+
+func dialEndpoint(ctx context.Context, endpoint string) (net.Conn, error) {
+	if strings.HasPrefix(strings.ToLower(endpoint), `\\.\pipe\`) {
+		return winio.DialPipeContext(ctx, endpoint)
+	}
+	return winio.DialPipeContext(ctx, pipeNameForEndpoint(endpoint))
 }
 
 func endpointUnavailable(err error) bool {

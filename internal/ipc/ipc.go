@@ -142,13 +142,20 @@ func serveConn(ctx context.Context, conn net.Conn, handler Handler) {
 }
 
 func Call(ctx context.Context, request Request) (Response, error) {
+	return CallEndpoint(ctx, endpointForCurrentUser(), request)
+}
+
+// CallEndpoint sends one JSON request to an arbitrary local IPC endpoint.
+// The daemon client uses Call, while per-service shims use their own
+// endpoint so mangod never needs to share the daemon listener with a shim.
+func CallEndpoint(ctx context.Context, endpoint string, request Request) (Response, error) {
 	if request.Version == 0 {
 		request.Version = 1
 	}
 	if request.ID == "" {
 		request.ID = newRequestID()
 	}
-	conn, err := dial(ctx)
+	conn, err := dialEndpoint(ctx, endpoint)
 	if err != nil {
 		if endpointUnavailable(err) {
 			return Response{}, ErrDaemonUnavailable

@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,10 +38,30 @@ type ProcessSnapshot struct {
 type Collector struct {
 	mu        sync.Mutex
 	processes map[int32]*process.Process
+
+	portsMu         sync.Mutex
+	ports           map[int32]portCacheEntry
+	portsInflight   map[int32]struct{}
+	portsGeneration map[int32]uint64
+}
+
+const (
+	portCacheTTL      = 5 * time.Second
+	portLookupTimeout = 2 * time.Second
+)
+
+type portCacheEntry struct {
+	ports     []string
+	updatedAt time.Time
 }
 
 func NewCollector() *Collector {
-	return &Collector{processes: map[int32]*process.Process{}}
+	return &Collector{
+		processes:       map[int32]*process.Process{},
+		ports:           map[int32]portCacheEntry{},
+		portsInflight:   map[int32]struct{}{},
+		portsGeneration: map[int32]uint64{},
+	}
 }
 
 func (c *Collector) Sample(pid int, interval time.Duration) Sample {
@@ -216,11 +237,49 @@ func (c *Collector) snapshotProcess(p *process.Process, parentPID, depth int, to
 }
 
 func (c *Collector) portsForProcess(p *process.Process) []string {
-	connections, err := p.Connections()
-	if err != nil {
+	if p == nil || p.Pid <= 0 {
 		return nil
 	}
-	return listeningPorts(connections)
+
+	pid := p.Pid
+	now := time.Now()
+	c.portsMu.Lock()
+	entry, cached := c.ports[pid]
+	if cached && now.Sub(entry.updatedAt) < portCacheTTL {
+		ports := append([]string(nil), entry.ports...)
+		c.portsMu.Unlock()
+		return ports
+	}
+
+	// Process connection inspection can be surprisingly slow on macOS and
+	// Windows (and may block when permissions are restricted). Never make a
+	// service status request wait for it. Each PID is queried independently so
+	// a wrapper PID cannot starve descendants that own ports.
+	if _, running := c.portsInflight[pid]; !running {
+		generation := c.portsGeneration[pid]
+		c.portsInflight[pid] = struct{}{}
+		go c.refreshPorts(pid, p, generation)
+	}
+	ports := append([]string(nil), entry.ports...)
+	c.portsMu.Unlock()
+	return ports
+}
+
+func (c *Collector) refreshPorts(pid int32, p *process.Process, generation uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
+	defer cancel()
+	connections, err := p.ConnectionsWithContext(ctx)
+	ports := []string(nil)
+	if err == nil {
+		ports = listeningPorts(connections)
+	}
+
+	c.portsMu.Lock()
+	delete(c.portsInflight, pid)
+	if c.portsGeneration[pid] == generation {
+		c.ports[pid] = portCacheEntry{ports: ports, updatedAt: time.Now()}
+	}
+	c.portsMu.Unlock()
 }
 
 func sortSnapshotChildren(snapshot *ProcessSnapshot) {
@@ -291,4 +350,8 @@ func (c *Collector) Forget(pid int) {
 	c.mu.Lock()
 	delete(c.processes, int32(pid))
 	c.mu.Unlock()
+	c.portsMu.Lock()
+	c.portsGeneration[int32(pid)]++
+	delete(c.ports, int32(pid))
+	c.portsMu.Unlock()
 }
