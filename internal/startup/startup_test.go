@@ -52,6 +52,16 @@ func TestWindowsTaskUsesIgnoreNewAndWrapper(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskXMLUsesUTF16LEWithBOM(t *testing.T) {
+	data := windowsTaskXMLBytes(`C:\Users\test user\mango\runtime\mangod-start.cmd`)
+	if len(data) < 2 || data[0] != 0xff || data[1] != 0xfe {
+		t.Fatalf("Windows task XML is missing a UTF-16LE BOM: %x", data[:min(2, len(data))])
+	}
+	if !strings.Contains(windowsTaskXML(`C:\Users\test user\mango\runtime\mangod-start.cmd`), `encoding="UTF-16"`) {
+		t.Fatal("Windows task XML does not declare UTF-16 encoding")
+	}
+}
+
 func TestWindowsWrapperSetsMangoHome(t *testing.T) {
 	wrapper := windowsWrapper(`C:\Program Files\Mango\mangod.exe`, `C:\Users\test user\mango`)
 	if !strings.Contains(wrapper, `set "MANGO_HOME=C:\Users\test user\mango"`) {
