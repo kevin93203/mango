@@ -22,6 +22,18 @@ jobs:
         with:
           go-version: '1.23.x'
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check mango-shim formatting
+        run: cargo fmt --manifest-path mango-shim/Cargo.toml -- --check
+
+      - name: Test mango-shim
+        run: cargo test --manifest-path mango-shim/Cargo.toml
+
+      - name: Lint mango-shim
+        run: cargo clippy --manifest-path mango-shim/Cargo.toml --all-targets -- -D warnings
+
       - name: Run tests
         run: go test ./...
 
@@ -29,6 +41,34 @@ jobs:
         run: |
           go build ./cmd/mango
           go build ./cmd/mangod
+
+      - name: Build mango-shim
+        run: cargo build --release --manifest-path mango-shim/Cargo.toml
+
+      - name: Upload native release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mango-${{ runner.os }}-${{ runner.arch }}
+          if-no-files-found: error
+          path: |
+            mango
+            mango.exe
+            mangod
+            mangod.exe
+            mango-shim/target/release/mango-shim
+            mango-shim/target/release/mango-shim.exe
+
+      - name: Run Go/Rust shim integration
+        if: runner.os != 'Windows'
+        env:
+          MANGO_SHIM_TEST_BINARY: mango-shim/target/debug/mango-shim
+        run: go test ./internal/shim -run TestRustShimClientStartOrAttach -count=1
+
+      - name: Run daemon reattach integration
+        if: runner.os != 'Windows'
+        env:
+          MANGO_SHIM_TEST_BINARY: mango-shim/target/debug/mango-shim
+        run: go test ./internal/daemon -run TestDaemonReattachesRustShimAfterControlPlaneShutdown -count=1
 
       - name: Initialize and validate a standalone example
         run: |

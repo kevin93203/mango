@@ -16,6 +16,17 @@ type Project struct {
 	ConfigVersion int            `json:"config_version"`
 	LastApplied   *time.Time     `json:"last_applied,omitempty"`
 	ProcessIDs    map[string]int `json:"process_ids,omitempty"`
+	// ShimInstances is advisory metadata. Runtime state and process identity
+	// remain authoritative in each shim instance directory.
+	ShimInstances map[string]ServiceInstance `json:"shim_instances,omitempty"`
+}
+
+type ServiceInstance struct {
+	ServiceKey        string `json:"service_key"`
+	InstanceID        string `json:"instance_id"`
+	Incarnation       string `json:"incarnation"`
+	ConfigFingerprint string `json:"config_fingerprint"`
+	StateDir          string `json:"state_dir"`
 }
 
 type File struct {

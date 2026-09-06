@@ -13,6 +13,7 @@ const (
 	StateBackingOff = "backing_off"
 	StateCrashLoop  = "crash_loop"
 	StateFailed     = "failed"
+	StateOrphaned   = "orphaned"
 	StateDisabled   = "disabled"
 	StateUnknown    = "unknown"
 )

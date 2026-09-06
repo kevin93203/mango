@@ -36,6 +36,7 @@ type File struct {
 
 type Defaults struct {
 	WorkingDir      string `yaml:"working_dir"`
+	Supervisor      string `yaml:"supervisor"`
 	Restart         string `yaml:"restart"`
 	StopTimeout     string `yaml:"stop_timeout"`
 	LogMaxSize      string `yaml:"log_max_size"`
@@ -50,6 +51,7 @@ type Defaults struct {
 type Service struct {
 	Name          string                `yaml:"-"`
 	Command       string                `yaml:"command"`
+	Supervisor    string                `yaml:"supervisor"`
 	Args          []string              `yaml:"args"`
 	WorkingDir    string                `yaml:"working_dir"`
 	Environment   map[string]string     `yaml:"environment"`
@@ -139,6 +141,7 @@ type EffectiveProcess struct {
 	Project       string
 	Name          string
 	Command       string
+	Supervisor    string
 	Args          []string
 	WorkingDir    string
 	Env           map[string]string // Deprecated alias for Environment.
@@ -303,6 +306,9 @@ func Validate(f File) error {
 	if d.Restart != "" && !validRestart(d.Restart) {
 		return fmt.Errorf("invalid defaults.restart %q", d.Restart)
 	}
+	if d.Supervisor != "" && !validSupervisor(d.Supervisor) {
+		return fmt.Errorf("invalid defaults.supervisor %q", d.Supervisor)
+	}
 	for name, s := range f.Services {
 		if !namePattern.MatchString(name) {
 			return fmt.Errorf("service name %q is invalid", name)
@@ -312,6 +318,9 @@ func Validate(f File) error {
 		}
 		if s.Restart != "" && !validRestart(s.Restart) {
 			return fmt.Errorf("service %q has invalid restart %q", name, s.Restart)
+		}
+		if s.Supervisor != "" && !validSupervisor(s.Supervisor) {
+			return fmt.Errorf("service %q has invalid supervisor %q", name, s.Supervisor)
 		}
 		if _, err := parseDuration(s.StopTimeout, 10*time.Second); err != nil {
 			return fmt.Errorf("service %q stop_timeout: %w", name, err)
@@ -491,6 +500,10 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 	if restart == "" {
 		restart = "on-failure"
 	}
+	supervisor := d.Supervisor
+	if supervisor == "" {
+		supervisor = "legacy"
+	}
 	maxRestarts := d.MaxRestarts
 	if maxRestarts == 0 {
 		maxRestarts = 10
@@ -542,6 +555,10 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		if p.Restart != "" {
 			restartPolicy = p.Restart
 		}
+		serviceSupervisor := supervisor
+		if p.Supervisor != "" {
+			serviceSupervisor = p.Supervisor
+		}
 		st := stopTimeout
 		if p.StopTimeout != "" {
 			st, _ = parseDuration(p.StopTimeout, st)
@@ -570,7 +587,7 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 			dependsOn[dependency] = dependencySpec
 		}
 		result = append(result, EffectiveService{
-			Project: projectName, Name: name, Command: command, Args: append([]string(nil), p.Args...),
+			Project: projectName, Name: name, Command: command, Supervisor: serviceSupervisor, Args: append([]string(nil), p.Args...),
 			WorkingDir: dir, Env: env, Environment: env, Autostart: p.Autostart, Restart: restartPolicy,
 			StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
@@ -906,6 +923,10 @@ func validateWorkflowCycles(tasks map[string]WorkflowTask) error {
 
 func validRestart(value string) bool {
 	return value == "never" || value == "on-failure" || value == "always"
+}
+
+func validSupervisor(value string) bool {
+	return value == "legacy" || value == "shim"
 }
 
 func validConcurrency(value string) bool {

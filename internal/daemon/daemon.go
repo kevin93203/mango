@@ -27,6 +27,7 @@ import (
 	"github.com/kevin93203/mango/internal/process"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/shim"
 	"github.com/kevin93203/mango/internal/workflow"
 )
 
@@ -40,6 +41,7 @@ const (
 	StateBackingOff = api.StateBackingOff
 	StateCrashLoop  = api.StateCrashLoop
 	StateFailed     = api.StateFailed
+	StateOrphaned   = api.StateOrphaned
 	StateDisabled   = api.StateDisabled
 	StateUnknown    = api.StateUnknown
 )
@@ -75,6 +77,8 @@ type managedProcess struct {
 	id           int
 	spec         config.EffectiveProcess
 	handle       *process.Handle
+	shim         *shim.Client
+	shimStatus   shim.Status
 	stdout       *logging.RotatingWriter
 	stderr       *logging.RotatingWriter
 	stdoutPath   string
@@ -251,7 +255,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	d.scheduler.Start()
-	return ipc.Serve(d.ctx, listener, d.Handle)
+	serveErr := ipc.Serve(d.ctx, listener, d.Handle)
+	if ctx.Err() != nil {
+		// SIGINT/SIGTERM are intentional daemon shutdowns. The parent
+		// context is already cancelled, so use a fresh bounded context for
+		// the service stop RPCs.
+		d.stopAllServices(true)
+	}
+	return serveErr
 }
 
 func (d *Daemon) daemonAlreadyRunning() bool {
@@ -301,7 +312,10 @@ func (d *Daemon) shutdown() {
 	processes := make([]shutdownTarget, 0)
 	for _, project := range d.projects {
 		for _, managed := range project.processes {
-			if managed.handle != nil {
+			// Shim owns shim-supervised services. Keeping this path free of
+			// stop RPCs is what allows services to survive a mangod crash or
+			// panic while the daemon's defer cleanup still runs.
+			if managed.handle != nil && managed.shim == nil {
 				managed.manualStop = true
 				managed.generation++
 				if managed.healthCancel != nil {
@@ -335,6 +349,56 @@ func (d *Daemon) shutdown() {
 	d.mu.Unlock()
 	if historyRepo != nil {
 		_ = historyRepo.Close()
+	}
+}
+
+// stopAllServices performs the explicit, graceful service shutdown requested
+// by mango daemon stop or by an OS termination signal. It is deliberately
+// separate from shutdown so unexpected mangod termination never sends stop
+// commands to independent shims.
+func (d *Daemon) stopAllServices(shutdownShims bool) {
+	type target struct {
+		handle  *process.Handle
+		shim    *shim.Client
+		timeout time.Duration
+	}
+	d.mu.Lock()
+	targets := make([]target, 0)
+	for _, project := range d.projects {
+		for _, managed := range project.processes {
+			if managed.handle == nil && managed.shim == nil {
+				continue
+			}
+			managed.manualStop = true
+			managed.generation++
+			if managed.healthCancel != nil {
+				managed.healthCancel()
+				managed.healthCancel = nil
+			}
+			managed.health = nil
+			targets = append(targets, target{
+				handle: managed.handle, shim: managed.shim, timeout: managed.spec.StopTimeout,
+			})
+			managed.state = StateStopping
+		}
+	}
+	d.mu.Unlock()
+
+	for _, item := range targets {
+		if item.handle != nil {
+			_ = item.handle.Stop(item.timeout)
+			continue
+		}
+		if item.shim == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), item.timeout+5*time.Second)
+		if shutdownShims {
+			_ = item.shim.Shutdown(ctx, item.timeout)
+		} else {
+			_ = item.shim.Stop(ctx, item.timeout)
+		}
+		cancel()
 	}
 }
 
@@ -680,7 +744,11 @@ func (d *Daemon) applyProject(name, path string) error {
 
 	for _, managed := range toStop {
 		_ = d.stopManaged(managed)
+		if managed.shim != nil && !d.isManagedProcess(managed) {
+			d.shutdownDetachedShim(managed)
+		}
 	}
+	d.adoptShimServices(name)
 	for _, managed := range toStart {
 		_ = d.startService(name, managed)
 	}
@@ -701,12 +769,34 @@ func (d *Daemon) applyProject(name, path string) error {
 	d.mu.Lock()
 	d.registry.Projects[name] = registry.Project{
 		Name: name, ConfigPath: file.Path, Enabled: true, ConfigVersion: file.Version, LastApplied: &now,
-		ProcessIDs: processIDs,
+		ProcessIDs: processIDs, ShimInstances: d.shimInstancesLocked(name),
 	}
 	d.registry.NextProcessID = nextProcessID
 	reg := d.registry
 	d.mu.Unlock()
 	return registry.Save(d.layout.Registry, reg)
+}
+
+func (d *Daemon) shimInstancesLocked(projectName string) map[string]registry.ServiceInstance {
+	project := d.projects[projectName]
+	if project == nil {
+		return nil
+	}
+	instances := make(map[string]registry.ServiceInstance)
+	for name, managed := range project.processes {
+		if managed.spec.Supervisor != "shim" || managed.shim == nil {
+			continue
+		}
+		instances[name] = registry.ServiceInstance{
+			ServiceKey: managed.shim.ServiceKey, InstanceID: managed.shim.InstanceID,
+			Incarnation: managed.shim.Incarnation, ConfigFingerprint: managed.shim.ConfigFingerprint,
+			StateDir: managed.shim.StateDir,
+		}
+	}
+	if len(instances) == 0 {
+		return nil
+	}
+	return instances
 }
 
 func (d *Daemon) allocateProcessIDsLocked(projectName string, desired map[string]config.EffectiveProcess) (map[string]int, int) {
@@ -905,8 +995,31 @@ func (d *Daemon) removeProject(name string) {
 	}
 	for _, managed := range project.processes {
 		_ = d.stopManaged(managed)
+		d.shutdownDetachedShim(managed)
 	}
 	d.reapplyExecutionDefinitions()
+}
+
+func (d *Daemon) isManagedProcess(target *managedProcess) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, project := range d.projects {
+		for _, managed := range project.processes {
+			if managed == target {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (d *Daemon) shutdownDetachedShim(managed *managedProcess) {
+	if managed == nil || managed.shim == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managed.spec.StopTimeout+5*time.Second)
+	_ = managed.shim.Shutdown(ctx, managed.spec.StopTimeout)
+	cancel()
 }
 
 func (d *Daemon) reapplyExecutionDefinitions() {
@@ -943,6 +1056,9 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 }
 
 func (d *Daemon) startManaged(projectName string, managed *managedProcess) error {
+	if managed.spec.Supervisor == "shim" {
+		return d.startShimManaged(projectName, managed)
+	}
 	d.mu.Lock()
 	current := d.projects[projectName]
 	if current == nil || current.processes[managed.spec.Name] != managed {
@@ -1007,6 +1123,260 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	return nil
 }
 
+func (d *Daemon) startShimManaged(projectName string, managed *managedProcess) error {
+	d.mu.Lock()
+	current := d.projects[projectName]
+	if current == nil || current.processes[managed.spec.Name] != managed {
+		d.mu.Unlock()
+		return fmt.Errorf("service no longer exists")
+	}
+	if managed.disabled {
+		d.mu.Unlock()
+		return nil
+	}
+	managed.state = StateStarting
+	managed.generation++
+	generation := managed.generation
+	spec := managed.spec
+	d.mu.Unlock()
+
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	shimExecutable, err := shim.ResolveExecutable(executable)
+	if err != nil {
+		d.mu.Lock()
+		managed.state = shimErrorState(err)
+		managed.lastError = err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	bootstrap, err := d.shimBootstrap(projectName, spec, true)
+	if err != nil {
+		d.mu.Lock()
+		managed.state = shimErrorState(err)
+		managed.lastError = err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	client, status, err := shim.StartOrAttach(d.executionContext(), d.layout, shimExecutable, bootstrap)
+	if err != nil {
+		d.mu.Lock()
+		managed.state = shimErrorState(err)
+		managed.lastError = err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	if status.State != StateRunning {
+		if err := client.Start(d.executionContext()); err != nil {
+			d.mu.Lock()
+			managed.state = shimErrorState(err)
+			managed.lastError = err.Error()
+			d.mu.Unlock()
+			return err
+		}
+		status, err = client.Status(d.executionContext())
+		if err != nil {
+			d.mu.Lock()
+			managed.state = StateUnknown
+			managed.lastError = err.Error()
+			d.mu.Unlock()
+			return err
+		}
+	}
+	d.mu.Lock()
+	if current := d.projects[projectName]; current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation {
+		d.mu.Unlock()
+		return nil
+	}
+	managed.shim = client
+	managed.shimStatus = status
+	managed.state = shimState(status.State)
+	managed.startedAt = status.StartedAt
+	managed.stdoutPath = status.StdoutPath
+	managed.stderrPath = status.StderrPath
+	managed.restarts = status.RestartCount
+	managed.lastError = status.LastError
+	if status.LastExit != nil && status.LastExit.ExitCode != nil {
+		value := *status.LastExit.ExitCode
+		managed.lastExit = &value
+	}
+	healthConfig := managed.spec.HealthCheck
+	running := managed.state == StateRunning
+	d.mu.Unlock()
+
+	go d.watchShim(projectName, managed, generation, client)
+	if healthConfig != nil && running {
+		d.startHealthMonitor(projectName, managed, generation, healthConfig)
+	}
+	return nil
+}
+
+func (d *Daemon) shimBootstrap(projectName string, spec config.EffectiveService, autostart bool) (shim.Bootstrap, error) {
+	stdoutPath := d.logs.Path(projectName, spec.Name, "stdout")
+	stderrPath := d.logs.Path(projectName, spec.Name, "stderr")
+	serviceKey := projectName + "/" + spec.Name
+	return shim.NewBootstrap(spec, serviceKey, serviceKey, "", stdoutPath, stderrPath, autostart), nil
+}
+
+func (d *Daemon) adoptShimServices(projectName string) {
+	d.mu.RLock()
+	project := d.projects[projectName]
+	targets := make([]*managedProcess, 0)
+	if project != nil {
+		for _, managed := range project.processes {
+			if managed.spec.Supervisor == "shim" {
+				targets = append(targets, managed)
+			}
+		}
+	}
+	d.mu.RUnlock()
+	for _, managed := range targets {
+		bootstrap, err := d.shimBootstrap(projectName, managed.spec, false)
+		if err != nil {
+			continue
+		}
+		client, status, found, err := shim.AttachExisting(d.executionContext(), d.layout, bootstrap)
+		if err != nil {
+			d.mu.Lock()
+			if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed {
+				managed.state = shimErrorState(err)
+				managed.lastError = err.Error()
+			}
+			d.mu.Unlock()
+			continue
+		}
+		if !found {
+			continue
+		}
+		d.mu.Lock()
+		current := d.projects[projectName]
+		if current == nil || current.processes[managed.spec.Name] != managed {
+			d.mu.Unlock()
+			continue
+		}
+		managed.shim = client
+		managed.shimStatus = status
+		managed.state = shimState(status.State)
+		managed.startedAt = status.StartedAt
+		managed.stdoutPath = status.StdoutPath
+		managed.stderrPath = status.StderrPath
+		managed.restarts = status.RestartCount
+		managed.lastError = status.LastError
+		if status.LastExit != nil && status.LastExit.ExitCode != nil {
+			value := *status.LastExit.ExitCode
+			managed.lastExit = &value
+		}
+		managed.generation++
+		generation := managed.generation
+		healthConfig := managed.spec.HealthCheck
+		d.mu.Unlock()
+		if status.State != StateStopped && status.State != StateExited {
+			go d.watchShim(projectName, managed, generation, client)
+			if healthConfig != nil && status.State == StateRunning {
+				d.startHealthMonitor(projectName, managed, generation, healthConfig)
+			}
+		}
+	}
+}
+
+func shimState(value string) string {
+	switch value {
+	case StateRunning, StateStarting, StateStopping, StateExited, StateBackingOff, StateCrashLoop, StateOrphaned:
+		return value
+	case "failed":
+		return StateFailed
+	case StateStopped:
+		return StateStopped
+	default:
+		return StateUnknown
+	}
+}
+
+func shimErrorState(err error) string {
+	if errors.Is(err, shim.ErrOrphaned) {
+		return StateOrphaned
+	}
+	if errors.Is(err, shim.ErrUnavailable) {
+		return StateUnknown
+	}
+	return StateFailed
+}
+
+func (d *Daemon) watchShim(projectName string, managed *managedProcess, generation uint64, client *shim.Client) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status, err := client.Status(d.executionContext())
+		if err == nil {
+			startHealth := false
+			var healthConfig *config.EffectiveHealthCheck
+			d.mu.Lock()
+			current := d.projects[projectName]
+			if current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.shim != client {
+				d.mu.Unlock()
+				return
+			}
+			wasRunning := managed.state == StateRunning
+			managed.shimStatus = status
+			managed.state = shimState(status.State)
+			managed.startedAt = status.StartedAt
+			managed.stdoutPath = status.StdoutPath
+			managed.stderrPath = status.StderrPath
+			managed.restarts = status.RestartCount
+			managed.lastError = status.LastError
+			if status.LastExit != nil && status.LastExit.ExitCode != nil {
+				value := *status.LastExit.ExitCode
+				managed.lastExit = &value
+			}
+			healthConfig = managed.spec.HealthCheck
+			startHealth = !wasRunning && managed.state == StateRunning && healthConfig != nil && managed.healthCancel == nil
+			d.mu.Unlock()
+			if startHealth {
+				d.startHealthMonitor(projectName, managed, generation, healthConfig)
+			}
+		} else {
+			shouldRecover := false
+			d.mu.Lock()
+			if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation {
+				managed.state = shimErrorState(err)
+				managed.lastError = err.Error()
+				shouldRecover = errors.Is(err, shim.ErrUnavailable)
+			}
+			d.mu.Unlock()
+			if shouldRecover {
+				if recoveryErr := d.recoverShim(projectName, managed, generation, client); recoveryErr != nil {
+					d.mu.Lock()
+					if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation {
+						managed.state = shimErrorState(recoveryErr)
+						managed.lastError = recoveryErr.Error()
+					}
+					d.mu.Unlock()
+				} else {
+					return
+				}
+			}
+		}
+		select {
+		case <-d.executionContext().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Daemon) recoverShim(projectName string, managed *managedProcess, generation uint64, client *shim.Client) error {
+	d.mu.RLock()
+	current := d.projects[projectName]
+	valid := current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation && managed.shim == client && !managed.manualStop && !managed.disabled
+	d.mu.RUnlock()
+	if !valid {
+		return nil
+	}
+	return d.startShimManaged(projectName, managed)
+}
+
 func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess, generation uint64, cfg *config.EffectiveHealthCheck) {
 	ctx := d.ctx
 	if ctx == nil {
@@ -1014,7 +1384,7 @@ func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	d.mu.Lock()
-	if current := d.projects[projectName]; current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.handle == nil || managed.state != StateRunning {
+	if current := d.projects[projectName]; current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.state != StateRunning {
 		d.mu.Unlock()
 		cancel()
 		return
@@ -1048,7 +1418,7 @@ func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess,
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		current := d.projects[projectName]
-		if current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.handle == nil || managed.state != StateRunning {
+		if current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.state != StateRunning {
 			return
 		}
 		managed.health = &info
@@ -1073,6 +1443,11 @@ func serviceEnvironment(spec config.EffectiveService) map[string]string {
 		return spec.Env
 	}
 	return spec.Environment
+}
+
+func serviceCommandLine(spec config.EffectiveService) string {
+	parts := append([]string{spec.Command}, spec.Args...)
+	return strings.Join(parts, " ")
 }
 
 func healthInfoFromSnapshot(snapshot health.Snapshot) HealthInfo {
@@ -1339,13 +1714,33 @@ func (d *Daemon) stopManaged(managed *managedProcess) error {
 	}
 	managed.health = nil
 	handle := managed.handle
+	shimClient := managed.shim
 	if handle == nil {
+		if shimClient != nil {
+			managed.generation++
+			managed.state = StateStopping
+			timeout := managed.spec.StopTimeout
+			d.mu.Unlock()
+			err := shimClient.Stop(d.executionContext(), timeout)
+			status, statusErr := shimClient.Status(d.executionContext())
+			d.mu.Lock()
+			if statusErr == nil {
+				managed.shimStatus = status
+				managed.state = shimState(status.State)
+				managed.startedAt = status.StartedAt
+				managed.restarts = status.RestartCount
+				managed.lastError = status.LastError
+			} else if err == nil {
+				managed.state = StateStopped
+			}
+			d.mu.Unlock()
+			return err
+		}
 		managed.generation++
 		managed.state = StateDisabledIf(managed.disabled)
 		d.mu.Unlock()
 		return nil
 	}
-	managed.manualStop = true
 	managed.generation++
 	managed.state = StateStopping
 	timeout := managed.spec.StopTimeout
@@ -1656,6 +2051,14 @@ func serviceActiveForPropagation(managed *managedProcess) bool {
 	if managed == nil {
 		return false
 	}
+	if managed.shim != nil {
+		switch managed.state {
+		case StateStopped, StateExited, StateFailed, StateCrashLoop, StateDisabled:
+			return false
+		default:
+			return true
+		}
+	}
 	if managed.handle != nil {
 		return true
 	}
@@ -1733,6 +2136,10 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		if managed.handle != nil {
 			pid = managed.handle.PID()
 			info.CommandLine = managed.handle.CommandLine()
+			every = managed.spec.MetricsEvery
+		} else if managed.shim != nil {
+			pid = managed.shimStatus.ServicePID
+			info.CommandLine = serviceCommandLine(managed.spec)
 			every = managed.spec.MetricsEvery
 		}
 		startedAt := managed.startedAt
@@ -2097,6 +2504,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			"history_database": database,
 		})
 	case "daemon.stop":
+		d.stopAllServices(true)
 		d.mu.RLock()
 		cancel := d.cancel
 		shutdownDone := d.shutdownDone
@@ -2701,7 +3109,7 @@ func processReferenceErrorCode(ref, fallback string) string {
 }
 
 func sameSpec(a, b config.EffectiveProcess) bool {
-	if a.Project != b.Project || a.Name != b.Name || a.Command != b.Command || a.WorkingDir != b.WorkingDir ||
+	if a.Project != b.Project || a.Name != b.Name || a.Command != b.Command || a.Supervisor != b.Supervisor || a.WorkingDir != b.WorkingDir ||
 		a.Autostart != b.Autostart || a.Restart != b.Restart || a.StopTimeout != b.StopTimeout ||
 		a.MaxRestarts != b.MaxRestarts || a.RestartWindow != b.RestartWindow || a.StableAfter != b.StableAfter ||
 		a.LogMaxSize != b.LogMaxSize || a.LogMaxFiles != b.LogMaxFiles {

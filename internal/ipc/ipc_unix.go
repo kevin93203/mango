@@ -23,8 +23,12 @@ func Listen(endpoint string) (net.Listener, error) {
 }
 
 func dial(ctx context.Context) (net.Conn, error) {
+	return dialEndpoint(ctx, endpointForCurrentUser())
+}
+
+func dialEndpoint(ctx context.Context, endpoint string) (net.Conn, error) {
 	var d net.Dialer
-	return d.DialContext(ctx, "unix", endpointForCurrentUser())
+	return d.DialContext(ctx, "unix", endpoint)
 }
 
 func endpointUnavailable(err error) bool {

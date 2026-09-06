@@ -2,6 +2,7 @@ version: 3
 
 defaults:
   working_dir: "."
+  supervisor: legacy
   restart: on-failure
   stop_timeout: 10s
   log_max_size: 100MiB
