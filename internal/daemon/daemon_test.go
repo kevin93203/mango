@@ -474,6 +474,135 @@ func TestScheduleListIncludesRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestScheduleBulkEnableDisablePersistsAcrossDaemonInstances(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	schedules := []config.EffectiveSchedule{
+		{Project: "demo", Name: "hourly", Cron: "* * * * *", Timezone: time.UTC},
+		{Project: "demo", Name: "nightly", Cron: "0 2 * * *", Timezone: time.UTC},
+	}
+
+	d := New(layout)
+	d.registry = registry.File{Projects: map[string]registry.Project{"demo": {Name: "demo", Enabled: true}}}
+	if err := d.scheduler.Apply(schedules); err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), requestForMethodWithParams(t, "schedule.bulk", scheduleBulkRequest{
+		Action: "disable", Targets: []string{"demo", "missing"},
+	}))
+	if !response.OK {
+		t.Fatalf("schedule.bulk failed: %+v", response.Error)
+	}
+	var results []api.ScheduleOperationResult
+	if err := decodeTestData(response.Data, &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 || results[0].Status != "error" || results[1].Key != "demo/hourly" || results[2].Key != "demo/nightly" {
+		t.Fatalf("schedule bulk results = %+v, want missing error and two project schedules", results)
+	}
+
+	stateData, err := os.ReadFile(filepath.Join(layout.State, "schedules.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state scheduleStateFile
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != scheduleStateVersion || strings.Join(state.Disabled, ",") != "demo/hourly,demo/nightly" {
+		t.Fatalf("schedule state = %+v, want both demo schedules disabled", state)
+	}
+
+	d2 := New(layout)
+	if err := d2.scheduler.Apply(schedules); err != nil {
+		t.Fatal(err)
+	}
+	response = d2.Handle(context.Background(), requestForMethod(t, "schedule.ls"))
+	if !response.OK {
+		t.Fatalf("schedule.ls after reload failed: %+v", response.Error)
+	}
+	var items []api.ScheduleInfo
+	if err := decodeTestData(response.Data, &items); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Status != "disabled" || !item.Disabled || item.NextRun != nil {
+			t.Fatalf("reloaded schedule = %+v, want disabled without next run", item)
+		}
+	}
+
+	response = d2.Handle(context.Background(), requestForMethodWithParams(t, "schedule.bulk", scheduleBulkRequest{
+		Action: "enable", Targets: []string{"demo/nightly"},
+	}))
+	if !response.OK {
+		t.Fatalf("schedule enable failed: %+v", response.Error)
+	}
+	response = d2.Handle(context.Background(), requestForMethod(t, "schedule.ls"))
+	if !response.OK {
+		t.Fatalf("schedule.ls after enable failed: %+v", response.Error)
+	}
+	if err := decodeTestData(response.Data, &items); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Name == "nightly" && (item.Disabled || item.Status == "disabled") {
+			t.Fatalf("enabled schedule = %+v, want enabled", item)
+		}
+		if item.Name == "hourly" && (!item.Disabled || item.Status != "disabled") {
+			t.Fatalf("unchanged schedule = %+v, want disabled", item)
+		}
+	}
+}
+
+func TestScheduleApplyPrunesRemovedScheduleState(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.yaml")
+	writeTestScheduleConfig(t, configPath, "nightly")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 3,
+		Projects: map[string]registry.Project{
+			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), requestForMethodWithParams(t, "schedule.bulk", scheduleBulkRequest{
+		Action: "disable", Targets: []string{"demo/nightly"},
+	}))
+	if !response.OK {
+		t.Fatalf("schedule disable failed: %+v", response.Error)
+	}
+
+	writeTestScheduleConfig(t, configPath, "hourly")
+	if err := d.ApplyProject("demo"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadScheduleState(filepath.Join(layout.State, "schedules.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state) != 0 {
+		t.Fatalf("schedule state after apply = %#v, want removed schedule state pruned", state)
+	}
+	response = d.Handle(context.Background(), requestForMethod(t, "schedule.ls"))
+	if !response.OK {
+		t.Fatalf("schedule.ls after apply failed: %+v", response.Error)
+	}
+	var items []api.ScheduleInfo
+	if err := decodeTestData(response.Data, &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "hourly" || items[0].Disabled || items[0].Status == "disabled" {
+		t.Fatalf("schedule after apply = %+v, want new enabled schedule", items)
+	}
+}
+
 func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	var runs int
 	d := New(testLayout(t.TempDir()))
@@ -583,6 +712,15 @@ func TestHistoryClearIPCRemovesListStatistics(t *testing.T) {
 func requestForMethod(t *testing.T, method string) ipc.Request {
 	t.Helper()
 	request, err := ipc.NewRequest(method, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func requestForMethodWithParams(t *testing.T, method string, params interface{}) ipc.Request {
+	t.Helper()
+	request, err := ipc.NewRequest(method, params)
 	if err != nil {
 		t.Fatal(err)
 	}

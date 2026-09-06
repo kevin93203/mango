@@ -55,6 +55,15 @@ type ServiceOperationResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// ScheduleOperationResult is the result of one schedule enable/disable
+// operation. Bulk operations return one result for every resolved schedule or
+// target error.
+type ScheduleOperationResult struct {
+	Key    string `json:"key"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 type DependencyStatus struct {
 	Service   string `json:"Service"`
 	Condition string `json:"Condition"`
@@ -130,6 +139,7 @@ type ScheduleInfo struct {
 	TimeoutSeconds  float64
 	Runs            uint64
 	Status          string
+	Disabled        bool
 	LastRun         *time.Time
 	NextRun         *time.Time
 	DurationSeconds *float64

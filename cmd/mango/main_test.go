@@ -1193,6 +1193,65 @@ func TestScheduleListJSONIncludesRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestScheduleEnableDisableCommandUsesBulkIPC(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var method string
+	var params struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}
+	err := scheduleCommandWithCaller([]string{"disable", "demo", "demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		encoded, err := json.Marshal(gotParams)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &params); err != nil {
+			return ipc.Response{}, err
+		}
+		return ipc.Response{Data: []api.ScheduleOperationResult{
+			{Key: "demo/hourly", Status: "ok"},
+			{Key: "demo/nightly", Status: "ok"},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "schedule.bulk" || params.Action != "disable" || strings.Join(params.Targets, ",") != "demo,demo/nightly" {
+		t.Fatalf("request = method %q params %+v", method, params)
+	}
+	if !strings.Contains(output.String(), "Schedule demo/hourly disabled") || !strings.Contains(output.String(), "Schedule demo/nightly disabled") {
+		t.Fatalf("output = %q, want both schedule results", output.String())
+	}
+
+	output.Reset()
+	jsonOutput = true
+	err = scheduleCommandWithCaller([]string{"enable", "demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		if gotMethod != "schedule.bulk" {
+			t.Fatalf("method = %q, want schedule.bulk", gotMethod)
+		}
+		return ipc.Response{Data: []api.ScheduleOperationResult{{Key: "demo/nightly", Status: "ok"}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []api.ScheduleOperationResult
+	if err := json.Unmarshal(output.Bytes(), &results); err != nil {
+		t.Fatalf("JSON output = %q: %v", output.String(), err)
+	}
+	if len(results) != 1 || results[0].Key != "demo/nightly" || results[0].Status != "ok" {
+		t.Fatalf("JSON results = %+v, want enabled schedule", results)
+	}
+}
+
 func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

@@ -56,6 +56,8 @@ type Daemon struct {
 	registry              registry.File
 	projects              map[string]*projectRuntime
 	configErrors          map[string]string
+	disabledSchedules     map[string]bool
+	scheduleStateLoaded   bool
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	shutdownDone          chan struct{}
@@ -143,11 +145,12 @@ type bulkProjectSelection struct {
 
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
-		layout:       layout,
-		logs:         logging.NewManager(layout.Logs),
-		metrics:      metrics.NewCollector(),
-		projects:     map[string]*projectRuntime{},
-		configErrors: map[string]string{},
+		layout:            layout,
+		logs:              logging.NewManager(layout.Logs),
+		metrics:           metrics.NewCollector(),
+		projects:          map[string]*projectRuntime{},
+		configErrors:      map[string]string{},
+		disabledSchedules: map[string]bool{},
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	d.workflow = workflow.New(d.runTaskAttempt, d.scheduler.RecordExecution)
@@ -225,6 +228,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("load history database state: %w", err)
 	}
 	d.historyRepo = historyRepo
+	if err := d.ensureScheduleStateLoaded(); err != nil {
+		return err
+	}
 	if err := d.reloadRegistryForStart(); err != nil {
 		return err
 	}
@@ -359,6 +365,9 @@ func (d *Daemon) reloadRegistryForStart() error {
 }
 
 func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
+	if err := d.ensureScheduleStateLoaded(); err != nil {
+		return err
+	}
 	reg, err := registry.Load(d.layout.Registry)
 	if err != nil {
 		return err
@@ -388,6 +397,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	sort.Strings(removed)
 	for _, name := range removed {
 		d.removeProject(name)
+		if err := d.clearScheduleStateForProject(name); err != nil {
+			return err
+		}
 	}
 	projectNames := make([]string, 0, len(reg.Projects))
 	for name := range reg.Projects {
@@ -409,6 +421,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 }
 
 func (d *Daemon) ApplyProject(name string) error {
+	if err := d.ensureScheduleStateLoaded(); err != nil {
+		return err
+	}
 	d.mu.RLock()
 	project, ok := d.registry.Projects[name]
 	d.mu.RUnlock()
@@ -461,6 +476,9 @@ func (d *Daemon) applyProject(name, path string) error {
 	}
 	schedules, err := file.SchedulesEffective(name)
 	if err != nil {
+		return err
+	}
+	if err := d.pruneScheduleStateForProject(name, schedules); err != nil {
 		return err
 	}
 	desired := map[string]config.EffectiveService{}
@@ -1931,6 +1949,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	if request.Version != 1 {
 		return failure(request, "UNSUPPORTED_VERSION", fmt.Errorf("unsupported API version %d", request.Version))
 	}
+	if err := d.ensureScheduleStateLoaded(); err != nil {
+		return failure(request, "SCHEDULE_STATE_FAILED", err)
+	}
 	switch request.Method {
 	case "health":
 		d.mu.RLock()
@@ -2032,6 +2053,24 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			return failure(request, "BAD_PARAMS", fmt.Errorf("unsupported service bulk action %q", p.Action))
 		}
 		return success(request, d.BulkServiceOperation(p.Action, p.Targets))
+	case "schedule.bulk":
+		var p scheduleBulkRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if len(p.Targets) == 0 {
+			return failure(request, "BAD_PARAMS", errors.New("schedule bulk requires at least one target"))
+		}
+		switch p.Action {
+		case "enable", "disable":
+		default:
+			return failure(request, "BAD_PARAMS", fmt.Errorf("unsupported schedule bulk action %q", p.Action))
+		}
+		results, err := d.BulkScheduleOperation(p.Action, p.Targets)
+		if err != nil {
+			return failure(request, "SCHEDULE_OPERATION_FAILED", err)
+		}
+		return success(request, results)
 	case "logs.read":
 		var p logRequest
 		if err := json.Unmarshal(request.Params, &p); err != nil {
@@ -2099,6 +2138,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 				Target:          item.Target,
 				Runs:            snapshot.Runs,
 				Status:          snapshot.Status,
+				Disabled:        snapshot.Disabled,
 				LastRun:         scheduleTimeIn(snapshot.LastRun, location),
 				NextRun:         scheduleTimeIn(snapshot.NextRun, location),
 				DurationSeconds: snapshot.DurationSeconds,
