@@ -187,6 +187,41 @@ func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit 
 	})
 }
 
+// Ping verifies that the database connection used by the repository is
+// currently usable without modifying any history data.
+func (r *Repository) Ping(ctx context.Context) error {
+	sqlDB, err := r.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
+}
+
+// MissingTables reports required history tables that are not present. The
+// check is read-only and does not run migrations.
+func (r *Repository) MissingTables(ctx context.Context) ([]string, error) {
+	if err := r.Ping(ctx); err != nil {
+		return nil, err
+	}
+	tables := []struct {
+		name  string
+		model interface{}
+	}{
+		{name: "history_runs", model: &runModel{}},
+		{name: "history_tasks", model: &taskModel{}},
+		{name: "history_attempts", model: &attemptModel{}},
+		{name: "history_counters", model: &counterModel{}},
+	}
+	migrator := r.db.WithContext(ctx).Migrator()
+	missing := make([]string, 0)
+	for _, table := range tables {
+		if !migrator.HasTable(table.model) {
+			missing = append(missing, table.name)
+		}
+	}
+	return missing, nil
+}
+
 // Clear removes all persisted execution history, including lifetime
 // counters, while retaining the database schema for future writes.
 func (r *Repository) Clear(ctx context.Context) error {

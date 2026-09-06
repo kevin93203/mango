@@ -90,6 +90,39 @@ type HealthCheckInfo struct {
 	LastError     string     `json:"LastError,omitempty"`
 }
 
+// HistoryDatabaseHealth describes the history database connection currently
+// used by the daemon. The status is authoritative only when returned by the
+// daemon health endpoint.
+type HistoryDatabaseHealth struct {
+	Driver         string                 `json:"driver"`
+	Location       string                 `json:"location"`
+	Status         string                 `json:"status"`
+	Error          string                 `json:"error,omitempty"`
+	LatencyMS      int64                  `json:"latency_ms,omitempty"`
+	ConnectionInfo DatabaseConnectionInfo `json:"connection_info"`
+	Schema         HistorySchemaHealth    `json:"schema"`
+}
+
+// DatabaseConnectionInfo contains safe, non-secret connection metadata.
+// Passwords and arbitrary DSN options are intentionally not represented.
+type DatabaseConnectionInfo struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Host     string `json:"host,omitempty"`
+	Database string `json:"database,omitempty"`
+	Login    string `json:"login,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Status   string `json:"status"`
+}
+
+// HistorySchemaHealth describes whether the tables required by execution
+// history are available to the daemon.
+type HistorySchemaHealth struct {
+	Status  string   `json:"status"`
+	Missing []string `json:"missing,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
 type ChildProcessInfo struct {
 	PID           int
 	ParentPID     int

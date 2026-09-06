@@ -1091,10 +1091,15 @@ mango startup uninstall
 mango doctor [--json]
 ```
 
-Checks and prints the current platform, Mango root, registry path, log root,
-daemon log, execution-history path, registry readability, daemon status,
-resolved `mangod` path, and startup integration status. It is useful when a
-daemon cannot start or a project is missing from the service list.
+Checks and prints grouped environment, database, and daemon diagnostics,
+including the `daemon.yaml` and `state/schedules.json` paths. The database
+connection and history schema statuses are based on the connection currently
+used by the daemon. It also shows safe connection metadata such as connection
+type, host, database, login, and port; passwords and extra DSN options are
+never returned. If the daemon is unavailable, those statuses are `unknown`;
+configured paths alone are not treated as proof that the Mango service can
+read or write history. It is useful when a daemon cannot start or a project is
+missing from the service list.
 
 ```sh
 mango doctor

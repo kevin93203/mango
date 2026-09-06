@@ -25,6 +25,9 @@ func TestDefaultUsesMangoHome(t *testing.T) {
 	if layout.DaemonConfig != filepath.Join(root, "daemon.yaml") {
 		t.Fatalf("daemon config = %q", layout.DaemonConfig)
 	}
+	if layout.ScheduleState != filepath.Join(root, "state", "schedules.json") {
+		t.Fatalf("schedule state = %q", layout.ScheduleState)
+	}
 }
 
 func TestDefaultIgnoresLegacyGoserveHome(t *testing.T) {

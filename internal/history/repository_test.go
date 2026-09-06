@@ -21,6 +21,40 @@ func openTestRepository(t *testing.T) *Repository {
 	return repository
 }
 
+func TestRepositoryPing(t *testing.T) {
+	repository := openTestRepository(t)
+	if err := repository.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Ping(context.Background()); err == nil {
+		t.Fatal("Ping() after Close() succeeded, want error")
+	}
+}
+
+func TestRepositoryMissingTables(t *testing.T) {
+	repository := openTestRepository(t)
+	missing, err := repository.MissingTables(context.Background())
+	if err != nil {
+		t.Fatalf("MissingTables() error = %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("MissingTables() = %v, want no missing tables", missing)
+	}
+	if err := repository.db.Migrator().DropTable(&taskModel{}); err != nil {
+		t.Fatal(err)
+	}
+	missing, err = repository.MissingTables(context.Background())
+	if err != nil {
+		t.Fatalf("MissingTables() after drop error = %v", err)
+	}
+	if !reflect.DeepEqual(missing, []string{"history_tasks"}) {
+		t.Fatalf("MissingTables() after drop = %v, want history_tasks", missing)
+	}
+}
+
 func TestRepositoryRoundTrip(t *testing.T) {
 	repository := openTestRepository(t)
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
