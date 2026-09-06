@@ -17,6 +17,8 @@ type Status struct {
 	Detail    string
 }
 
+const windowsTaskName = "mango"
+
 func Install(executable string, mangoHomes ...string) error {
 	mangoHome, err := configuredMangoHome(mangoHomes...)
 	if err != nil {
@@ -89,7 +91,7 @@ func installWindows(executable, mangoHome string) error {
 	if err := taskFile.Close(); err != nil {
 		return err
 	}
-	task := exec.Command("schtasks", "/Create", "/TN", "mango", "/XML", taskPath, "/F")
+	task := exec.Command("schtasks", "/Create", "/TN", windowsTaskName, "/XML", taskPath, "/F")
 	if output, err := task.CombinedOutput(); err != nil {
 		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -97,7 +99,7 @@ func installWindows(executable, mangoHome string) error {
 }
 
 func uninstallWindows(mangoHome string) error {
-	task := exec.Command("schtasks", "/Delete", "/TN", "mango", "/F")
+	task := exec.Command("schtasks", "/Delete", "/TN", windowsTaskName, "/F")
 	if output, err := task.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(output)), "cannot find") {
 		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -197,8 +199,37 @@ func statusSystemd() (Status, error) {
 }
 
 func statusWindows() (Status, error) {
-	output, err := exec.Command("schtasks", "/Query", "/TN", "mango").CombinedOutput()
-	return Status{Platform: "windows", Installed: err == nil, Detail: strings.TrimSpace(string(output))}, nil
+	output, err := exec.Command("schtasks", "/Query", "/TN", windowsTaskName).CombinedOutput()
+	detail := strings.TrimSpace(string(output))
+	if err == nil {
+		detail = windowsTaskStatusDetail(detail)
+	}
+	return Status{Platform: "windows", Installed: err == nil, Detail: detail}, nil
+}
+
+func windowsTaskStatusDetail(output string) string {
+	folder := ""
+	taskName := ""
+	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "folder:") {
+			folder = line
+			continue
+		}
+		if strings.HasPrefix(line, `\`) && !strings.Contains(line, "=") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				taskName = fields[0]
+			}
+		}
+	}
+	if folder != "" && taskName != "" {
+		return folder + ", Task: " + taskName
+	}
+	if folder != "" {
+		return folder + `, Task: \` + windowsTaskName
+	}
+	return output
 }
 
 func configuredMangoHome(values ...string) (string, error) {
