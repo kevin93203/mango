@@ -62,6 +62,19 @@ func TestWindowsTaskXMLUsesUTF16LEWithBOM(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskStatusDetailIncludesFolderAndTask(t *testing.T) {
+	output := "Folder: \\\r\nTaskName                                 Next Run Time          Status\r\n========================================= ====================== ===============\r\n\\mango                                  N/A                    Ready\r\n"
+	if got := windowsTaskStatusDetail(output); got != `Folder: \, Task: \mango` {
+		t.Fatalf("Windows task status detail = %q, want %q", got, `Folder: \, Task: \mango`)
+	}
+}
+
+func TestWindowsTaskStatusDetailFallsBackToCanonicalTaskName(t *testing.T) {
+	if got := windowsTaskStatusDetail("Folder: \\\r\n"); got != `Folder: \, Task: \mango` {
+		t.Fatalf("Windows task status detail = %q, want %q", got, `Folder: \, Task: \mango`)
+	}
+}
+
 func TestWindowsWrapperSetsMangoHome(t *testing.T) {
 	wrapper := windowsWrapper(`C:\Program Files\Mango\mangod.exe`, `C:\Users\test user\mango`)
 	if !strings.Contains(wrapper, `set "MANGO_HOME=C:\Users\test user\mango"`) {
