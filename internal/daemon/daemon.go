@@ -56,6 +56,7 @@ type Daemon struct {
 	registry              registry.File
 	projects              map[string]*projectRuntime
 	configErrors          map[string]string
+	historyDatabase       api.HistoryDatabaseHealth
 	disabledSchedules     map[string]bool
 	scheduleStateLoaded   bool
 	ctx                   context.Context
@@ -103,6 +104,7 @@ type ServiceInfo = api.ServiceInfo
 type DependencyStatus = api.DependencyStatus
 type HealthInfo = api.HealthInfo
 type HealthCheckInfo = api.HealthCheckInfo
+type HistoryDatabaseHealth = api.HistoryDatabaseHealth
 type ChildProcessInfo = api.ChildProcessInfo
 type ChildServiceInfo = api.ChildProcessInfo
 type ProcessListRow = api.ServiceListRow
@@ -219,7 +221,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.scheduler.SetHistoryLimit(daemonConfig.ScheduleHistoryLimit); err != nil {
 		return err
 	}
-	historyRepo, err := openHistoryRepository(d.layout, daemonConfig.History.Database)
+	historyRepo, databaseInfo, err := openHistoryRepositoryWithInfo(d.layout, daemonConfig.History.Database)
 	if err != nil {
 		return err
 	}
@@ -227,7 +229,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = historyRepo.Close()
 		return fmt.Errorf("load history database state: %w", err)
 	}
+	d.mu.Lock()
 	d.historyRepo = historyRepo
+	d.historyDatabase = databaseInfo
+	d.mu.Unlock()
 	if err := d.ensureScheduleStateLoaded(); err != nil {
 		return err
 	}
@@ -324,15 +329,135 @@ func (d *Daemon) shutdown() {
 	if runtime.GOOS != "windows" {
 		_ = os.Remove(d.layout.SocketPath)
 	}
-	if d.historyRepo != nil {
-		_ = d.historyRepo.Close()
-		d.historyRepo = nil
+	d.mu.Lock()
+	historyRepo := d.historyRepo
+	d.historyRepo = nil
+	d.mu.Unlock()
+	if historyRepo != nil {
+		_ = historyRepo.Close()
+	}
+}
+
+type historyPinger interface {
+	Ping(context.Context) error
+}
+
+func (d *Daemon) historyDatabaseHealth(parent context.Context) api.HistoryDatabaseHealth {
+	d.mu.RLock()
+	result := d.historyDatabase
+	repository := d.historyRepo
+	d.mu.RUnlock()
+	if result.Status == "" {
+		result.Status = "unknown"
+	}
+	result.ConnectionInfo.Status = result.Status
+	if result.Schema.Status == "" {
+		result.Schema.Status = "unknown"
+	}
+	if repository == nil {
+		if result.Error == "" {
+			result.Error = "history database is not initialized"
+		}
+		if result.Schema.Error == "" {
+			result.Schema.Error = "database connection is not available"
+		}
+		return result
+	}
+	pinger, ok := repository.(historyPinger)
+	if !ok {
+		result.Status = "unknown"
+		result.ConnectionInfo.Status = result.Status
+		result.Error = "history repository does not support connection health checks"
+		result.Schema.Status = "unknown"
+		result.Schema.Error = result.Error
+		return result
+	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	err := pinger.Ping(ctx)
+	result.LatencyMS = time.Since(started).Milliseconds()
+	if err != nil {
+		result.Status = "disconnected"
+		result.ConnectionInfo.Status = result.Status
+		result.Error = err.Error()
+		result.Schema.Status = "unknown"
+		result.Schema.Error = "database connection is not available"
+		return result
+	}
+	result.Status = "connected"
+	result.ConnectionInfo.Status = result.Status
+	result.Error = ""
+	checker, ok := repository.(interface {
+		MissingTables(context.Context) ([]string, error)
+	})
+	if !ok {
+		result.Schema.Status = "unknown"
+		result.Schema.Error = "history repository does not support schema health checks"
+		return result
+	}
+	missing, err := checker.MissingTables(ctx)
+	if err != nil {
+		result.Schema.Status = "error"
+		result.Schema.Error = err.Error()
+		return result
+	}
+	if len(missing) > 0 {
+		result.Schema.Status = "missing"
+		result.Schema.Missing = missing
+		result.Schema.Error = ""
+		return result
+	}
+	result.Schema.Status = "ready"
+	result.Schema.Missing = nil
+	result.Schema.Error = ""
+	return result
+}
+
+func historyDatabaseInfo(layout paths.Layout, database config.DatabaseConfig) api.HistoryDatabaseHealth {
+	driver := strings.ToLower(strings.TrimSpace(database.Driver))
+	if driver == "" {
+		driver = config.DefaultHistoryDatabaseDriver
+	}
+	location := "configured dsn"
+	if driver == "sqlite" {
+		path := database.Path
+		if path == "" {
+			path = filepath.Join(layout.State, "history.db")
+		} else if !filepath.IsAbs(path) {
+			path = filepath.Join(layout.Root, path)
+		}
+		location = path
+	} else if database.DSNEnv != "" {
+		location = "dsn from " + database.DSNEnv
+	}
+	return api.HistoryDatabaseHealth{
+		Driver: driver, Location: location, Status: "unknown",
+		ConnectionInfo: databaseConnectionInfo(driver, "", database.DSNEnv),
+		Schema:         api.HistorySchemaHealth{Status: "unknown"},
 	}
 }
 
 func openHistoryRepository(layout paths.Layout, database config.DatabaseConfig) (scheduler.HistoryRepository, error) {
+	repository, _, err := openHistoryRepositoryWithInfo(layout, database)
+	return repository, err
+}
+
+func openHistoryRepositoryWithInfo(layout paths.Layout, database config.DatabaseConfig) (scheduler.HistoryRepository, api.HistoryDatabaseHealth, error) {
+	resolved, info, err := resolveHistoryDatabase(layout, database)
+	if err != nil {
+		return nil, api.HistoryDatabaseHealth{}, err
+	}
+	repository, err := history.Open(resolved)
+	if err != nil {
+		return nil, api.HistoryDatabaseHealth{}, err
+	}
+	return repository, info, nil
+}
+
+func resolveHistoryDatabase(layout paths.Layout, database config.DatabaseConfig) (history.Config, api.HistoryDatabaseHealth, error) {
 	if err := database.Validate(); err != nil {
-		return nil, err
+		return history.Config{}, api.HistoryDatabaseHealth{}, err
 	}
 	driver := strings.ToLower(strings.TrimSpace(database.Driver))
 	if driver == "" {
@@ -342,7 +467,7 @@ func openHistoryRepository(layout paths.Layout, database config.DatabaseConfig) 
 	if database.DSNEnv != "" {
 		dsn = os.Getenv(database.DSNEnv)
 		if dsn == "" {
-			return nil, fmt.Errorf("history database environment variable %q is empty", database.DSNEnv)
+			return history.Config{}, api.HistoryDatabaseHealth{}, fmt.Errorf("history database environment variable %q is empty", database.DSNEnv)
 		}
 	}
 	path := database.Path
@@ -353,7 +478,9 @@ func openHistoryRepository(layout paths.Layout, database config.DatabaseConfig) 
 			path = filepath.Join(layout.Root, path)
 		}
 	}
-	return history.Open(history.Config{Driver: driver, Path: path, DSN: dsn})
+	info := historyDatabaseInfo(layout, database)
+	info.ConnectionInfo = databaseConnectionInfo(driver, dsn, database.DSNEnv)
+	return history.Config{Driver: driver, Path: path, DSN: dsn}, info, nil
 }
 
 func (d *Daemon) reloadRegistry() error {
@@ -1960,12 +2087,14 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			configErrors[project] = message
 		}
 		d.mu.RUnlock()
+		database := d.historyDatabaseHealth(ctx)
 		status := "ok"
-		if len(configErrors) > 0 {
+		if len(configErrors) > 0 || database.Status != "connected" || database.Schema.Status != "ready" {
 			status = "degraded"
 		}
 		return success(request, map[string]interface{}{
 			"status": status, "pid": os.Getpid(), "version": 1, "config_errors": configErrors,
+			"history_database": database,
 		})
 	case "daemon.stop":
 		d.mu.RLock()

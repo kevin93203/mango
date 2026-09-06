@@ -639,16 +639,60 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 	}
 	text := output.String()
 	for _, want := range []string{
-		"logs root",
-		layout.Logs,
-		"daemon log",
-		layout.DaemonLog,
-		"history database",
+		"Environment",
+		"daemon config",
+		layout.DaemonConfig,
+		"state root",
+		layout.State,
+		"schedule state",
+		filepath.Join(layout.State, "schedules.json"),
+		"runtime socket",
+		layout.SocketPath,
+		"Database",
+		"driver",
+		"connection",
+		"history schema",
+		"Daemon",
+		"pid",
+		"api version",
+		"config errors",
 		filepath.Join(layout.State, "history.db"),
+		"unknown",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("doctor output = %q, want %q", text, want)
 		}
+	}
+	ordered := []string{
+		"Environment",
+		"  platform",
+		"  root",
+		"  daemon config",
+		"  registry",
+		"  logs root",
+		"  state root",
+		"  schedule state",
+		"  runtime socket",
+		"Database",
+		"  driver",
+		"  location",
+		"  connection",
+		"  history schema",
+		"Daemon",
+		"  status",
+		"  pid",
+		"  api version",
+		"  daemon binary",
+		"  startup",
+		"  config errors",
+	}
+	last := -1
+	for _, want := range ordered {
+		index := strings.Index(text, want)
+		if index <= last {
+			t.Fatalf("doctor output order for %q is invalid in %q", want, text)
+		}
+		last = index
 	}
 
 	output.Reset()
@@ -668,6 +712,33 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		if report[key] != want {
 			t.Fatalf("doctor JSON %s = %v, want %q", key, report[key], want)
 		}
+	}
+	environment, ok := report["environment"].(map[string]interface{})
+	if !ok || environment["daemon_config"] != layout.DaemonConfig || environment["schedule_state"] != filepath.Join(layout.State, "schedules.json") {
+		t.Fatalf("doctor JSON environment = %+v", report["environment"])
+	}
+	databaseReport, ok := report["database"].(map[string]interface{})
+	if !ok || databaseReport["connection"] != "unknown" || databaseReport["history_schema"] != "unknown" || databaseReport["connection_error"] != "daemon unavailable; cannot verify its database connection" {
+		t.Fatalf("doctor JSON database = %+v", report["database"])
+	}
+	connectionInfo, ok := databaseReport["connection_info"].(map[string]interface{})
+	if !ok || connectionInfo["id"] != "history" || connectionInfo["type"] != "sqlite" || connectionInfo["status"] != "unknown" {
+		t.Fatalf("doctor JSON connection info = %+v", databaseReport["connection_info"])
+	}
+	daemon, ok := report["daemon"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("doctor JSON daemon = %T", report["daemon"])
+	}
+	database, ok := daemon["history_database"].(map[string]interface{})
+	if !ok || database["status"] != "unknown" {
+		t.Fatalf("doctor JSON daemon history database = %+v", daemon["history_database"])
+	}
+	if !strings.Contains(database["error"].(string), "daemon unavailable") {
+		t.Fatalf("doctor JSON daemon history database error = %+v", database["error"])
+	}
+	schema, ok := database["schema"].(map[string]interface{})
+	if !ok || schema["status"] != "unknown" {
+		t.Fatalf("doctor JSON daemon history schema = %+v", database["schema"])
 	}
 }
 

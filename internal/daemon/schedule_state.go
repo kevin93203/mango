@@ -110,6 +110,13 @@ type scheduleBulkRequest struct {
 	Targets []string `json:"targets"`
 }
 
+func (d *Daemon) scheduleStatePath() string {
+	if d.layout.ScheduleState != "" {
+		return d.layout.ScheduleState
+	}
+	return filepath.Join(d.layout.State, "schedules.json")
+}
+
 func scheduleOperationResult(key string, err error) api.ScheduleOperationResult {
 	result := api.ScheduleOperationResult{Key: key, Status: "ok"}
 	if err != nil {
@@ -125,8 +132,7 @@ func (d *Daemon) ensureScheduleStateLoaded() error {
 		d.mu.Unlock()
 		return nil
 	}
-	path := filepath.Join(d.layout.State, "schedules.json")
-	disabled, err := loadScheduleState(path)
+	disabled, err := loadScheduleState(d.scheduleStatePath())
 	if err != nil {
 		d.mu.Unlock()
 		return fmt.Errorf("load schedule state: %w", err)
@@ -161,7 +167,7 @@ func (d *Daemon) pruneScheduleStateForProject(project string, schedules []config
 	if !changed {
 		return nil
 	}
-	if err := saveScheduleState(filepath.Join(d.layout.State, "schedules.json"), next); err != nil {
+	if err := saveScheduleState(d.scheduleStatePath(), next); err != nil {
 		return err
 	}
 	d.disabledSchedules = next
@@ -186,7 +192,7 @@ func (d *Daemon) clearScheduleStateForProject(project string) error {
 	if !changed {
 		return nil
 	}
-	if err := saveScheduleState(filepath.Join(d.layout.State, "schedules.json"), next); err != nil {
+	if err := saveScheduleState(d.scheduleStatePath(), next); err != nil {
 		return err
 	}
 	d.disabledSchedules = next
@@ -233,7 +239,7 @@ func (d *Daemon) BulkScheduleOperation(action string, targets []string) ([]api.S
 		}
 		changed = append(changed, key)
 	}
-	if err := saveScheduleState(filepath.Join(d.layout.State, "schedules.json"), next); err != nil {
+	if err := saveScheduleState(d.scheduleStatePath(), next); err != nil {
 		for _, changedKey := range changed {
 			d.restoreScheduleStateLocked(changedKey, old[changedKey])
 		}

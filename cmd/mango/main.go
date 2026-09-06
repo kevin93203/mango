@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1694,56 +1695,320 @@ func doctorCommand(layout paths.Layout) error {
 	}
 
 	daemonData := map[string]interface{}{"status": "stopped"}
+	daemonAvailable := false
 	if response, err := call("health", nil); err == nil {
 		if decoded, decodeErr := decodeMap(response.Data); decodeErr == nil {
 			daemonData = decoded
+			daemonAvailable = true
 		}
 	}
+	daemonDatabase := daemonDatabaseHealth(daemonData, daemonAvailable)
+	if daemonDatabase.Driver == "" {
+		daemonDatabase.Driver = historyDriver
+	}
+	if daemonDatabase.Location == "" {
+		daemonDatabase.Location = historyLocation
+	}
+	if daemonDatabase.ConnectionInfo.ID == "" {
+		daemonDatabase.ConnectionInfo.ID = "history"
+	}
+	if daemonDatabase.ConnectionInfo.Type == "" {
+		daemonDatabase.ConnectionInfo.Type = daemonDatabase.Driver
+	}
+	if daemonDatabase.ConnectionInfo.Status == "" {
+		daemonDatabase.ConnectionInfo.Status = daemonDatabase.Status
+	}
+	daemonData["history_database"] = daemonDatabase
 	daemonExecutable, daemonExecutableErr := resolveDaemonExecutable()
 	startupStatus, startupErr := startup.GetStatus()
+	daemonHealth := daemonHealthData{Status: "stopped", ConfigErrors: map[string]string{}}
+	if daemonAvailable {
+		if err := decodeData(daemonData, &daemonHealth); err != nil {
+			daemonHealth.Status = "unknown"
+			daemonHealth.ConfigErrors = map[string]string{}
+		}
+	}
+	environmentReport := map[string]string{
+		"platform":       runtime.GOOS,
+		"root":           layout.Root,
+		"daemon_config":  layout.DaemonConfig,
+		"registry":       layout.Registry,
+		"logs_root":      layout.Logs,
+		"state_root":     layout.State,
+		"schedule_state": scheduleStatePath(layout),
+		"runtime_socket": layout.SocketPath,
+	}
+	databaseReport := doctorDatabaseReport(daemonDatabase)
 	if jsonOutput {
 		report := map[string]interface{}{
 			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry, "logs": layout.Logs,
 			"daemon_log": layout.DaemonLog, "execution_history": historyLocation,
 			"history_database": map[string]string{"driver": historyDriver, "location": historyLocation},
 			"registry_ok":      registryOK, "registry_error": registryError,
-			"daemon": daemonData,
+			"daemon":      daemonData,
+			"environment": environmentReport,
+			"database":    databaseReport,
 		}
 		if daemonExecutableErr == nil {
 			report["daemon_executable"] = daemonExecutable
+			daemonData["daemon_binary"] = daemonExecutable
 		} else {
 			report["daemon_executable_error"] = daemonExecutableErr.Error()
+			daemonData["daemon_binary_error"] = daemonExecutableErr.Error()
 		}
 		if startupErr == nil {
 			report["startup"] = startupStatus
+			daemonData["startup"] = startupStatus
 		} else {
 			report["startup_error"] = startupErr.Error()
+			daemonData["startup_error"] = startupErr.Error()
 		}
+		daemonData["api_version"] = daemonHealth.Version
 		return cliOutput.JSON(report)
 	}
 
 	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "mango doctor"))
-	cliOutput.KeyValues([][]cliui.Cell{
-		{{Text: "platform"}, {Text: runtime.GOOS}},
-		{{Text: "root"}, {Text: layout.Root}},
-		{{Text: "registry"}, {Text: layout.Registry}},
-		{{Text: "logs root"}, {Text: layout.Logs}},
-		{{Text: "daemon log"}, {Text: layout.DaemonLog}},
-		{{Text: "history database"}, {Text: historyLocation}},
-		{{Text: "registry status"}, {Text: doctorStatus(registryOK, registryError)}},
-		{{Text: "daemon"}, {Text: doctorStatus(daemonData["status"] == "ok" || daemonData["status"] == "degraded", fmt.Sprint(daemonData["status"]))}},
+	printDoctorSection("Environment", []doctorField{
+		{Name: "platform", Value: runtime.GOOS},
+		{Name: "root", Value: layout.Root},
+		{Name: "daemon config", Value: layout.DaemonConfig},
+		{Name: "registry", Value: layout.Registry, Style: doctorStatusStyle(registryOK, registryError)},
+		{Name: "logs root", Value: layout.Logs},
+		{Name: "state root", Value: layout.State},
+		{Name: "schedule state", Value: scheduleStatePath(layout)},
+		{Name: "runtime socket", Value: layout.SocketPath},
 	})
-	if daemonExecutableErr == nil {
-		cliOutput.KeyValues([][]cliui.Cell{{{Text: "daemon binary"}, {Text: daemonExecutable}}})
-	} else {
-		cliOutput.KeyValues([][]cliui.Cell{{{Text: "daemon binary"}, {Text: daemonExecutableErr.Error(), Style: cliui.StyleError}}})
+	printDoctorSection("Database", []doctorField{
+		{Name: "driver", Value: daemonDatabase.Driver},
+		{Name: "location", Value: daemonDatabase.Location},
+		{Name: "connection id", Value: displayDoctorValue(daemonDatabase.ConnectionInfo.ID)},
+		{Name: "conn type", Value: displayDoctorValue(daemonDatabase.ConnectionInfo.Type)},
+		{Name: "host", Value: displayDoctorValue(daemonDatabase.ConnectionInfo.Host)},
+		{Name: "database", Value: displayDoctorValue(daemonDatabase.ConnectionInfo.Database)},
+		{Name: "login", Value: displayDoctorValue(daemonDatabase.ConnectionInfo.Login)},
+		{Name: "port", Value: displayDoctorPort(daemonDatabase.ConnectionInfo.Port)},
+		{Name: "connection", Value: doctorDatabaseConnection(daemonDatabase), Style: doctorDatabaseStyle(daemonDatabase)},
+		{Name: "history schema", Value: doctorSchemaStatus(daemonDatabase.Schema), Style: doctorSchemaStyle(daemonDatabase.Schema)},
+	})
+	configErrors, configErrorsStyle := doctorConfigErrors(daemonHealth.ConfigErrors, daemonAvailable)
+	daemonStatus := daemonHealth.Status
+	if daemonStatus == "" {
+		daemonStatus = "unknown"
 	}
+	daemonStatusStyle := cliui.StateStyle(daemonStatus)
+	daemonBinary := daemonExecutable
+	daemonBinaryStyle := cliui.StyleNone
+	if daemonExecutableErr != nil {
+		daemonBinary = daemonExecutableErr.Error()
+		daemonBinaryStyle = cliui.StyleError
+	}
+	startupValue := "unknown"
+	startupStyle := cliui.StyleWarning
 	if startupErr == nil {
-		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: doctorStatus(startupStatus.Installed, startupStatus.Detail)}}})
-	} else {
-		cliOutput.KeyValues([][]cliui.Cell{{{Text: "startup"}, {Text: startupErr.Error(), Style: cliui.StyleError}}})
+		startupValue = doctorStatusValue(startupStatus.Installed, startupStatus.Detail)
+		startupStyle = doctorStatusStyle(startupStatus.Installed, startupStatus.Detail)
 	}
+	if startupErr != nil {
+		startupValue = startupErr.Error()
+		startupStyle = cliui.StyleError
+	}
+	printDoctorSection("Daemon", []doctorField{
+		{Name: "status", Value: daemonStatus, Style: daemonStatusStyle},
+		{Name: "pid", Value: doctorPID(daemonHealth, daemonAvailable)},
+		{Name: "api version", Value: doctorAPIVersion(daemonHealth, daemonAvailable)},
+		{Name: "daemon binary", Value: daemonBinary, Style: daemonBinaryStyle},
+		{Name: "startup", Value: startupValue, Style: startupStyle},
+		{Name: "config errors", Value: configErrors, Style: configErrorsStyle},
+	})
 	return nil
+}
+
+type doctorField struct {
+	Name  string
+	Value string
+	Style cliui.Style
+}
+
+func printDoctorSection(title string, fields []doctorField) {
+	cliOutput.Println("")
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, title))
+	for _, field := range fields {
+		cliOutput.Printf("  %-16s %s\n", field.Name, cliOutput.Text(field.Style, field.Value))
+	}
+}
+
+func scheduleStatePath(layout paths.Layout) string {
+	if layout.ScheduleState != "" {
+		return layout.ScheduleState
+	}
+	return filepath.Join(layout.State, "schedules.json")
+}
+
+type doctorDatabaseJSON struct {
+	Driver              string                     `json:"driver"`
+	Location            string                     `json:"location"`
+	Connection          string                     `json:"connection"`
+	HistorySchema       string                     `json:"history_schema"`
+	ConnectionError     string                     `json:"connection_error,omitempty"`
+	HistorySchemaError  string                     `json:"history_schema_error,omitempty"`
+	MissingSchemaTables []string                   `json:"missing_schema_tables,omitempty"`
+	ConnectionInfo      api.DatabaseConnectionInfo `json:"connection_info"`
+}
+
+func doctorDatabaseReport(database api.HistoryDatabaseHealth) doctorDatabaseJSON {
+	connection := database.Status
+	if connection == "" {
+		connection = "unknown"
+	}
+	schema := database.Schema.Status
+	if schema == "" {
+		schema = "unknown"
+	}
+	return doctorDatabaseJSON{
+		Driver:              database.Driver,
+		Location:            database.Location,
+		Connection:          connection,
+		HistorySchema:       schema,
+		ConnectionError:     database.Error,
+		HistorySchemaError:  database.Schema.Error,
+		MissingSchemaTables: append([]string(nil), database.Schema.Missing...),
+		ConnectionInfo:      database.ConnectionInfo,
+	}
+}
+
+func displayDoctorValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func displayDoctorPort(port int) string {
+	if port <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(port)
+}
+
+func doctorDatabaseConnection(database api.HistoryDatabaseHealth) string {
+	status := database.Status
+	if status == "" {
+		status = "unknown"
+	}
+	if database.Error != "" {
+		return status + ": " + database.Error
+	}
+	return status
+}
+
+func doctorSchemaStatus(schema api.HistorySchemaHealth) string {
+	status := schema.Status
+	if status == "" {
+		status = "unknown"
+	}
+	if len(schema.Missing) > 0 {
+		status += " (missing: " + strings.Join(schema.Missing, ", ") + ")"
+	}
+	if schema.Error != "" {
+		status += ": " + schema.Error
+	}
+	return status
+}
+
+func doctorSchemaStyle(schema api.HistorySchemaHealth) cliui.Style {
+	switch schema.Status {
+	case "ready":
+		return cliui.StyleSuccess
+	case "missing", "error":
+		return cliui.StyleError
+	default:
+		return cliui.StyleWarning
+	}
+}
+
+func doctorConfigErrors(errors map[string]string, available bool) (string, cliui.Style) {
+	if !available {
+		return "unknown (daemon unavailable)", cliui.StyleWarning
+	}
+	if len(errors) == 0 {
+		return "none", cliui.StyleSuccess
+	}
+	names := make([]string, 0, len(errors))
+	for name := range errors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	values := make([]string, 0, len(names))
+	for _, name := range names {
+		values = append(values, name+": "+errors[name])
+	}
+	return strings.Join(values, "; "), cliui.StyleError
+}
+
+func doctorPID(health daemonHealthData, available bool) string {
+	if !available || health.PID <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(health.PID)
+}
+
+func doctorAPIVersion(health daemonHealthData, available bool) string {
+	if !available || health.Version <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(health.Version)
+}
+
+func doctorStatusStyle(ok bool, detail string) cliui.Style {
+	if ok {
+		return cliui.StyleSuccess
+	}
+	if detail == "" || detail == "stopped" || detail == "not installed" {
+		return cliui.StyleWarning
+	}
+	return cliui.StyleError
+}
+
+func doctorStatusValue(ok bool, detail string) string {
+	if detail != "" {
+		return detail
+	}
+	if ok {
+		return "ok"
+	}
+	return "not installed"
+}
+
+func daemonDatabaseHealth(data map[string]interface{}, available bool) api.HistoryDatabaseHealth {
+	result := api.HistoryDatabaseHealth{
+		Status: "unknown",
+		Schema: api.HistorySchemaHealth{Status: "unknown"},
+	}
+	if !available {
+		result.Error = "daemon unavailable; cannot verify its database connection"
+		return result
+	}
+	raw, ok := data["history_database"]
+	if !ok {
+		result.Error = "daemon did not report history database health"
+		return result
+	}
+	if err := decodeData(raw, &result); err != nil {
+		result.Status = "unknown"
+		result.Error = "invalid daemon history database health: " + err.Error()
+	}
+	return result
+}
+
+func doctorDatabaseStyle(database api.HistoryDatabaseHealth) cliui.Style {
+	switch database.Status {
+	case "connected":
+		return cliui.StyleSuccess
+	case "disconnected":
+		return cliui.StyleError
+	default:
+		return cliui.StyleWarning
+	}
 }
 
 func historyDatabaseDisplay(layout paths.Layout) (string, string) {
@@ -1886,10 +2151,11 @@ func printDaemonStatus(data interface{}) error {
 }
 
 type daemonHealthData struct {
-	Status       string            `json:"status"`
-	PID          int               `json:"pid"`
-	Version      int               `json:"version"`
-	ConfigErrors map[string]string `json:"config_errors"`
+	Status          string                    `json:"status"`
+	PID             int                       `json:"pid"`
+	Version         int                       `json:"version"`
+	ConfigErrors    map[string]string         `json:"config_errors"`
+	HistoryDatabase api.HistoryDatabaseHealth `json:"history_database"`
 }
 
 func decodeDaemonHealth(data interface{}) (daemonHealthData, error) {
@@ -2394,20 +2660,6 @@ func errorStyle(value string) cliui.Style {
 		return cliui.StyleError
 	}
 	return cliui.StyleMuted
-}
-
-func doctorStatus(ok bool, detail string) string {
-	if ok {
-		if detail == "" {
-			detail = "ok"
-		}
-		return cliOutput.Text(cliui.StyleSuccess, detail)
-	}
-	style := cliui.StyleWarning
-	if detail != "stopped" && detail != "not installed" {
-		style = cliui.StyleError
-	}
-	return cliOutput.Text(style, detail)
 }
 
 func fatal(err error) {

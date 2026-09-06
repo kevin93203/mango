@@ -13,6 +13,7 @@ import (
 
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/metrics"
@@ -138,6 +139,141 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	configErrors, ok := data["config_errors"].(map[string]interface{})
 	if !ok || configErrors["demo"] == nil {
 		t.Fatalf("config errors = %+v", data["config_errors"])
+	}
+}
+
+func TestHealthReportsHistoryDatabaseConnection(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	repository, err := history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	d.mu.Lock()
+	d.historyRepo = repository
+	d.historyDatabase = historyDatabaseInfo(layout, config.DatabaseConfig{})
+	d.mu.Unlock()
+
+	request, err := ipc.NewRequest("health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("health failed: %+v", response.Error)
+	}
+	var data map[string]interface{}
+	encoded, err := json.Marshal(response.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	database, ok := data["history_database"].(map[string]interface{})
+	if !ok || database["status"] != "connected" {
+		t.Fatalf("history database health = %+v, want connected", data["history_database"])
+	}
+	schema, ok := database["schema"].(map[string]interface{})
+	if !ok || schema["status"] != "ready" {
+		t.Fatalf("history schema health = %+v, want ready", database["schema"])
+	}
+	connection, ok := database["connection_info"].(map[string]interface{})
+	if !ok || connection["id"] != "history" || connection["type"] != "sqlite" || connection["status"] != "connected" {
+		t.Fatalf("connection info = %+v", database["connection_info"])
+	}
+	if database["driver"] != "sqlite" || database["location"] != filepath.Join(layout.State, "history.db") {
+		t.Fatalf("history database identity = %+v", database)
+	}
+
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response = d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("health after close failed: %+v", response.Error)
+	}
+	encoded, err = json.Marshal(response.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	database, ok = data["history_database"].(map[string]interface{})
+	if !ok || database["status"] != "disconnected" {
+		t.Fatalf("closed history database health = %+v, want disconnected", data["history_database"])
+	}
+	schema, ok = database["schema"].(map[string]interface{})
+	if !ok || schema["status"] != "unknown" {
+		t.Fatalf("closed history schema health = %+v, want unknown", database["schema"])
+	}
+	if data["status"] != "degraded" {
+		t.Fatalf("health status after close = %q, want degraded", data["status"])
+	}
+}
+
+type schemaHealthRepository struct {
+	scheduler.HistoryRepository
+	missing []string
+}
+
+func (r *schemaHealthRepository) Ping(context.Context) error { return nil }
+
+func (r *schemaHealthRepository) MissingTables(context.Context) ([]string, error) {
+	return append([]string(nil), r.missing...), nil
+}
+
+func TestHealthReportsMissingHistorySchema(t *testing.T) {
+	layout := testLayout(t.TempDir())
+	d := New(layout)
+	d.mu.Lock()
+	d.historyRepo = &schemaHealthRepository{missing: []string{"history_tasks"}}
+	d.historyDatabase = historyDatabaseInfo(layout, config.DatabaseConfig{})
+	d.mu.Unlock()
+
+	response := d.Handle(context.Background(), requestForMethod(t, "health"))
+	if !response.OK {
+		t.Fatalf("health failed: %+v", response.Error)
+	}
+	var data map[string]interface{}
+	encoded, err := json.Marshal(response.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	database, ok := data["history_database"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("history database health = %+v", data["history_database"])
+	}
+	schema, ok := database["schema"].(map[string]interface{})
+	if !ok || schema["status"] != "missing" {
+		t.Fatalf("history schema health = %+v, want missing", database["schema"])
+	}
+	if data["status"] != "degraded" {
+		t.Fatalf("health status = %q, want degraded", data["status"])
+	}
+}
+
+func TestHistoryDatabaseInfoRedactsDSN(t *testing.T) {
+	layout := testLayout(t.TempDir())
+	info := historyDatabaseInfo(layout, config.DatabaseConfig{
+		Driver: "postgres",
+		DSN:    "postgres://mango:super-secret@example.invalid/history",
+	})
+	if info.Driver != "postgres" || info.Location != "configured dsn" {
+		t.Fatalf("database info = %+v", info)
+	}
+	if strings.Contains(info.Location, "super-secret") {
+		t.Fatalf("database info leaked DSN secret: %+v", info)
+	}
+
+	info = historyDatabaseInfo(layout, config.DatabaseConfig{Driver: "mysql", DSNEnv: "MANGO_HISTORY_DSN"})
+	if info.Location != "dsn from MANGO_HISTORY_DSN" {
+		t.Fatalf("database env info = %+v", info)
 	}
 }
 
@@ -1756,7 +1892,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
-		State: filepath.Join(root, "state"), Registry: filepath.Join(root, "projects.json"),
+		State: filepath.Join(root, "state"), ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
