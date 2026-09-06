@@ -1,12 +1,14 @@
 package startup
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 type Status struct {
@@ -80,7 +82,7 @@ func installWindows(executable, mangoHome string) error {
 	}
 	taskPath := taskFile.Name()
 	defer os.Remove(taskPath)
-	if _, err := taskFile.WriteString(windowsTaskXML(wrapperPath)); err != nil {
+	if _, err := taskFile.Write(windowsTaskXMLBytes(wrapperPath)); err != nil {
 		_ = taskFile.Close()
 		return err
 	}
@@ -291,7 +293,7 @@ func windowsWrapper(executable, mangoHome string) string {
 
 func windowsTaskXML(wrapperPath string) string {
 	lines := []string{
-		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+		"<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
 		"<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">",
 		"  <RegistrationInfo><Description>mango service manager</Description></RegistrationInfo>",
 		"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
@@ -308,6 +310,17 @@ func windowsTaskXML(wrapperPath string) string {
 		"</Task>",
 	}
 	return strings.Join(lines, "\r\n") + "\r\n"
+}
+
+func windowsTaskXMLBytes(wrapperPath string) []byte {
+	text := utf16.Encode([]rune(windowsTaskXML(wrapperPath)))
+	data := make([]byte, 2+len(text)*2)
+	data[0] = 0xff
+	data[1] = 0xfe
+	for i, value := range text {
+		binary.LittleEndian.PutUint16(data[2+i*2:], value)
+	}
+	return data
 }
 
 func batchEscape(value string) string {
