@@ -303,6 +303,8 @@ mango workflow ls
 mango workflow run PROJECT/WORKFLOW
 
 mango schedule ls
+mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
+mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 mango schedule history
 
 mango history
@@ -997,6 +999,8 @@ workflow runs and their task nodes.
 
 ```text
 mango schedule ls [--json]
+mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
+mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
 mango schedule history [--tail N] [--trigger NAME]
                        [--target-type task|workflow] [--target PROJECT/NAME]
                        [--attempts] [--json]
@@ -1005,6 +1009,8 @@ mango schedule history [--tail N] [--trigger NAME]
 | Command / flag | Description |
 | --- | --- |
 | `schedule ls` | Lists schedule, trigger type, target, cron expression, time zone, lifetime runs, status, last run, next run, and duration. |
+| `schedule enable TARGET ...` | Enables future cron triggers for one or more schedules. A `PROJECT` target enables every schedule in that project. |
+| `schedule disable TARGET ...` | Disables future cron triggers for one or more schedules. A `PROJECT` target disables every schedule in that project. Existing task/workflow runs are not interrupted. |
 | `schedule history` | Lists the shared history view filtered to `trigger.type=schedule`. |
 | `--tail N` | Maximum history records; default `100`; `0` returns all retained records. Must be non-negative. |
 | `--trigger NAME` / `--target-type` / `--target` | Applies the shared trigger or execution-target filters; schedule history always keeps the schedule trigger-type filter. |
@@ -1014,9 +1020,18 @@ Examples:
 
 ```sh
 mango schedule ls
+mango schedule disable demo/nightly-release
+mango schedule enable demo/nightly-release
+mango schedule disable demo
 mango schedule history --tail 20
 mango schedule history --attempts --json
 ```
+
+Schedule enable/disable state is stored in `MANGO_HOME/state/schedules.json`
+and survives daemon restarts. A project apply keeps state for unchanged
+`PROJECT/SCHEDULE` keys, enables new schedules by default, and removes state
+for schedules removed from the configuration. Disabled schedules remain in
+`schedule ls` with `STATUS=disabled` and no `NEXT_RUN`.
 
 ### `mango history`
 
@@ -1198,7 +1213,8 @@ MANGO_HOME/
 │   └── mango.sock              # Unix; Windows uses a named pipe
 ├── logs/
 └── state/
-    └── history.db
+    ├── history.db
+    └── schedules.json       # persisted schedule enable/disable state
 ```
 
 The optional `daemon.yaml` supports execution-history retention and database

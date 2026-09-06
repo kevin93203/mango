@@ -85,6 +85,7 @@ const (
 	StatusFailed    = "failed"
 	StatusSkipped   = "skipped"
 	StatusCancelled = "cancelled"
+	StatusDisabled  = "disabled"
 )
 
 // ScheduleSnapshot combines a configured schedule with its current execution
@@ -93,6 +94,7 @@ type ScheduleSnapshot struct {
 	Schedule        config.EffectiveSchedule
 	Runs            uint64
 	Status          string
+	Disabled        bool
 	LastRun         *time.Time
 	NextRun         *time.Time
 	DurationSeconds *float64
@@ -105,6 +107,7 @@ type Scheduler struct {
 	cron            *cron.Cron
 	entries         map[string]cron.EntryID
 	schedules       map[string]config.EffectiveSchedule
+	disabled        map[string]bool
 	running         map[string]int
 	active          map[string]map[uint64]time.Time
 	nextExecutionID uint64
@@ -123,6 +126,7 @@ func New(runner Runner) *Scheduler {
 		cron:         cron.New(cron.WithParser(parser)),
 		entries:      map[string]cron.EntryID{},
 		schedules:    map[string]config.EffectiveSchedule{},
+		disabled:     map[string]bool{},
 		running:      map[string]int{},
 		active:       map[string]map[uint64]time.Time{},
 		historyLimit: defaultHistoryLimit,
@@ -298,24 +302,96 @@ func (s *Scheduler) Apply(schedules []config.EffectiveSchedule) error {
 		s.cron.Remove(id)
 	}
 	s.entries = map[string]cron.EntryID{}
-	s.schedules = map[string]config.EffectiveSchedule{}
+	configured := make(map[string]config.EffectiveSchedule, len(schedules))
+	disabled := make(map[string]bool)
 	for _, schedule := range schedules {
 		key := schedule.Project + "/" + schedule.Name
-		loc := schedule.Timezone
-		if loc == nil {
-			loc = time.Local
+		configured[key] = schedule
+		if s.disabled[key] {
+			disabled[key] = true
+			continue
 		}
-		spec := "CRON_TZ=" + loc.String() + " " + schedule.Cron
-		entry, err := s.cron.AddFunc(spec, func() {
-			s.run(schedule)
-		})
-		if err != nil {
-			return fmt.Errorf("schedule %s: %w", key, err)
+		if _, err := s.addEntryLocked(key, schedule); err != nil {
+			return err
 		}
-		s.entries[key] = entry
-		s.schedules[key] = schedule
 	}
+	s.schedules = configured
+	s.disabled = disabled
 	return nil
+}
+
+// SetDisabled replaces the scheduler's disabled schedule set. It is used at
+// daemon startup to apply persisted schedule state before configuration is
+// loaded.
+func (s *Scheduler) SetDisabled(keys []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disabled = make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if key != "" {
+			s.disabled[key] = true
+		}
+	}
+	for key, id := range s.entries {
+		if s.disabled[key] {
+			s.cron.Remove(id)
+			delete(s.entries, key)
+		}
+	}
+}
+
+// Disable prevents future cron activations for key. Any execution already in
+// progress is left untouched.
+func (s *Scheduler) Disable(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.schedules[key]; !ok {
+		return fmt.Errorf("schedule %s not found", key)
+	}
+	s.disabled[key] = true
+	s.removeEntryLocked(key)
+	return nil
+}
+
+// Enable restores future cron activations for key.
+func (s *Scheduler) Enable(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	schedule, ok := s.schedules[key]
+	if !ok {
+		return fmt.Errorf("schedule %s not found", key)
+	}
+	if !s.disabled[key] {
+		return nil
+	}
+	if _, err := s.addEntryLocked(key, schedule); err != nil {
+		return err
+	}
+	delete(s.disabled, key)
+	return nil
+}
+
+func (s *Scheduler) addEntryLocked(key string, schedule config.EffectiveSchedule) (cron.EntryID, error) {
+	loc := schedule.Timezone
+	if loc == nil {
+		loc = time.Local
+	}
+	spec := "CRON_TZ=" + loc.String() + " " + schedule.Cron
+	entry, err := s.cron.AddFunc(spec, func() {
+		s.run(schedule)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("schedule %s: %w", key, err)
+	}
+	s.entries[key] = entry
+	return entry, nil
+}
+
+func (s *Scheduler) removeEntryLocked(key string) {
+	if id, ok := s.entries[key]; ok {
+		s.cron.Remove(id)
+		delete(s.entries, key)
+	}
 }
 
 func (s *Scheduler) RunNow(ctx context.Context, key string) error {
@@ -531,6 +607,7 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 	s.mu.Lock()
 	schedules := make(map[string]config.EffectiveSchedule, len(s.schedules))
 	entryIDs := make(map[string]cron.EntryID, len(s.entries))
+	disabled := make(map[string]bool, len(s.disabled))
 	active := make(map[string][]time.Time, len(s.active))
 	started := s.started
 	repo := s.historyRepo
@@ -541,6 +618,9 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 	}
 	for key, id := range s.entries {
 		entryIDs[key] = id
+	}
+	for key, value := range s.disabled {
+		disabled[key] = value
 	}
 	for key, executions := range s.active {
 		for _, started := range executions {
@@ -566,15 +646,17 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 	result := make([]ScheduleSnapshot, 0, len(keys))
 	for _, key := range keys {
 		schedule := schedules[key]
-		snapshot := ScheduleSnapshot{Schedule: schedule, Runs: counters[counterKey("trigger:"+TriggerSchedule, schedule.Project, schedule.Name)], Status: StatusIdle}
+		snapshot := ScheduleSnapshot{Schedule: schedule, Runs: counters[counterKey("trigger:"+TriggerSchedule, schedule.Project, schedule.Name)], Status: StatusIdle, Disabled: disabled[key]}
 
-		entry := s.cron.Entry(entryIDs[key])
-		next := entry.Next
-		if next.IsZero() && started && entry.Schedule != nil {
-			next = entry.Schedule.Next(time.Now())
-		}
-		if !next.IsZero() {
-			snapshot.NextRun = timePtr(next)
+		if !snapshot.Disabled {
+			entry := s.cron.Entry(entryIDs[key])
+			next := entry.Next
+			if next.IsZero() && started && entry.Schedule != nil {
+				next = entry.Schedule.Next(time.Now())
+			}
+			if !next.IsZero() {
+				snapshot.NextRun = timePtr(next)
+			}
 		}
 
 		if starts := active[key]; len(starts) > 0 {
@@ -596,6 +678,9 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 			} else {
 				snapshot.Status = StatusSuccess
 			}
+		}
+		if snapshot.Disabled {
+			snapshot.Status = StatusDisabled
 		}
 		result = append(result, snapshot)
 	}

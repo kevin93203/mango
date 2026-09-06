@@ -126,7 +126,7 @@ func usage() {
 		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
 		"  logs clear TARGET",
 		"  monitor",
-		"  schedule ls|history",
+		"  schedule ls|enable|disable|history",
 		"  workflow ls|run PROJECT/WORKFLOW",
 		"  task ls|run PROJECT/TASK",
 		"  history clear",
@@ -1379,7 +1379,7 @@ func scheduleCommand(args []string) error {
 
 func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
 	if len(args) == 0 {
-		return errors.New("schedule requires ls or history")
+		return errors.New("schedule requires ls, enable, disable, or history")
 	}
 	switch args[0] {
 	case "ls":
@@ -1399,11 +1399,54 @@ func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (
 		}
 		printScheduleTable(schedules)
 		return nil
+	case "enable", "disable":
+		if len(args) < 2 {
+			return fmt.Errorf("schedule %s requires at least one PROJECT or PROJECT/SCHEDULE", args[0])
+		}
+		return scheduleOperationCommandWithCaller(args[0], args[1:], caller)
 	case "history":
 		return historyCommandWithCaller(args[1:], caller, true)
 	default:
 		return fmt.Errorf("unknown schedule command %q", args[0])
 	}
+}
+
+func scheduleOperationCommandWithCaller(action string, targets []string, caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("schedule.bulk", struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}{Action: action, Targets: targets})
+	if err != nil {
+		return err
+	}
+	var results []api.ScheduleOperationResult
+	if err := decodeData(response.Data, &results); err != nil {
+		return fmt.Errorf("schedule %s: decode response: %w", action, err)
+	}
+	if jsonOutput {
+		if err := cliOutput.JSON(results); err != nil {
+			return err
+		}
+	}
+	verb := map[string]string{"enable": "enabled", "disable": "disabled"}[action]
+	var errs []error
+	for _, result := range results {
+		if result.Status == "ok" {
+			if !jsonOutput {
+				cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Schedule %s %s", result.Key, verb)))
+			}
+			continue
+		}
+		message := result.Error
+		if message == "" {
+			message = "operation failed"
+		}
+		errs = append(errs, fmt.Errorf("%s %s: %s", action, result.Key, message))
+		if !jsonOutput {
+			cliOutput.Errorf("Schedule %s failed to %s: %s", result.Key, verb, message)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func workflowCommand(args []string) error { return workflowCommandWithCaller(args, call) }

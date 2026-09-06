@@ -240,6 +240,67 @@ func TestListSnapshotsReportsIdleAndNextRun(t *testing.T) {
 	<-stopped.Done()
 }
 
+func TestDisableAndEnableScheduleControlsFutureTriggers(t *testing.T) {
+	s := New(nil)
+	schedule := config.EffectiveSchedule{Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC}
+	if err := s.Apply([]config.EffectiveSchedule{schedule}); err != nil {
+		t.Fatal(err)
+	}
+	s.Start()
+
+	if err := s.Disable("demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disabled) != 1 || !disabled[0].Disabled || disabled[0].Status != StatusDisabled || disabled[0].NextRun != nil {
+		t.Fatalf("disabled snapshot = %+v, want disabled without next run", disabled)
+	}
+
+	if err := s.Enable("demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := s.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enabled) != 1 || enabled[0].Disabled || enabled[0].NextRun == nil {
+		t.Fatalf("enabled snapshot = %+v, want enabled with next run", enabled)
+	}
+	stopped := s.Stop()
+	<-stopped.Done()
+}
+
+func TestDisableScheduleDoesNotCancelRunningExecution(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
+		close(started)
+		<-release
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("schedule did not start")
+	}
+	if err := s.Disable("demo/job"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	s.Wait()
+}
+
 func TestListSnapshotsReportsRunningAndCompletedOutcome(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
