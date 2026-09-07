@@ -92,6 +92,8 @@ func main() {
 		commandErr = taskCommand(args[1:])
 	case "history":
 		commandErr = historyCommand(args[1:])
+	case "execution":
+		commandErr = executionCommand(args[1:])
 	case "startup":
 		commandErr = startupCommand(layout, args[1:])
 	case "doctor":
@@ -132,6 +134,10 @@ func usage() {
 		"  task ls|run PROJECT/TASK",
 		"  history clear",
 		"  history [--tail N] [--trigger-type TYPE] [--trigger NAME] [--target-type TYPE] [--target PROJECT/NAME] [--attempts]",
+		"  execution ls [--status STATUS] [--trigger-type TYPE] [--trigger NAME] [--project PROJECT] [--target-type task|workflow] [--target PROJECT/NAME] [--limit N]",
+		"  execution get|cancel|retry RUN_ID",
+		"  execution watch RUN_ID [--timeout 45s]",
+		"  execution logs RUN_ID [--stream stdout|stderr|all] [--tail N]",
 		"  startup install|uninstall|status",
 		"  doctor",
 	}, "\n"))
@@ -897,7 +903,7 @@ func normalizeInterspersedFlagArgs(args []string) []string {
 func isValueFlag(arg string) bool {
 	name := strings.SplitN(arg, "=", 2)[0]
 	switch name {
-	case "--tail", "-tail", "--trigger-type", "--trigger", "--target-type", "--target":
+	case "--tail", "-tail", "--stream", "--timeout", "--trigger-type", "--trigger", "--target-type", "--target", "--status", "--project", "--limit":
 		return true
 	default:
 		return false
@@ -1489,7 +1495,7 @@ func workflowCommandWithCaller(args []string, caller func(string, interface{}) (
 		if err := decodeData(response.Data, &result); err != nil {
 			return err
 		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s started", result["key"])))
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s queued (run_id=%s)", result["key"], result["run_id"])))
 		return nil
 	default:
 		return fmt.Errorf("unknown workflow command %q", args[0])
@@ -1533,11 +1539,216 @@ func taskCommandWithCaller(args []string, caller func(string, interface{}) (ipc.
 		if err := decodeData(response.Data, &result); err != nil {
 			return err
 		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s started", result["key"])))
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s queued (run_id=%s)", result["key"], result["run_id"])))
 		return nil
 	default:
 		return fmt.Errorf("unknown task command %q", args[0])
 	}
+}
+
+func executionCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("execution requires ls, get, watch, cancel, retry, or logs")
+	}
+	if args[0] == "ls" {
+		return executionListCommand(args[1:])
+	}
+	if args[0] == "logs" {
+		return executionLogsCommand(args[1:])
+	}
+	if args[0] == "watch" {
+		return executionWatchCommand(args[1:])
+	}
+	if len(args) != 2 {
+		return fmt.Errorf("execution %s requires RUN_ID", args[0])
+	}
+	method := "execution." + args[0]
+	if args[0] != "get" && args[0] != "watch" && args[0] != "cancel" && args[0] != "retry" {
+		return fmt.Errorf("unknown execution command %q", args[0])
+	}
+	response, err := call(method, struct {
+		RunID string `json:"run_id"`
+	}{RunID: args[1]})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var info api.ExecutionInfo
+	if err := decodeData(response.Data, &info); err != nil {
+		return err
+	}
+	verb := map[string]string{"get": "Execution", "watch": "Execution", "cancel": "Cancellation requested for execution", "retry": "Retry started for execution"}[args[0]]
+	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, verb), info.RunID, info.Status)
+	return nil
+}
+
+type executionListCLIParams struct {
+	Status      string `json:"status,omitempty"`
+	TriggerType string `json:"trigger_type,omitempty"`
+	Trigger     string `json:"trigger,omitempty"`
+	Project     string `json:"project,omitempty"`
+	TargetType  string `json:"target_type,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+}
+
+func executionListCommand(args []string) error {
+	return executionListCommandWithCaller(args, call)
+}
+
+func executionListCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
+	flags := newFlagSet("execution ls")
+	status := flags.String("status", "", "filter by status: queued, running, success, failed, cancelled, skipped, or interrupted")
+	triggerType := flags.String("trigger-type", "", "filter by trigger type: schedule, webhook, or manual")
+	trigger := flags.String("trigger", "", "filter by trigger name")
+	project := flags.String("project", "", "filter by project")
+	targetType := flags.String("target-type", "", "filter by target type: task or workflow")
+	target := flags.String("target", "", "filter by PROJECT/NAME or target name")
+	limit := flags.Int("limit", 0, "maximum number of executions; 0 means all")
+	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+		return err
+	}
+	if len(flags.Args()) != 0 {
+		return errors.New("execution ls does not accept positional arguments")
+	}
+	if *limit < 0 {
+		return errors.New("execution ls limit must be non-negative")
+	}
+	response, err := caller("execution.ls", executionListCLIParams{
+		Status: *status, TriggerType: *triggerType, Trigger: *trigger, Project: *project,
+		TargetType: *targetType, Target: *target, Limit: *limit,
+	})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var items []api.ExecutionInfo
+	if err := decodeData(response.Data, &items); err != nil {
+		return err
+	}
+	printExecutionTable(items)
+	return nil
+}
+
+func printExecutionTable(items []api.ExecutionInfo) {
+	if len(items) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No executions found."))
+		return
+	}
+	rows := make([][]cliui.Cell, 0, len(items))
+	for _, item := range items {
+		target := item.Target
+		if target == "" {
+			target = item.Name
+		}
+		if item.Project != "" {
+			target = item.Project + "/" + target
+		}
+		if target == "" {
+			target = "-"
+		}
+		rows = append(rows, []cliui.Cell{
+			{Text: historyValue(item.RunID)},
+			{Text: historyValue(item.TargetType)},
+			{Text: target},
+			{Text: historyValue(item.Status), Style: cliui.StateStyle(item.Status)},
+			{Text: formatOptionalTime(item.StartedAt)},
+			{Text: formatOptionalTime(item.FinishedAt)},
+			{Text: fmt.Sprintf("%d", item.ExitCode), Align: cliui.AlignRight},
+		})
+	}
+	cliOutput.Table([]string{"RUN_ID", "TARGET_TYPE", "TARGET", "STATUS", "STARTED", "FINISHED", "EXIT"}, rows)
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "-"
+	}
+	return formatTime(*value)
+}
+
+const (
+	executionWatchDefaultTimeout = 30 * time.Second
+	executionWatchMaxTimeout     = 5 * time.Minute
+	executionWatchGracePeriod    = 5 * time.Second
+)
+
+func executionWatchCommand(args []string) error {
+	flags := newFlagSet("execution watch")
+	timeout := flags.Duration("timeout", executionWatchDefaultTimeout, "maximum watch wait, for example 45s or 2m")
+	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+		return err
+	}
+	if len(flags.Args()) != 1 {
+		return errors.New("execution watch requires exactly one RUN_ID")
+	}
+	if *timeout <= 0 || *timeout > executionWatchMaxTimeout {
+		return fmt.Errorf("execution watch timeout must be greater than 0 and no more than %s", executionWatchMaxTimeout)
+	}
+	response, err := callWithTimeout("execution.watch", struct {
+		RunID     string `json:"run_id"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}{RunID: flags.Args()[0], TimeoutMS: int((*timeout) / time.Millisecond)}, *timeout+executionWatchGracePeriod)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var info api.ExecutionInfo
+	if err := decodeData(response.Data, &info); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, "Execution"), info.RunID, info.Status)
+	return nil
+}
+
+func executionLogsCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("execution logs requires RUN_ID")
+	}
+	flags := newFlagSet("execution logs")
+	stream := flags.String("stream", "all", "stdout, stderr, or all")
+	tail := flags.Int("tail", 0, "number of lines")
+	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+		return err
+	}
+	if len(flags.Args()) != 1 {
+		return errors.New("execution logs requires exactly one RUN_ID")
+	}
+	if *tail < 0 {
+		return errors.New("execution logs tail must be non-negative")
+	}
+	response, err := call("execution.logs", struct {
+		RunID  string `json:"run_id"`
+		Stream string `json:"stream,omitempty"`
+		Tail   int    `json:"tail,omitempty"`
+	}{RunID: flags.Args()[0], Stream: *stream, Tail: *tail})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var logs api.ExecutionLogs
+	if err := decodeData(response.Data, &logs); err != nil {
+		return err
+	}
+	for _, entry := range logs.Logs {
+		label := entry.Stream
+		if entry.Node != "" {
+			label = entry.Node + " " + label
+		}
+		cliOutput.Printf("%s\n%s", cliOutput.Text(cliui.StyleHeader, "["+label+"]"), entry.Data)
+		if entry.Data != "" && !strings.HasSuffix(entry.Data, "\n") {
+			cliOutput.Println("")
+		}
+	}
+	return nil
 }
 
 type historyCLIParams struct {

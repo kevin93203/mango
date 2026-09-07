@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -54,17 +55,19 @@ type Daemon struct {
 	historyRepo scheduler.HistoryRepository
 	workflow    *workflow.Executor
 
-	mu                    sync.RWMutex
-	registry              registry.File
-	projects              map[string]*projectRuntime
-	configErrors          map[string]string
-	historyDatabase       api.HistoryDatabaseHealth
-	disabledSchedules     map[string]bool
-	scheduleStateLoaded   bool
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	shutdownDone          chan struct{}
-	healthExecutorFactory func(config.EffectiveService) health.Executor
+	mu                      sync.RWMutex
+	registry                registry.File
+	projects                map[string]*projectRuntime
+	configErrors            map[string]string
+	historyDatabase         api.HistoryDatabaseHealth
+	disabledSchedules       map[string]bool
+	executionCancels        map[string]context.CancelFunc
+	configurationGeneration uint64
+	scheduleStateLoaded     bool
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	shutdownDone            chan struct{}
+	healthExecutorFactory   func(config.EffectiveService) health.Executor
 }
 
 type projectRuntime struct {
@@ -135,9 +138,30 @@ type historyRequest struct {
 }
 
 type executionTargetRequest struct {
-	Key     string `json:"key"`
-	Project string `json:"project"`
-	Name    string `json:"name"`
+	Key                     string `json:"key"`
+	Project                 string `json:"project"`
+	Name                    string `json:"name"`
+	IdempotencyKey          string `json:"idempotency_key"`
+	ConfigurationGeneration uint64 `json:"configuration_generation"`
+}
+
+type executionRequest struct {
+	RunID     string `json:"run_id"`
+	TimeoutMS int    `json:"timeout_ms"`
+	Stream    string `json:"stream"`
+	Offset    int64  `json:"offset"`
+	MaxBytes  int    `json:"max_bytes"`
+	Tail      int    `json:"tail"`
+}
+
+type executionListRequest struct {
+	Status      string `json:"status"`
+	TriggerType string `json:"trigger_type"`
+	Trigger     string `json:"trigger"`
+	Project     string `json:"project"`
+	TargetType  string `json:"target_type"`
+	Target      string `json:"target"`
+	Limit       int    `json:"limit"`
 }
 
 type serviceBulkRequest struct {
@@ -151,16 +175,29 @@ type bulkProjectSelection struct {
 
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
-		layout:            layout,
-		logs:              logging.NewManager(layout.Logs),
-		metrics:           metrics.NewCollector(),
-		projects:          map[string]*projectRuntime{},
-		configErrors:      map[string]string{},
-		disabledSchedules: map[string]bool{},
+		layout:                  layout,
+		logs:                    logging.NewManager(layout.Logs),
+		metrics:                 metrics.NewCollector(),
+		projects:                map[string]*projectRuntime{},
+		configErrors:            map[string]string{},
+		disabledSchedules:       map[string]bool{},
+		executionCancels:        map[string]context.CancelFunc{},
+		configurationGeneration: 1,
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
-	d.workflow = workflow.New(d.runTaskAttempt, d.scheduler.RecordExecution)
+	d.workflow = workflow.New(d.runTaskAttempt, d.recordExecution)
 	return d
+}
+
+func (d *Daemon) recordExecution(record scheduler.Record) {
+	d.scheduler.RecordExecution(record)
+	d.mu.Lock()
+	cancel := d.executionCancels[record.RunID]
+	delete(d.executionCancels, record.RunID)
+	d.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // SetHealthExecutorFactory injects probe execution for tests or embedders.
@@ -237,6 +274,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.historyRepo = historyRepo
 	d.historyDatabase = databaseInfo
 	d.mu.Unlock()
+	if err := d.recoverActiveExecutions(); err != nil {
+		return fmt.Errorf("recover active executions: %w", err)
+	}
 	if err := d.ensureScheduleStateLoaded(); err != nil {
 		return err
 	}
@@ -669,6 +709,9 @@ func (d *Daemon) applyProject(name, path string) error {
 	if err != nil {
 		return err
 	}
+	d.mu.Lock()
+	d.configurationGeneration++
+	d.mu.Unlock()
 	if err := d.pruneScheduleStateForProject(name, schedules); err != nil {
 		return err
 	}
@@ -927,15 +970,23 @@ func topologicalSpecs(specs []config.EffectiveService) []config.EffectiveService
 func (d *Daemon) allSchedulesWith(schedules []config.EffectiveSchedule, projectName string) []config.EffectiveSchedule {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	withGeneration := func(items []config.EffectiveSchedule) []config.EffectiveSchedule {
+		result := make([]config.EffectiveSchedule, 0, len(items))
+		for _, item := range items {
+			item.ConfigurationGeneration = d.configurationGeneration
+			result = append(result, item)
+		}
+		return result
+	}
 	result := make([]config.EffectiveSchedule, 0)
 	for name, project := range d.projects {
 		if name == projectName {
-			result = append(result, schedules...)
+			result = append(result, withGeneration(schedules)...)
 			continue
 		}
 		items, err := project.file.SchedulesEffective(name)
 		if err == nil {
-			result = append(result, items...)
+			result = append(result, withGeneration(items)...)
 		}
 	}
 	return result
@@ -2362,32 +2413,73 @@ func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSched
 	if schedule.TargetType == "" && schedule.Action == "run" {
 		return d.runLegacyScheduleTask(ctx, schedule)
 	}
+	trigger := scheduler.ScheduleTrigger(schedule.Name)
+	trigger.EventID = schedule.OccurrenceID
 	switch schedule.TargetType {
 	case "workflow":
-		return d.workflow.Run(ctx, schedule.Project, schedule.Target, scheduler.ScheduleTrigger(schedule.Name))
+		if schedule.RunID != "" {
+			return d.workflow.RunWithID(ctx, schedule.Project, schedule.Target, trigger, schedule.RunID)
+		}
+		return d.workflow.Run(ctx, schedule.Project, schedule.Target, trigger)
 	case "task":
-		return d.workflow.RunTask(ctx, schedule.Project, schedule.Target, scheduler.ScheduleTrigger(schedule.Name))
+		if schedule.RunID != "" {
+			return d.workflow.RunTaskWithID(ctx, schedule.Project, schedule.Target, trigger, schedule.RunID)
+		}
+		return d.workflow.RunTask(ctx, schedule.Project, schedule.Target, trigger)
 	default:
 		return scheduler.ExecutionResult{ExitCode: 1, Err: fmt.Errorf("schedule %s has invalid target type %q", schedule.Name, schedule.TargetType)}
 	}
 }
 
 func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.EffectiveSchedule) scheduler.ExecutionResult {
-	stdout, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stdout", 100<<20, 10)
+	legacyLogName := scheduleLogName(schedule.Name)
+	stdout, stdoutPath, err := d.logs.Open(schedule.Project, legacyLogName, "stdout", 100<<20, 10)
 	if err != nil {
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
-	stderr, _, err := d.logs.Open(schedule.Project, scheduleLogName(schedule.Name), "stderr", 100<<20, 10)
+	stderr, stderrPath, err := d.logs.Open(schedule.Project, legacyLogName, "stderr", 100<<20, 10)
 	if err != nil {
 		_ = stdout.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
-	capture := logging.NewCaptureWriter(stderr, 64<<10)
-	handle, err := process.Start(process.Spec{Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir, Env: schedule.Env, Stdout: stdout, Stderr: capture})
+	executionStdout, executionStdoutPath := stdout, stdoutPath
+	executionStderr, executionStderrPath := stderr, stderrPath
+	if schedule.RunID != "" {
+		executionName := "execution-schedule-" + schedule.RunID + "-" + schedule.Name
+		executionStdout, executionStdoutPath, err = d.logs.Open(schedule.Project, executionName, "stdout", 100<<20, 10)
+		if err != nil {
+			_ = stdout.Close()
+			_ = stderr.Close()
+			return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+		}
+		executionStderr, executionStderrPath, err = d.logs.Open(schedule.Project, executionName, "stderr", 100<<20, 10)
+		if err != nil {
+			_ = stdout.Close()
+			_ = stderr.Close()
+			_ = executionStdout.Close()
+			return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+		}
+	}
+	stdoutWriter := io.Writer(stdout)
+	stderrWriter := io.Writer(stderr)
+	if executionStdout != stdout {
+		stdoutWriter = io.MultiWriter(stdout, executionStdout)
+	}
+	if executionStderr != stderr {
+		stderrWriter = io.MultiWriter(stderr, executionStderr)
+	}
+	capture := logging.NewCaptureWriter(stderrWriter, 64<<10)
+	handle, err := process.Start(process.Spec{Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir, Env: schedule.Env, Stdout: stdoutWriter, Stderr: capture})
 	if err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+		if executionStdout != stdout {
+			_ = executionStdout.Close()
+		}
+		if executionStderr != stderr {
+			_ = executionStderr.Close()
+		}
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
 	var timeout <-chan time.Time
 	var timer *time.Timer
@@ -2412,10 +2504,16 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 	result := handle.Wait()
 	_ = stdout.Close()
 	_ = stderr.Close()
-	if timedOut {
-		return scheduler.ExecutionResult{ExitCode: 124, Err: fmt.Errorf("schedule timed out after %s", schedule.Timeout), Stderr: capture.String()}
+	if executionStdout != stdout {
+		_ = executionStdout.Close()
 	}
-	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
+	if executionStderr != stderr {
+		_ = executionStderr.Close()
+	}
+	if timedOut {
+		return scheduler.ExecutionResult{ExitCode: 124, Err: fmt.Errorf("schedule timed out after %s", schedule.Timeout), Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
+	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 }
 
 func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, invocation workflow.Invocation) scheduler.ExecutionResult {
@@ -2429,15 +2527,33 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 		_ = stdout.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
-	capture := logging.NewCaptureWriter(stderr, 64<<10)
-	handle, err := process.Start(process.Spec{
-		Command: task.Command, Args: task.Args, WorkingDir: task.WorkingDir,
-		Env: task.Env, Stdout: stdout, Stderr: capture,
-	})
+	executionLogName := executionTaskLogName(invocation, task.Name)
+	executionStdout, executionStdoutPath, err := d.logs.Open(task.Project, executionLogName, "stdout", 100<<20, 10)
 	if err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+	}
+	executionStderr, executionStderrPath, err := d.logs.Open(task.Project, executionLogName, "stderr", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		_ = executionStdout.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
+	}
+	stdoutWriter := io.MultiWriter(stdout, executionStdout)
+	stderrWriter := io.MultiWriter(stderr, executionStderr)
+	capture := logging.NewCaptureWriter(stderrWriter, 64<<10)
+	handle, err := process.Start(process.Spec{
+		Command: task.Command, Args: task.Args, WorkingDir: task.WorkingDir,
+		Env: task.Env, Stdout: stdoutWriter, Stderr: capture,
+	})
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		_ = executionStdout.Close()
+		_ = executionStderr.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
 	var timeout <-chan time.Time
 	var timer *time.Timer
@@ -2462,14 +2578,17 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 	result := handle.Wait()
 	_ = stdout.Close()
 	_ = stderr.Close()
+	_ = executionStdout.Close()
+	_ = executionStderr.Close()
 	if timedOut {
 		return scheduler.ExecutionResult{
-			ExitCode: 124,
-			Err:      fmt.Errorf("task timed out after %s", task.Timeout),
-			Stderr:   capture.String(),
+			ExitCode:   124,
+			Err:        fmt.Errorf("task timed out after %s", task.Timeout),
+			Stderr:     capture.String(),
+			StdoutPath: executionStdoutPath, StderrPath: executionStderrPath,
 		}
 	}
-	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String()}
+	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 }
 
 func taskLogName(invocation workflow.Invocation, taskName string) string {
@@ -2477,6 +2596,17 @@ func taskLogName(invocation workflow.Invocation, taskName string) string {
 		return "workflow-" + invocation.Workflow + "-" + invocation.Node
 	}
 	return "task-" + taskName
+}
+
+func executionTaskLogName(invocation workflow.Invocation, taskName string) string {
+	if invocation.ParentRunID == "" {
+		return taskLogName(invocation, taskName)
+	}
+	name := invocation.Node
+	if name == "" {
+		name = taskName
+	}
+	return "execution-" + invocation.ParentRunID + "-" + name
 }
 
 func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
@@ -2743,10 +2873,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.workflow.RunNowWorkflow(d.executionContext(), project, name, scheduler.ManualTrigger()); err != nil {
+		execution, _, err := d.beginManualExecution(project, name, "workflow", p)
+		if err != nil {
 			return failure(request, "WORKFLOW_RUN_FAILED", err)
 		}
-		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
+		return success(request, executionResponse(execution, project+"/"+name))
 	case "task.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
@@ -2773,10 +2904,119 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.workflow.RunNowTask(d.executionContext(), project, name, scheduler.ManualTrigger()); err != nil {
+		execution, _, err := d.beginManualExecution(project, name, "task", p)
+		if err != nil {
 			return failure(request, "TASK_RUN_FAILED", err)
 		}
-		return success(request, map[string]string{"key": project + "/" + name, "status": "started"})
+		return success(request, executionResponse(execution, project+"/"+name))
+	case "execution.ls":
+		var p executionListRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.Limit < 0 {
+			return failure(request, "BAD_PARAMS", errors.New("execution list limit must be non-negative"))
+		}
+		if p.Status != "" && !validExecutionStatus(p.Status) {
+			return failure(request, "BAD_PARAMS", fmt.Errorf("unknown execution status %q", p.Status))
+		}
+		if p.TriggerType != "" && !validExecutionTriggerType(p.TriggerType) {
+			return failure(request, "BAD_PARAMS", fmt.Errorf("unknown trigger type %q", p.TriggerType))
+		}
+		if p.TargetType != "" && p.TargetType != "task" && p.TargetType != "workflow" {
+			return failure(request, "BAD_PARAMS", fmt.Errorf("target_type must be task or workflow"))
+		}
+		project, target, err := executionListTarget(p.Project, p.Target)
+		if err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		executions, err := d.scheduler.ListExecutions(d.executionContext(), scheduler.ExecutionQuery{
+			Status: p.Status, TriggerType: p.TriggerType, Trigger: p.Trigger, Project: project,
+			TargetType: p.TargetType, Target: target, Limit: p.Limit,
+		})
+		if err != nil {
+			return failure(request, "EXECUTION_LIST_FAILED", err)
+		}
+		result := make([]api.ExecutionInfo, 0, len(executions))
+		for _, execution := range executions {
+			result = append(result, executionInfo(execution))
+		}
+		return success(request, result)
+	case "execution.get":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		return success(request, executionInfo(execution))
+	case "execution.watch":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.TimeoutMS == 0 {
+			p.TimeoutMS = 30000
+		}
+		execution, err := d.watchExecution(p.RunID, p.TimeoutMS)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		return success(request, executionInfo(execution))
+	case "execution.cancel":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if err := d.cancelExecution(p.RunID); err != nil {
+			return failure(request, "EXECUTION_CANCEL_FAILED", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		return success(request, executionInfo(execution))
+	case "execution.retry":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		execution, err := d.retryExecution(p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_RETRY_FAILED", err)
+		}
+		return success(request, executionInfo(execution))
+	case "execution.logs":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		logs, err := d.readExecutionLogs(d.executionContext(), execution, p)
+		if err != nil {
+			return failure(request, "LOG_READ_FAILED", err)
+		}
+		return success(request, logs)
 	default:
 		return failure(request, "METHOD_NOT_FOUND", fmt.Errorf("unknown method %q", request.Method))
 	}
@@ -2790,6 +3030,365 @@ func (d *Daemon) executionContext() context.Context {
 		return context.Background()
 	}
 	return ctx
+}
+
+func (d *Daemon) recoverActiveExecutions() error {
+	active, err := d.scheduler.ListActiveExecutions(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, execution := range active {
+		record := execution.Record
+		record.Status = scheduler.StatusInterrupted
+		record.Finished = time.Now().UTC()
+		record.ExitCode = 125
+		if record.Error == "" {
+			record.Error = "daemon restarted before execution completed"
+		}
+		if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
+			return fmt.Errorf("mark %s interrupted: %w", record.RunID, err)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) currentConfigurationGeneration() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.configurationGeneration
+}
+
+func (d *Daemon) registerExecutionCancel(runID string, cancel context.CancelFunc) {
+	d.mu.Lock()
+	if d.executionCancels == nil {
+		d.executionCancels = make(map[string]context.CancelFunc)
+	}
+	d.executionCancels[runID] = cancel
+	d.mu.Unlock()
+}
+
+func (d *Daemon) cancelManualExecution(runID string) bool {
+	d.mu.RLock()
+	cancel := d.executionCancels[runID]
+	d.mu.RUnlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+func (d *Daemon) beginManualExecution(project, name, targetType string, request executionTargetRequest) (scheduler.Execution, bool, error) {
+	if targetType == "workflow" {
+		if !d.workflow.HasWorkflow(project + "/" + name) {
+			return scheduler.Execution{}, false, fmt.Errorf("workflow %s/%s not found", project, name)
+		}
+	} else if !d.workflow.HasTask(project + "/" + name) {
+		return scheduler.Execution{}, false, fmt.Errorf("task %s/%s not found", project, name)
+	}
+	configurationGeneration := request.ConfigurationGeneration
+	if configurationGeneration == 0 {
+		configurationGeneration = d.currentConfigurationGeneration()
+	}
+	runID := scheduler.NewRunID()
+	now := time.Now().UTC()
+	record := scheduler.Record{
+		RunID: runID, Project: project, Name: name, TargetType: targetType, Target: name,
+		Trigger: scheduler.ManualTrigger(), Status: scheduler.StatusQueued, Started: now,
+		IdempotencyKey: request.IdempotencyKey, ConfigurationGeneration: configurationGeneration,
+	}
+	execution, created, err := d.scheduler.BeginExecution(context.Background(), record, request.IdempotencyKey, configurationGeneration)
+	if err != nil {
+		return scheduler.Execution{}, false, err
+	}
+	if !created {
+		return execution, false, nil
+	}
+	runningRecord := execution.Record
+	runningRecord.Status = scheduler.StatusRunning
+	if err := d.scheduler.UpdateExecution(context.Background(), runningRecord); err != nil {
+		return scheduler.Execution{}, false, fmt.Errorf("mark execution running: %w", err)
+	}
+	runCtx, cancel := context.WithCancel(d.executionContext())
+	d.registerExecutionCancel(runID, cancel)
+	var startErr error
+	if targetType == "workflow" {
+		startErr = d.workflow.RunNowWorkflowWithID(runCtx, project, name, scheduler.ManualTrigger(), runID)
+	} else {
+		startErr = d.workflow.RunNowTaskWithID(runCtx, project, name, scheduler.ManualTrigger(), runID)
+	}
+	if startErr != nil {
+		cancel()
+		d.mu.Lock()
+		delete(d.executionCancels, runID)
+		d.mu.Unlock()
+		record.Status = scheduler.StatusFailed
+		record.Finished = time.Now().UTC()
+		record.ExitCode = 1
+		record.Error = startErr.Error()
+		if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
+			return scheduler.Execution{}, false, fmt.Errorf("start execution: %v; persist failure: %w", startErr, err)
+		}
+		return scheduler.Execution{}, false, startErr
+	}
+	return execution, true, nil
+}
+
+func executionInfo(execution scheduler.Execution) api.ExecutionInfo {
+	record := execution.Record
+	info := api.ExecutionInfo{
+		RunID: execution.Record.RunID, Project: record.Project, Name: record.Name,
+		TargetType: record.TargetType, Target: record.Target, Status: record.Status,
+		Trigger: triggerInfo(record.Trigger), IdempotencyKey: execution.IdempotencyKey,
+		ConfigurationGeneration: execution.ConfigurationGeneration, ExitCode: record.ExitCode,
+		Error: record.Error, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
+	}
+	if info.IdempotencyKey == "" {
+		info.IdempotencyKey = record.IdempotencyKey
+	}
+	if info.ConfigurationGeneration == 0 {
+		info.ConfigurationGeneration = record.ConfigurationGeneration
+	}
+	if !execution.CreatedAt.IsZero() {
+		value := execution.CreatedAt
+		info.CreatedAt = &value
+	}
+	if !record.Started.IsZero() {
+		value := record.Started
+		info.StartedAt = &value
+	}
+	if !record.Finished.IsZero() {
+		value := record.Finished
+		info.FinishedAt = &value
+	}
+	return info
+}
+
+func validExecutionStatus(status string) bool {
+	switch status {
+	case scheduler.StatusQueued, scheduler.StatusRunning, scheduler.StatusSuccess, scheduler.StatusFailed,
+		scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func validExecutionTriggerType(triggerType string) bool {
+	switch triggerType {
+	case scheduler.TriggerManual, scheduler.TriggerSchedule, scheduler.TriggerWebhook:
+		return true
+	default:
+		return false
+	}
+}
+
+func executionListTarget(project, target string) (string, string, error) {
+	if strings.Contains(target, "/") {
+		targetProject, targetName, err := splitKey(target)
+		if err != nil {
+			return "", "", err
+		}
+		if project != "" && project != targetProject {
+			return "", "", errors.New("target project does not match project filter")
+		}
+		return targetProject, targetName, nil
+	}
+	return project, target, nil
+}
+
+func (d *Daemon) readExecutionLogs(ctx context.Context, execution scheduler.Execution, request executionRequest) (api.ExecutionLogs, error) {
+	stream := request.Stream
+	if stream == "" {
+		stream = "all"
+	}
+	if stream != "stdout" && stream != "stderr" && stream != "all" {
+		return api.ExecutionLogs{}, fmt.Errorf("stream must be stdout, stderr, or all")
+	}
+	entries := make([]api.ExecutionLogEntry, 0)
+	seen := make(map[string]struct{})
+	appendLog := func(node, task, selectedStream, path string) error {
+		if path == "" {
+			return nil
+		}
+		key := selectedStream + "\x00" + path
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		var data string
+		var next int64
+		var err error
+		if request.Tail > 0 {
+			data, next, err = logging.TailWithOffset(path, request.Tail)
+		} else {
+			maxBytes := request.MaxBytes
+			data, next, err = logging.ReadSince(path, request.Offset, maxBytes)
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		entries = append(entries, api.ExecutionLogEntry{Node: node, Task: task, Stream: selectedStream, Path: path, Data: data, NextOffset: next})
+		return nil
+	}
+	if stream == "stdout" || stream == "all" {
+		if err := appendLog("", execution.Record.Name, "stdout", execution.Record.StdoutPath); err != nil {
+			return api.ExecutionLogs{}, err
+		}
+	}
+	if stream == "stderr" || stream == "all" {
+		if err := appendLog("", execution.Record.Name, "stderr", execution.Record.StderrPath); err != nil {
+			return api.ExecutionLogs{}, err
+		}
+	}
+	for _, task := range execution.Record.Tasks {
+		if stream == "stdout" || stream == "all" {
+			if err := appendLog(task.Node, task.Task, "stdout", task.StdoutPath); err != nil {
+				return api.ExecutionLogs{}, err
+			}
+		}
+		if stream == "stderr" || stream == "all" {
+			if err := appendLog(task.Node, task.Task, "stderr", task.StderrPath); err != nil {
+				return api.ExecutionLogs{}, err
+			}
+		}
+	}
+	return api.ExecutionLogs{RunID: execution.Record.RunID, Stream: stream, Logs: entries}, nil
+}
+
+func executionResponse(execution scheduler.Execution, key string) map[string]string {
+	return map[string]string{
+		"key": key, "run_id": execution.Record.RunID, "target_type": execution.Record.TargetType,
+		"target": execution.Record.Target, "status": execution.Record.Status,
+	}
+}
+
+func (d *Daemon) watchExecution(runID string, timeoutMS int) (scheduler.Execution, error) {
+	if timeoutMS < 0 {
+		return scheduler.Execution{}, errors.New("timeout_ms must be non-negative")
+	}
+	if timeoutMS == 0 {
+		return d.scheduler.GetExecution(d.executionContext(), runID)
+	}
+	if timeoutMS > 5*60*1000 {
+		timeoutMS = 5 * 60 * 1000
+	}
+	deadline := time.NewTimer(time.Duration(timeoutMS) * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
+		if err != nil {
+			return scheduler.Execution{}, err
+		}
+		if isTerminalExecution(execution.Record.Status) {
+			return execution, nil
+		}
+		tick := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			tick.Stop()
+			return d.scheduler.GetExecution(d.executionContext(), runID)
+		}
+	}
+}
+
+func isTerminalExecution(status string) bool {
+	switch status {
+	case scheduler.StatusSuccess, scheduler.StatusFailed, scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) cancelExecution(runID string) error {
+	execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
+	if err != nil {
+		return err
+	}
+	if isTerminalExecution(execution.Record.Status) {
+		return nil
+	}
+	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: runID, Type: "cancel", Status: "requested", RequestedAt: time.Now().UTC()}); err != nil {
+		return err
+	}
+	if d.cancelManualExecution(runID) || d.scheduler.CancelExecution(runID) {
+		return nil
+	}
+	// The execution may have finished between the initial read and the cancel
+	// lookup. Treat that race as a successful no-op and let callers observe the
+	// terminal state through execution.get/watch.
+	if latest, latestErr := d.scheduler.GetExecution(d.executionContext(), runID); latestErr == nil && isTerminalExecution(latest.Record.Status) {
+		return nil
+	}
+	return fmt.Errorf("execution %s is no longer running", runID)
+}
+
+func (d *Daemon) retryExecution(runID string) (scheduler.Execution, error) {
+	execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
+	if err != nil {
+		return scheduler.Execution{}, err
+	}
+	if !isTerminalExecution(execution.Record.Status) {
+		return scheduler.Execution{}, fmt.Errorf("execution %s is still active", runID)
+	}
+	if execution.Record.TargetType != "task" && execution.Record.TargetType != "workflow" {
+		return scheduler.Execution{}, fmt.Errorf("execution %s cannot be retried", runID)
+	}
+	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: runID, Type: "retry", Status: "requested", RequestedAt: time.Now().UTC()}); err != nil {
+		return scheduler.Execution{}, err
+	}
+	record := execution.Record
+	record.Status = scheduler.StatusQueued
+	record.Started = time.Now().UTC()
+	record.Finished = time.Time{}
+	record.ExitCode = 0
+	record.Error = ""
+	record.Stderr = ""
+	// Child rows and attempts already persisted for this logical run are
+	// retained by the history store. The next terminal write appends the new
+	// attempt instead of replacing the previous retry history.
+	record.Tasks = nil
+	record.Attempts = nil
+	queuedExecution := execution
+	queuedExecution.Record = record
+	queuedExecution.UpdatedAt = time.Now().UTC()
+	if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
+		return scheduler.Execution{}, err
+	}
+	runCtx, cancel := context.WithCancel(d.executionContext())
+	d.registerExecutionCancel(runID, cancel)
+	runningRecord := record
+	runningRecord.Status = scheduler.StatusRunning
+	if err := d.scheduler.UpdateExecution(context.Background(), runningRecord); err != nil {
+		cancel()
+		d.mu.Lock()
+		delete(d.executionCancels, runID)
+		d.mu.Unlock()
+		return scheduler.Execution{}, err
+	}
+	if record.TargetType == "workflow" {
+		err = d.workflow.RunNowWorkflowWithID(runCtx, record.Project, record.Target, record.Trigger, runID)
+	} else {
+		err = d.workflow.RunNowTaskWithID(runCtx, record.Project, record.Target, record.Trigger, runID)
+	}
+	if err != nil {
+		cancel()
+		d.mu.Lock()
+		delete(d.executionCancels, runID)
+		d.mu.Unlock()
+		record.Status = scheduler.StatusFailed
+		record.Finished = time.Now().UTC()
+		record.ExitCode = 1
+		record.Error = err.Error()
+		_ = d.scheduler.UpdateExecution(context.Background(), record)
+		return scheduler.Execution{}, err
+	}
+	return queuedExecution, nil
 }
 
 func unmarshalOptionalParams(data json.RawMessage, target interface{}) error {

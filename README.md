@@ -976,13 +976,34 @@ It does not support `--json`.
 ```text
 mango task ls [--json]
 mango task run PROJECT/TASK [--json]
+mango execution ls [--status STATUS] [--trigger-type TYPE] [--trigger NAME]
+                       [--project PROJECT] [--target-type task|workflow]
+                       [--target PROJECT/NAME] [--limit N] [--json]
+mango execution get|cancel|retry RUN_ID [--json]
+mango execution watch RUN_ID [--timeout 45s] [--json]
+mango execution logs RUN_ID [--stream stdout|stderr|all] [--tail N] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
 | `task ls` | Lists task name, lifetime logical runs, status, last run, next run, and duration. |
 | `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
+| `execution ls` | Lists logical executions, newest first; it includes queued, running, and completed runs. |
 `task ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
+Without `--json`, `task run` prints the accepted state and durable run ID, for
+example `Task demo/backup queued (run_id=...)`.
+
+The example configuration also includes a long-running execution target for
+testing execution controls:
+
+```sh
+mango task run demo/execution-demo-task
+mango workflow run demo/execution-demo-workflow
+```
+
+Both targets run for about 20 seconds and emit both stdout and stderr. Use the
+returned run ID with `execution watch`, `execution cancel`, `execution retry`,
+`execution logs`, or `execution ls`.
 `RUNS` counts direct task runs and workflow-node invocations; retries do not
 increase it. `NEXT RUN` includes the earliest direct or indirect schedule.
 
@@ -1000,6 +1021,8 @@ mango workflow run PROJECT/WORKFLOW [--json]
 `workflow ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and
 `DURATION`. `RUNS` counts workflow root invocations and `NEXT RUN` is the
 earliest direct schedule for the workflow.
+Without `--json`, `workflow run` prints the accepted state and durable run ID,
+for example `Workflow demo/release queued (run_id=...)`.
 
 Examples:
 
@@ -1010,6 +1033,30 @@ mango workflow run demo/release
 
 Use `mango history --target-type workflow --target demo/release` to inspect
 workflow runs and their task nodes.
+
+Every task and workflow run returns a durable `run_id`. Use `execution watch`
+or `execution get` to observe its final status, `execution cancel` to terminate
+the managed process tree, `execution retry` to start another attempt under the
+same logical run, and `execution logs` to read output after the process exits.
+`execution watch` waits up to 30 seconds by default; use `--timeout 2m` for a
+longer wait (up to 5 minutes).
+
+`execution ls` supports the following filters:
+
+```sh
+mango execution ls
+mango execution ls --status running
+mango execution ls --trigger-type schedule --trigger nightly
+mango execution ls --project demo --target-type task
+mango execution ls --target demo/execution-demo-task --limit 10
+mango execution ls --json
+```
+
+The human-readable table shows `RUN_ID`, target type and target, status,
+start/finish timestamps, and exit code. `--target` accepts either
+`PROJECT/NAME` or a name used together with `--project`; `--limit 0` returns
+all matching executions. `--trigger-type` accepts `schedule`, `webhook`, or
+`manual`; `--trigger` filters the trigger name.
 
 ### Schedules
 
@@ -1248,8 +1295,9 @@ MANGO_HOME/
 ```
 
 The optional `daemon.yaml` supports execution-history retention and database
-configuration. SQLite is used by default and the database is created with
-GORM's automatic schema migration.
+configuration. SQLite is used by default. The metadata schema is maintained by
+versioned migrations; before the first SQLite metadata migration Mango creates
+`history.db.bak` when it does not already exist.
 
 ```yaml
 # MANGO_HOME/daemon.yaml
@@ -1279,6 +1327,11 @@ history:
 For SQLite, omitting `path` uses `MANGO_HOME/state/history.db`. Existing
 `state/execution-history.json` files are preserved as backups but are not
 imported or read.
+
+If a metadata migration fails, do not delete the database. Keep the daemon
+stopped, inspect the migration error, and restore `history.db.bak` to
+`history.db` before retrying. The daemon deliberately refuses to start while a
+required migration is incomplete.
 
 ## Platform behavior
 

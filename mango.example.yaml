@@ -243,6 +243,48 @@ tasks:
     timeout: 30s
     concurrency: allow
 
+  execution-demo-task:
+    command: go
+    args:
+      - run
+      - ./examples/execution/main.go
+      - --name
+      - execution-demo-task
+      - --duration
+      - 20s
+      - --interval
+      - 1s
+    timeout: 1m
+    concurrency: forbid
+
+  execution-demo-workflow-a:
+    command: go
+    args:
+      - run
+      - ./examples/execution/main.go
+      - --name
+      - execution-demo-workflow-a
+      - --duration
+      - 20s
+      - --interval
+      - 1s
+    timeout: 1m
+    concurrency: allow
+
+  execution-demo-workflow-b:
+    command: go
+    args:
+      - run
+      - ./examples/execution/main.go
+      - --name
+      - execution-demo-workflow-b
+      - --duration
+      - 20s
+      - --interval
+      - 1s
+    timeout: 1m
+    concurrency: allow
+
 workflows:
   nightly-pipeline:
     concurrency: forbid
@@ -299,6 +341,14 @@ workflows:
     tasks:
       slow:
         uses: demo-slow-timeout
+
+  execution-demo-workflow:
+    concurrency: forbid
+    tasks:
+      first:
+        uses: execution-demo-workflow-a
+      second:
+        uses: execution-demo-workflow-b
 
 schedules:
   - name: nightly-job

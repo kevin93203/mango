@@ -26,6 +26,80 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 )
 
+func TestTaskAndWorkflowRunShowRunIDWithoutJSON(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	caller := func(method string, _ interface{}) (ipc.Response, error) {
+		var data string
+		switch method {
+		case "task.run":
+			data = `{"key":"demo/backup","run_id":"task-run-1","target_type":"task","target":"backup","status":"queued"}`
+		case "workflow.run":
+			data = `{"key":"demo/release","run_id":"workflow-run-1","target_type":"workflow","target":"release","status":"queued"}`
+		default:
+			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
+		}
+		return ipc.Response{OK: true, Data: json.RawMessage(data)}, nil
+	}
+
+	if err := taskCommandWithCaller([]string{"run", "demo/backup"}, caller); err != nil {
+		t.Fatal(err)
+	}
+	if text := output.String(); !strings.Contains(text, "Task demo/backup queued (run_id=task-run-1)") {
+		t.Fatalf("task output = %q", text)
+	}
+
+	output.Reset()
+	if err := workflowCommandWithCaller([]string{"run", "demo/release"}, caller); err != nil {
+		t.Fatal(err)
+	}
+	if text := output.String(); !strings.Contains(text, "Workflow demo/release queued (run_id=workflow-run-1)") {
+		t.Fatalf("workflow output = %q", text)
+	}
+}
+
+func TestExecutionListTextOutput(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
+	jsonOutput = false
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	finished := started.Add(time.Second)
+	err := executionListCommandWithCaller([]string{"--status", "success", "--target", "demo/job", "--limit", "10"}, func(method string, params interface{}) (ipc.Response, error) {
+		if method != "execution.ls" {
+			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
+		}
+		filters, ok := params.(executionListCLIParams)
+		if !ok || filters.Status != "success" || filters.Target != "demo/job" || filters.Limit != 10 {
+			t.Fatalf("execution.ls filters = %+v", params)
+		}
+		return ipc.Response{Data: []api.ExecutionInfo{{
+			RunID: "run-1", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess,
+			StartedAt: &started, FinishedAt: &finished,
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"RUN_ID", "run-1", "demo/job", "success", "2026-01-02T03:04:05Z", "EXIT"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("execution list output = %q, want %q", text, want)
+		}
+	}
+}
+
 func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 	dir := t.TempDir()
 	workingDir, err := os.Getwd()

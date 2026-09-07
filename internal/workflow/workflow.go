@@ -29,6 +29,7 @@ type Invocation struct {
 	Project     string
 	Workflow    string
 	Node        string
+	RunID       string
 	Trigger     scheduler.TriggerRef
 	ParentRunID string
 }
@@ -197,8 +198,16 @@ func (e *Executor) ListWorkflows(project string) []WorkflowSnapshot {
 // by the executor; the caller decides whether it belongs to a cron run or a
 // manual run and sends it to the common history sink.
 func (e *Executor) Run(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef) scheduler.ExecutionResult {
+	return e.RunWithID(ctx, project, workflowName, trigger, scheduler.NewRunID())
+}
+
+// RunWithID executes a workflow using the caller-provided logical run ID.
+// This lets the daemon persist a queued execution before any process starts.
+func (e *Executor) RunWithID(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef, runID string) scheduler.ExecutionResult {
 	key := project + "/" + workflowName
-	runID := scheduler.NewRunID()
+	if runID == "" {
+		runID = scheduler.NewRunID()
+	}
 	e.mu.Lock()
 	wf, ok := e.workflows[key]
 	if ok {
@@ -225,6 +234,12 @@ func (e *Executor) Run(ctx context.Context, project, workflowName string, trigge
 
 // RunTask executes one direct task synchronously.
 func (e *Executor) RunTask(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef) scheduler.ExecutionResult {
+	return e.RunTaskWithID(ctx, project, taskName, trigger, scheduler.NewRunID())
+}
+
+// RunTaskWithID executes a direct task using the caller-provided logical run
+// ID. The task record still receives its own child run ID.
+func (e *Executor) RunTaskWithID(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef, rootRunID string) scheduler.ExecutionResult {
 	key := project + "/" + taskName
 	e.mu.Lock()
 	task, ok := e.tasks[key]
@@ -232,31 +247,39 @@ func (e *Executor) RunTask(ctx context.Context, project, taskName string, trigge
 	if !ok {
 		return failedExecution(fmt.Errorf("task %s not found", key))
 	}
-	rootRunID := scheduler.NewRunID()
-	result, attempts := e.executeTask(ctx, task, Invocation{Project: project, Node: taskName, Trigger: trigger, ParentRunID: rootRunID})
+	if rootRunID == "" {
+		rootRunID = scheduler.NewRunID()
+	}
+	taskRunID := scheduler.NewRunID()
+	result, attempts := e.executeTask(ctx, task, Invocation{Project: project, Node: taskName, RunID: taskRunID, Trigger: trigger, ParentRunID: rootRunID})
 	now := time.Now()
 	started := now
 	if len(attempts) > 0 {
 		started = attempts[0].Started
 	}
-	taskRecord := makeTaskRecord(taskName, task, rootRunID, started, now, result, attempts, taskStatus(ctx, result))
+	taskRecord := makeTaskRecord(taskName, task, taskRunID, rootRunID, started, now, result, attempts, taskStatus(ctx, result))
 	e.setTaskLatest(key, taskRecord)
 	record := scheduler.Record{
 		RunID: rootRunID, Project: project, Name: taskName, TargetType: "task", Target: taskName, Trigger: trigger,
 		Status: taskRecord.Status, Started: started, Finished: now, ExitCode: taskRecord.ExitCode,
-		Error: taskRecord.Error, Stderr: taskRecord.Stderr, Attempts: attempts, Tasks: []scheduler.TaskRecord{taskRecord},
+		Error: taskRecord.Error, Stderr: taskRecord.Stderr, StdoutPath: result.StdoutPath, StderrPath: result.StderrPath,
+		Attempts: attempts, Tasks: []scheduler.TaskRecord{taskRecord},
 	}
 	return scheduler.ExecutionResult{ExitCode: record.ExitCode, Err: errorFromRecord(record), Stderr: record.Stderr, Record: &record}
 }
 
 func (e *Executor) RunNowWorkflow(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef) error {
+	return e.RunNowWorkflowWithID(ctx, project, workflowName, trigger, scheduler.NewRunID())
+}
+
+func (e *Executor) RunNowWorkflowWithID(ctx context.Context, project, workflowName string, trigger scheduler.TriggerRef, runID string) error {
 	if !e.HasWorkflow(project + "/" + workflowName) {
 		return fmt.Errorf("workflow %s/%s not found", project, workflowName)
 	}
 	e.runs.Add(1)
 	go func() {
 		defer e.runs.Done()
-		result := e.Run(ctx, project, workflowName, trigger)
+		result := e.RunWithID(ctx, project, workflowName, trigger, runID)
 		if result.Record != nil && e.sink != nil {
 			e.sink(*result.Record)
 		}
@@ -265,13 +288,17 @@ func (e *Executor) RunNowWorkflow(ctx context.Context, project, workflowName str
 }
 
 func (e *Executor) RunNowTask(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef) error {
+	return e.RunNowTaskWithID(ctx, project, taskName, trigger, scheduler.NewRunID())
+}
+
+func (e *Executor) RunNowTaskWithID(ctx context.Context, project, taskName string, trigger scheduler.TriggerRef, runID string) error {
 	if !e.HasTask(project + "/" + taskName) {
 		return fmt.Errorf("task %s/%s not found", project, taskName)
 	}
 	e.runs.Add(1)
 	go func() {
 		defer e.runs.Done()
-		result := e.RunTask(ctx, project, taskName, trigger)
+		result := e.RunTaskWithID(ctx, project, taskName, trigger, runID)
 		if result.Record != nil && e.sink != nil {
 			e.sink(*result.Record)
 		}
@@ -333,17 +360,18 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 			nodes[node] = state
 			active++
 			progress = true
-			go func(node string, task config.EffectiveTask) {
-				result, attempts := e.executeTask(ctx, task, Invocation{Project: wf.Project, Workflow: wf.Name, Node: node, Trigger: trigger, ParentRunID: runID})
+			taskRunID := scheduler.NewRunID()
+			go func(node string, task config.EffectiveTask, taskRunID string) {
+				result, attempts := e.executeTask(ctx, task, Invocation{Project: wf.Project, Workflow: wf.Name, Node: node, RunID: taskRunID, Trigger: trigger, ParentRunID: runID})
 				now := time.Now()
 				begin := now
 				if len(attempts) > 0 {
 					begin = attempts[0].Started
 				}
-				taskRecord := makeTaskRecord(node, task, runID, begin, now, result, attempts, taskStatus(ctx, result))
+				taskRecord := makeTaskRecord(node, task, taskRunID, runID, begin, now, result, attempts, taskStatus(ctx, result))
 				e.setTaskLatest(wf.Project+"/"+task.Name, taskRecord)
 				results <- nodeResult{node: node, record: taskRecord}
-			}(node, task)
+			}(node, task, taskRunID)
 		}
 
 		if active == 0 {
@@ -512,15 +540,15 @@ func sortedWorkflowNodes(wf config.EffectiveWorkflow) []string {
 	return result
 }
 
-func makeTaskRecord(node string, task config.EffectiveTask, parentRunID string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
+func makeTaskRecord(node string, task config.EffectiveTask, taskRunID, parentRunID string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
 	metadata := scheduler.SafeTaskMetadata(task.Command, task.Args, task.WorkingDir, task.DeclaredEnv)
 	record := scheduler.TaskRecord{
-		RunID: scheduler.NewRunID(), ParentRunID: parentRunID,
+		RunID: taskRunID, ParentRunID: parentRunID,
 		Node: node, Task: task.Name, Command: metadata.Command, Args: metadata.Args,
 		WorkingDir: metadata.WorkingDir, EnvKeys: metadata.EnvKeys, ArgsRedacted: metadata.ArgsRedacted,
 		Status: status, Started: started, Finished: finished,
 		DurationSeconds: nonNegativeSeconds(finished.Sub(started)), ExitCode: result.ExitCode,
-		Stderr: result.Stderr, Attempts: attempts,
+		Stderr: result.Stderr, StdoutPath: result.StdoutPath, StderrPath: result.StderrPath, Attempts: attempts,
 	}
 	if result.Err != nil {
 		record.Error = result.Err.Error()

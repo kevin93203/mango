@@ -182,10 +182,47 @@ type ScheduleInfo struct {
 }
 
 type TriggerInfo struct {
-	Type    string
-	Name    string
-	Mode    string
-	EventID string
+	Type    string `json:"type"`
+	Name    string `json:"name,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	EventID string `json:"event_id,omitempty"`
+}
+
+// ExecutionInfo is the stable public representation of a logical execution.
+// It intentionally contains no process-ownership details; those remain the
+// responsibility of mango-shim and the service APIs.
+type ExecutionInfo struct {
+	RunID                   string       `json:"run_id"`
+	Project                 string       `json:"project"`
+	Name                    string       `json:"name"`
+	TargetType              string       `json:"target_type"`
+	Target                  string       `json:"target"`
+	Status                  string       `json:"status"`
+	Trigger                 *TriggerInfo `json:"trigger,omitempty"`
+	IdempotencyKey          string       `json:"idempotency_key,omitempty"`
+	ConfigurationGeneration uint64       `json:"configuration_generation,omitempty"`
+	CreatedAt               *time.Time   `json:"created_at,omitempty"`
+	StartedAt               *time.Time   `json:"started_at,omitempty"`
+	FinishedAt              *time.Time   `json:"finished_at,omitempty"`
+	ExitCode                int          `json:"exit_code"`
+	Error                   string       `json:"error,omitempty"`
+	StdoutPath              string       `json:"stdout_path,omitempty"`
+	StderrPath              string       `json:"stderr_path,omitempty"`
+}
+
+type ExecutionLogEntry struct {
+	Node       string `json:"node,omitempty"`
+	Task       string `json:"task,omitempty"`
+	Stream     string `json:"stream"`
+	Path       string `json:"path"`
+	Data       string `json:"data"`
+	NextOffset int64  `json:"next_offset,omitempty"`
+}
+
+type ExecutionLogs struct {
+	RunID  string              `json:"run_id"`
+	Stream string              `json:"stream"`
+	Logs   []ExecutionLogEntry `json:"logs"`
 }
 
 type TaskInfo struct {

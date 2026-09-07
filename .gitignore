@@ -1,3 +1,4 @@
 bin/
 .DS_Store
 mango-shim/target/
+.gocache/

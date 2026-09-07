@@ -183,6 +183,11 @@ type EffectiveSchedule struct {
 	Timezone   *time.Location
 	TargetType string
 	Target     string
+	// RunID and OccurrenceID are populated only while the scheduler is
+	// executing a schedule. They are deliberately not part of YAML config.
+	RunID                   string
+	OccurrenceID            string
+	ConfigurationGeneration uint64
 
 	// Deprecated internal fields are retained so package consumers can migrate
 	// independently; v3 configuration never populates them.

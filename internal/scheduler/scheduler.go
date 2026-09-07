@@ -16,20 +16,24 @@ import (
 const defaultHistoryLimit = 0
 
 type Record struct {
-	RunID      string
-	Project    string
-	Name       string
-	TargetType string
-	Target     string
-	Trigger    TriggerRef
-	Status     string
-	Started    time.Time
-	Finished   time.Time
-	ExitCode   int
-	Error      string
-	Stderr     string
-	Attempts   []Attempt
-	Tasks      []TaskRecord
+	RunID                   string
+	Project                 string
+	Name                    string
+	TargetType              string
+	Target                  string
+	Trigger                 TriggerRef
+	Status                  string
+	Started                 time.Time
+	Finished                time.Time
+	ExitCode                int
+	Error                   string
+	Stderr                  string
+	StdoutPath              string
+	StderrPath              string
+	IdempotencyKey          string
+	ConfigurationGeneration uint64
+	Attempts                []Attempt
+	Tasks                   []TaskRecord
 }
 
 // TaskRecord is the execution record for one direct task invocation or one
@@ -56,6 +60,8 @@ type TaskRecord struct {
 	ExitCode        int
 	Error           string
 	Stderr          string
+	StdoutPath      string
+	StderrPath      string
 	Attempts        []Attempt
 }
 
@@ -70,23 +76,101 @@ type Attempt struct {
 }
 
 type ExecutionResult struct {
-	ExitCode int
-	Err      error
-	Stderr   string
+	ExitCode   int
+	Err        error
+	Stderr     string
+	StdoutPath string
+	StderrPath string
 	// Record is set by the workflow executor for unified execution history.
 	// When nil, Scheduler builds the single-process record from the result.
 	Record *Record
 }
 
+// Execution is the durable control-plane representation of a logical run.
+// Record contains the execution payload; the remaining fields describe its
+// lifecycle and request identity.
+type Execution struct {
+	Record                  Record
+	IdempotencyKey          string
+	ConfigurationGeneration uint64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
+type ExecutionEvent struct {
+	ID        int64
+	RunID     string
+	Type      string
+	Status    string
+	Details   string
+	CreatedAt time.Time
+}
+
+// ExecutionQuery describes filters for listing logical executions. An empty
+// field means that the corresponding dimension is not filtered. Limit zero
+// means that the store should return all matching executions.
+type ExecutionQuery struct {
+	Status      string
+	TriggerType string
+	Trigger     string
+	Project     string
+	TargetType  string
+	Target      string
+	Limit       int
+}
+
+type ExecutionOperation struct {
+	ID          int64
+	RunID       string
+	Type        string
+	Status      string
+	Error       string
+	RequestedAt time.Time
+	CompletedAt time.Time
+}
+
+var ErrExecutionNotFound = errors.New("execution not found")
+
+// ExecutionStore is the metadata persistence boundary for active and
+// completed logical runs. HistoryRepository implementations may also
+// implement this interface; the scheduler uses it opportunistically so old
+// embedders remain source-compatible.
+type ExecutionStore interface {
+	BeginExecution(context.Context, Record, string, uint64) (Execution, bool, error)
+	GetExecution(context.Context, string) (Execution, error)
+	ListActiveExecutions(context.Context) ([]Execution, error)
+	UpdateExecution(context.Context, Record) error
+	RecordExecutionEvent(context.Context, ExecutionEvent) error
+	RecordExecutionOperation(context.Context, ExecutionOperation) (ExecutionOperation, error)
+}
+
+// ExecutionLister is an optional extension for stores that support querying
+// all persisted executions. It is separate from ExecutionStore so existing
+// store implementations remain source-compatible.
+type ExecutionLister interface {
+	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
+}
+
 const (
-	StatusIdle      = "idle"
-	StatusRunning   = "running"
-	StatusSuccess   = "success"
-	StatusFailed    = "failed"
-	StatusSkipped   = "skipped"
-	StatusCancelled = "cancelled"
-	StatusDisabled  = "disabled"
+	StatusIdle        = "idle"
+	StatusRunning     = "running"
+	StatusSuccess     = "success"
+	StatusFailed      = "failed"
+	StatusSkipped     = "skipped"
+	StatusCancelled   = "cancelled"
+	StatusQueued      = "queued"
+	StatusInterrupted = "interrupted"
+	StatusDisabled    = "disabled"
 )
+
+func IsTerminalStatus(status string) bool {
+	switch status {
+	case StatusSuccess, StatusFailed, StatusSkipped, StatusCancelled, StatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
 
 // ScheduleSnapshot combines a configured schedule with its current execution
 // state and the next cron activation time.
@@ -110,6 +194,7 @@ type Scheduler struct {
 	disabled        map[string]bool
 	running         map[string]int
 	active          map[string]map[uint64]time.Time
+	activeCancels   map[string]context.CancelFunc
 	nextExecutionID uint64
 	historyRepo     HistoryRepository
 	historyLimit    int
@@ -123,16 +208,17 @@ type Scheduler struct {
 func New(runner Runner) *Scheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	return &Scheduler{
-		cron:         cron.New(cron.WithParser(parser)),
-		entries:      map[string]cron.EntryID{},
-		schedules:    map[string]config.EffectiveSchedule{},
-		disabled:     map[string]bool{},
-		running:      map[string]int{},
-		active:       map[string]map[uint64]time.Time{},
-		historyLimit: defaultHistoryLimit,
-		historyRepo:  newMemoryHistoryRepository(),
-		runner:       runner,
-		ctx:          context.Background(),
+		cron:          cron.New(cron.WithParser(parser)),
+		entries:       map[string]cron.EntryID{},
+		schedules:     map[string]config.EffectiveSchedule{},
+		disabled:      map[string]bool{},
+		running:       map[string]int{},
+		active:        map[string]map[uint64]time.Time{},
+		activeCancels: map[string]context.CancelFunc{},
+		historyLimit:  defaultHistoryLimit,
+		historyRepo:   newMemoryHistoryRepository(),
+		runner:        runner,
+		ctx:           context.Background(),
 	}
 }
 
@@ -271,6 +357,93 @@ func (s *Scheduler) RecordExecution(record Record) {
 		record.Status = statusForResult(record.ExitCode, record.Error)
 	}
 	s.record(record)
+}
+
+func (s *Scheduler) executionStore() ExecutionStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, _ := s.historyRepo.(ExecutionStore)
+	return store
+}
+
+func (s *Scheduler) BeginExecution(ctx context.Context, record Record, idempotencyKey string, configurationGeneration uint64) (Execution, bool, error) {
+	store := s.executionStore()
+	if store == nil {
+		if record.RunID == "" {
+			record.RunID = NewRunID()
+		}
+		record.IdempotencyKey = idempotencyKey
+		record.ConfigurationGeneration = configurationGeneration
+		now := time.Now()
+		return Execution{Record: record, IdempotencyKey: idempotencyKey, ConfigurationGeneration: configurationGeneration, CreatedAt: now, UpdatedAt: now}, true, nil
+	}
+	return store.BeginExecution(ctx, record, idempotencyKey, configurationGeneration)
+}
+
+func (s *Scheduler) GetExecution(ctx context.Context, runID string) (Execution, error) {
+	store := s.executionStore()
+	if store == nil {
+		return Execution{}, ErrExecutionNotFound
+	}
+	return store.GetExecution(ctx, runID)
+}
+
+func (s *Scheduler) ListExecutions(ctx context.Context, query ExecutionQuery) ([]Execution, error) {
+	store := s.executionStore()
+	if store == nil {
+		return []Execution{}, nil
+	}
+	lister, ok := store.(ExecutionLister)
+	if !ok {
+		return []Execution{}, nil
+	}
+	return lister.ListExecutions(ctx, query)
+}
+
+func (s *Scheduler) ListActiveExecutions(ctx context.Context) ([]Execution, error) {
+	store := s.executionStore()
+	if store == nil {
+		return []Execution{}, nil
+	}
+	return store.ListActiveExecutions(ctx)
+}
+
+func (s *Scheduler) UpdateExecution(ctx context.Context, record Record) error {
+	store := s.executionStore()
+	if store == nil {
+		return nil
+	}
+	return store.UpdateExecution(ctx, record)
+}
+
+func (s *Scheduler) RecordExecutionEvent(ctx context.Context, event ExecutionEvent) error {
+	store := s.executionStore()
+	if store == nil {
+		return nil
+	}
+	return store.RecordExecutionEvent(ctx, event)
+}
+
+func (s *Scheduler) RecordExecutionOperation(ctx context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
+	store := s.executionStore()
+	if store == nil {
+		return operation, nil
+	}
+	return store.RecordExecutionOperation(ctx, operation)
+}
+
+// CancelExecution cancels a scheduler-owned execution. Manual executions are
+// cancelled by the daemon because their context is owned by the workflow
+// executor rather than the cron scheduler.
+func (s *Scheduler) CancelExecution(runID string) bool {
+	s.mu.Lock()
+	cancel := s.activeCancels[runID]
+	s.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 func (s *Scheduler) SetContext(ctx context.Context) {
@@ -450,7 +623,17 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 	}
 	s.active[key][executionID] = started
 	s.mu.Unlock()
-	defer func() {
+	runID := NewRunID()
+	occurrenceID := fmt.Sprintf("%s:%d", key, started.UnixNano())
+	trigger := ScheduleTrigger(schedule.Name)
+	trigger.EventID = occurrenceID
+	queuedRecord := Record{
+		RunID: runID, Project: schedule.Project, Name: schedule.Name,
+		TargetType: schedule.TargetType, Target: schedule.Target, Trigger: trigger,
+		Status: StatusQueued, Started: started, ConfigurationGeneration: schedule.ConfigurationGeneration,
+	}
+	if _, _, err := s.BeginExecution(ctx, queuedRecord, "", schedule.ConfigurationGeneration); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: create execution metadata: %v\n", err)
 		s.mu.Lock()
 		s.running[key]--
 		delete(s.active[key], executionID)
@@ -458,13 +641,35 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 			delete(s.active, key)
 		}
 		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.activeCancels[runID] = cancel
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		delete(s.activeCancels, runID)
+		s.running[key]--
+		delete(s.active[key], executionID)
+		if len(s.active[key]) == 0 {
+			delete(s.active, key)
+		}
+		s.mu.Unlock()
 	}()
+	schedule.RunID = runID
+	schedule.OccurrenceID = occurrenceID
+	runningRecord := queuedRecord
+	runningRecord.Status = StatusRunning
+	if err := s.UpdateExecution(ctx, runningRecord); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: update execution metadata: %v\n", err)
+		return
+	}
 	execution, attempts := s.executeWithRetry(ctx, schedule)
 	if execution.Record != nil {
 		record := *execution.Record
-		if record.RunID == "" {
-			record.RunID = NewRunID()
-		}
+		record.RunID = runID
 		if record.Project == "" {
 			record.Project = schedule.Project
 		}
@@ -480,7 +685,7 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		// A scheduler-owned invocation is always a schedule trigger. The
 		// executor receives the same value, but normalizing here keeps records
 		// correct for custom runners as well.
-		record.Trigger = ScheduleTrigger(schedule.Name)
+		record.Trigger = trigger
 		if record.Started.IsZero() {
 			record.Started = started
 		}
@@ -490,6 +695,9 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		if record.Status == "" {
 			record.Status = statusForResult(record.ExitCode, record.Error)
 		}
+		// Scheduler-level retries are logical execution attempts, even when
+		// the workflow executor supplies the richer task/node record.
+		record.Attempts = attempts
 		s.record(record)
 		return
 	}
@@ -500,9 +708,11 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		recordFinished = attempts[len(attempts)-1].Finished
 	}
 	record := Record{
-		RunID: NewRunID(), Project: schedule.Project, Name: schedule.Name, TargetType: schedule.TargetType,
-		Target: schedule.Target, Trigger: ScheduleTrigger(schedule.Name), Started: recordStarted, Finished: recordFinished,
-		ExitCode: execution.ExitCode, Stderr: execution.Stderr, Attempts: attempts,
+		RunID: runID, Project: schedule.Project, Name: schedule.Name, TargetType: schedule.TargetType,
+		Target: schedule.Target, Trigger: trigger, Started: recordStarted, Finished: recordFinished,
+		ConfigurationGeneration: schedule.ConfigurationGeneration,
+		ExitCode:                execution.ExitCode, Stderr: execution.Stderr, StdoutPath: execution.StdoutPath, StderrPath: execution.StderrPath,
+		Attempts: attempts,
 	}
 	if execution.Err != nil {
 		record.Error = execution.Err.Error()

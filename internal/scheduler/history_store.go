@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 // HistoryQuery describes the filters shared by the history IPC methods and
@@ -42,21 +44,67 @@ type historyClearer interface {
 }
 
 type memoryHistoryRepository struct {
-	mu       sync.Mutex
-	records  []Record
-	counters map[string]uint64
+	mu         sync.Mutex
+	records    []Record
+	counters   map[string]uint64
+	executions map[string]Execution
 }
 
 func newMemoryHistoryRepository() HistoryRepository {
-	return &memoryHistoryRepository{counters: make(map[string]uint64)}
+	return &memoryHistoryRepository{counters: make(map[string]uint64), executions: make(map[string]Execution)}
 }
 
 func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.records = append(r.records, cloneRecord(record))
-	for _, key := range counterKeys(record) {
-		r.counters[key]++
+	if record.RunID == "" {
+		record.RunID = NewRunID()
+	}
+	created := true
+	previousStatus := ""
+	var previousRecord Record
+	for index := range r.records {
+		if record.RunID != "" && r.records[index].RunID == record.RunID {
+			created = false
+			previousRecord = cloneRecord(r.records[index])
+			previousStatus = previousRecord.Status
+			updated := cloneRecord(record)
+			if !IsTerminalStatus(previousStatus) || !IsTerminalStatus(record.Status) {
+				if len(updated.Attempts) == 0 {
+					updated.Attempts = append([]Attempt(nil), previousRecord.Attempts...)
+				}
+				if len(updated.Tasks) == 0 {
+					updated.Tasks = append([]TaskRecord(nil), previousRecord.Tasks...)
+				}
+			}
+			if IsTerminalStatus(record.Status) && !IsTerminalStatus(previousStatus) {
+				updated.Attempts = append(append([]Attempt(nil), previousRecord.Attempts...), updated.Attempts...)
+				updated.Tasks = append(append([]TaskRecord(nil), previousRecord.Tasks...), updated.Tasks...)
+			}
+			r.records[index] = updated
+			record = updated
+			break
+		}
+	}
+	if created {
+		r.records = append(r.records, cloneRecord(record))
+	}
+	if created || (!IsTerminalStatus(previousStatus) && IsTerminalStatus(record.Status)) {
+		for _, key := range counterKeys(record) {
+			r.counters[key]++
+		}
+	}
+	now := time.Now()
+	previous := r.executions[record.RunID]
+	if record.IdempotencyKey == "" {
+		record.IdempotencyKey = previous.IdempotencyKey
+	}
+	if record.ConfigurationGeneration == 0 {
+		record.ConfigurationGeneration = previous.ConfigurationGeneration
+	}
+	r.executions[record.RunID] = Execution{Record: cloneRecord(record), IdempotencyKey: record.IdempotencyKey, ConfigurationGeneration: record.ConfigurationGeneration, CreatedAt: previous.CreatedAt, UpdatedAt: now}
+	if r.executions[record.RunID].CreatedAt.IsZero() {
+		r.executions[record.RunID] = Execution{Record: cloneRecord(record), IdempotencyKey: record.IdempotencyKey, ConfigurationGeneration: record.ConfigurationGeneration, CreatedAt: now, UpdatedAt: now}
 	}
 	r.pruneLocked(limit)
 	return nil
@@ -67,6 +115,7 @@ func (r *memoryHistoryRepository) Clear(_ context.Context) error {
 	defer r.mu.Unlock()
 	r.records = nil
 	r.counters = make(map[string]uint64)
+	r.executions = make(map[string]Execution)
 	return nil
 }
 
@@ -132,6 +181,101 @@ func (r *memoryHistoryRepository) LatestSchedules(_ context.Context, schedules [
 
 func (*memoryHistoryRepository) Close() error { return nil }
 
+func (r *memoryHistoryRepository) BeginExecution(_ context.Context, record Record, idempotencyKey string, configurationGeneration uint64) (Execution, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, execution := range r.executions {
+		if idempotencyKey != "" && execution.IdempotencyKey == idempotencyKey {
+			return cloneExecution(execution), false, nil
+		}
+	}
+	if record.RunID == "" {
+		record.RunID = NewRunID()
+	}
+	now := time.Now()
+	if record.Status == "" {
+		record.Status = StatusQueued
+	}
+	record.IdempotencyKey = idempotencyKey
+	record.ConfigurationGeneration = configurationGeneration
+	execution := Execution{Record: cloneRecord(record), IdempotencyKey: idempotencyKey, ConfigurationGeneration: configurationGeneration, CreatedAt: now, UpdatedAt: now}
+	r.executions[record.RunID] = execution
+	r.records = append(r.records, cloneRecord(record))
+	return cloneExecution(execution), true, nil
+}
+
+func (r *memoryHistoryRepository) GetExecution(_ context.Context, runID string) (Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	execution, ok := r.executions[runID]
+	if !ok {
+		for _, record := range r.records {
+			if record.RunID == runID {
+				return Execution{Record: cloneRecord(record)}, nil
+			}
+		}
+		return Execution{}, ErrExecutionNotFound
+	}
+	return cloneExecution(execution), nil
+}
+
+func (r *memoryHistoryRepository) ListActiveExecutions(_ context.Context) ([]Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]Execution, 0)
+	for _, execution := range r.executions {
+		if execution.Record.Status == StatusQueued || execution.Record.Status == StatusRunning {
+			result = append(result, cloneExecution(execution))
+		}
+	}
+	return result, nil
+}
+
+func (r *memoryHistoryRepository) ListExecutions(_ context.Context, query ExecutionQuery) ([]Execution, error) {
+	if query.Limit < 0 {
+		return nil, errors.New("execution list limit must be non-negative")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]Execution, 0, len(r.executions))
+	for _, execution := range r.executions {
+		if !matchesExecutionQuery(execution, query) {
+			continue
+		}
+		result = append(result, cloneExecution(execution))
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Record.Started.Equal(result[j].Record.Started) {
+			return result[i].Record.RunID > result[j].Record.RunID
+		}
+		return result[i].Record.Started.After(result[j].Record.Started)
+	})
+	if query.Limit > 0 && query.Limit < len(result) {
+		result = result[:query.Limit]
+	}
+	return result, nil
+}
+
+func (r *memoryHistoryRepository) UpdateExecution(ctx context.Context, record Record) error {
+	return r.Record(ctx, record, 0)
+}
+
+func (*memoryHistoryRepository) RecordExecutionEvent(context.Context, ExecutionEvent) error {
+	return nil
+}
+
+func (*memoryHistoryRepository) RecordExecutionOperation(_ context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
+	if operation.RequestedAt.IsZero() {
+		operation.RequestedAt = time.Now()
+	}
+	return operation, nil
+}
+
+func cloneExecution(execution Execution) Execution {
+	execution.Record = cloneRecord(execution.Record)
+	return execution
+}
+
 func matchesHistoryQuery(record Record, query HistoryQuery) bool {
 	if query.TriggerType != "" && record.Trigger.Type != query.TriggerType {
 		return false
@@ -164,6 +308,26 @@ func matchesHistoryQuery(record Record, query HistoryQuery) bool {
 		}
 		return true
 	}
+}
+
+func matchesExecutionQuery(execution Execution, query ExecutionQuery) bool {
+	record := execution.Record
+	if query.Status != "" && record.Status != query.Status {
+		return false
+	}
+	if query.TriggerType != "" && record.Trigger.Type != query.TriggerType {
+		return false
+	}
+	if query.Trigger != "" && record.Trigger.Name != query.Trigger {
+		return false
+	}
+	if query.Project != "" && record.Project != query.Project {
+		return false
+	}
+	if query.TargetType != "" && record.TargetType != query.TargetType {
+		return false
+	}
+	return query.Target == "" || record.Target == query.Target
 }
 
 func recordContainsTask(record Record, name string) bool {
