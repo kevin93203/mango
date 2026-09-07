@@ -315,6 +315,17 @@ func TestLogsCommandResolvesMixedTargetsAndPrefixesEveryLine(t *testing.T) {
 
 	var mu sync.Mutex
 	readStarted := false
+	// The production code issues one goroutine per log target and orders
+	// output by response arrival. To keep the expected order deterministic
+	// (and avoid flakiness from timer-resolution and scheduling differences
+	// across OSes, notably Windows), synchronize completion explicitly:
+	// worker completes first, then nightly-job, then api. Each waiter also
+	// pauses briefly after being released so the goroutine it waited on has
+	// time to finish decoding and delivering its own response before this
+	// one proceeds, instead of racing to do so.
+	const settle = 20 * time.Millisecond
+	workerDone := make(chan struct{})
+	nightlyDone := make(chan struct{})
 	caller := func(_ context.Context, method string, params interface{}) (ipc.Response, error) {
 		var request struct {
 			Key    string `json:"Key"`
@@ -345,12 +356,16 @@ func TestLogsCommandResolvesMixedTargetsAndPrefixesEveryLine(t *testing.T) {
 			mu.Unlock()
 			switch request.Key {
 			case "demo/api":
-				time.Sleep(20 * time.Millisecond)
+				<-nightlyDone
+				time.Sleep(settle)
 				return ipc.Response{Data: map[string]string{"data": "service output\n"}}, nil
 			case "demo/nightly-job":
-				time.Sleep(5 * time.Millisecond)
+				<-workerDone
+				time.Sleep(settle)
+				close(nightlyDone)
 				return ipc.Response{Data: map[string]string{"data": "schedule output\r\n\r\nlast line"}}, nil
 			default:
+				close(workerDone)
 				return ipc.Response{Data: map[string]string{"data": "id output"}}, nil
 			}
 		default:
