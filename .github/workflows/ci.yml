@@ -61,13 +61,13 @@ jobs:
       - name: Run Go/Rust shim integration
         if: runner.os != 'Windows'
         env:
-          MANGO_SHIM_TEST_BINARY: mango-shim/target/debug/mango-shim
+          MANGO_SHIM_TEST_BINARY: ${{ github.workspace }}/mango-shim/target/release/mango-shim
         run: go test ./internal/shim -run TestRustShimClientStartOrAttach -count=1
 
       - name: Run daemon reattach integration
         if: runner.os != 'Windows'
         env:
-          MANGO_SHIM_TEST_BINARY: mango-shim/target/debug/mango-shim
+          MANGO_SHIM_TEST_BINARY: ${{ github.workspace }}/mango-shim/target/release/mango-shim
         run: go test ./internal/daemon -run TestDaemonReattachesRustShimAfterControlPlaneShutdown -count=1
 
       - name: Initialize and validate a standalone example
