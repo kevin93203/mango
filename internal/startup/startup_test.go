@@ -1,6 +1,7 @@
 package startup
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,25 +40,65 @@ func TestLaunchdPlistUsesFailureKeepAliveAndInstanceEnvironment(t *testing.T) {
 	}
 }
 
-func TestWindowsTaskUsesIgnoreNewAndWrapper(t *testing.T) {
-	xml := windowsTaskXML(`C:\Users\test user\mango\runtime\mangod-start.cmd`)
+func TestWindowsTaskRunsHiddenLauncherAsCurrentUser(t *testing.T) {
+	const userID = "S-1-5-21-111111111-222222222-333333333-1001"
+	xml := windowsTaskXML(`C:\Users\楊竣凱\App Data\mango\runtime\mangod-start.vbs`, userID)
 	for _, want := range []string{
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
-		"<Command>cmd.exe</Command>",
-		"mangod-start.cmd",
+		"<Command>wscript.exe</Command>",
+		`<Arguments>//B //Nologo &quot;C:\Users\楊竣凱\App Data\mango\runtime\mangod-start.vbs&quot;</Arguments>`,
+		"<LogonTrigger><Enabled>true</Enabled><UserId>" + userID + "</UserId></LogonTrigger>",
+		"<Principal id=\"Author\"><UserId>" + userID + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>",
 	} {
 		if !strings.Contains(xml, want) {
 			t.Fatalf("Windows task XML does not contain %q:\n%s", want, xml)
 		}
 	}
+	if strings.Contains(xml, "cmd.exe") || strings.Contains(xml, "mangod-start.cmd") {
+		t.Fatal("Windows task XML still launches the daemon through a visible cmd.exe wrapper")
+	}
+}
+
+func TestWindowsLauncherRunsDaemonHiddenAndWaits(t *testing.T) {
+	launcher := windowsLauncher(
+		`C:\Users\楊竣凱\Program Files\Mango\mangod.exe`,
+		`C:\Users\楊竣凱\App Data\mango`,
+	)
+	for _, want := range []string{
+		`Set shell = CreateObject("WScript.Shell")`,
+		`exitCode = shell.Run("""C:\Users\楊竣凱\Program Files\Mango\mangod.exe"" run --home ""C:\Users\楊竣凱\App Data\mango""", 0, True)`,
+		"WScript.Quit exitCode",
+	} {
+		if !strings.Contains(launcher, want) {
+			t.Fatalf("Windows launcher does not contain %q:\n%s", want, launcher)
+		}
+	}
+	data := windowsLauncherBytes(`C:\Users\楊竣凱\mangod.exe`, "")
+	if len(data) < 2 || data[0] != 0xff || data[1] != 0xfe {
+		t.Fatalf("Windows launcher is missing a UTF-16LE BOM: %x", data[:min(2, len(data))])
+	}
+}
+
+func TestCurrentUserIDIsSIDOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SID check")
+	}
+	userID, err := currentUserID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(userID, "S-1-") {
+		t.Fatalf("current user ID = %q, want a Windows SID", userID)
+	}
 }
 
 func TestWindowsTaskXMLUsesUTF16LEWithBOM(t *testing.T) {
-	data := windowsTaskXMLBytes(`C:\Users\test user\mango\runtime\mangod-start.cmd`)
+	const userID = "S-1-5-21-111111111-222222222-333333333-1001"
+	data := windowsTaskXMLBytes(`C:\Users\test user\mango\runtime\mangod-start.vbs`, userID)
 	if len(data) < 2 || data[0] != 0xff || data[1] != 0xfe {
 		t.Fatalf("Windows task XML is missing a UTF-16LE BOM: %x", data[:min(2, len(data))])
 	}
-	if !strings.Contains(windowsTaskXML(`C:\Users\test user\mango\runtime\mangod-start.cmd`), `encoding="UTF-16"`) {
+	if !strings.Contains(windowsTaskXML(`C:\Users\test user\mango\runtime\mangod-start.vbs`, userID), `encoding="UTF-16"`) {
 		t.Fatal("Windows task XML does not declare UTF-16 encoding")
 	}
 }
@@ -75,12 +116,15 @@ func TestWindowsTaskStatusDetailFallsBackToCanonicalTaskName(t *testing.T) {
 	}
 }
 
-func TestWindowsWrapperSetsMangoHome(t *testing.T) {
-	wrapper := windowsWrapper(`C:\Program Files\Mango\mangod.exe`, `C:\Users\test user\mango`)
-	if !strings.Contains(wrapper, `set "MANGO_HOME=C:\Users\test user\mango"`) {
-		t.Fatalf("wrapper does not set MANGO_HOME:\n%s", wrapper)
-	}
-	if !strings.Contains(wrapper, `"C:\Program Files\Mango\mangod.exe" run`) {
-		t.Fatalf("wrapper does not launch mangod:\n%s", wrapper)
+func TestWindowsCommandLineArg(t *testing.T) {
+	for input, want := range map[string]string{
+		`C:\mango`:            `C:\mango`,
+		`C:\Users\test user`:  `"C:\Users\test user"`,
+		`C:\`:                 `C:\`,
+		`C:\path with space\`: `"C:\path with space\\"`,
+	} {
+		if got := windowsCommandLineArg(input); got != want {
+			t.Errorf("windowsCommandLineArg(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
