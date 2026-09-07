@@ -119,12 +119,12 @@ pub fn process_is_alive(pid: u32, token: Option<&str>) -> bool {
         return false;
     }
     #[cfg(target_os = "linux")]
-    if let Ok(data) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-        if let Some(end) = data.rfind(')') {
-            let fields: Vec<&str> = data[end + 1..].split_whitespace().collect();
-            if fields.first() == Some(&"Z") {
-                return false;
-            }
+    if let Ok(data) = fs::read_to_string(format!("/proc/{pid}/stat"))
+        && let Some(end) = data.rfind(')')
+    {
+        let fields: Vec<&str> = data[end + 1..].split_whitespace().collect();
+        if fields.first() == Some(&"Z") {
+            return false;
         }
     }
     match token {
@@ -136,12 +136,12 @@ pub fn process_is_alive(pid: u32, token: Option<&str>) -> bool {
 pub fn process_start_token(pid: u32) -> String {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(data) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-            if let Some(end) = data.rfind(')') {
-                let fields: Vec<&str> = data[end + 1..].split_whitespace().collect();
-                if fields.len() > 19 {
-                    return fields[19].to_string();
-                }
+        if let Ok(data) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            && let Some(end) = data.rfind(')')
+        {
+            let fields: Vec<&str> = data[end + 1..].split_whitespace().collect();
+            if fields.len() > 19 {
+                return fields[19].to_string();
             }
         }
     }
