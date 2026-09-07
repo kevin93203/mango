@@ -6,6 +6,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -117,5 +120,21 @@ func (d *Daemon) shimStoppedForTest(project, service string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	status, err := client.Status(ctx)
-	return err != nil || (status.ServicePID == 0 && status.State == StateStopped)
+	if err == nil {
+		return status.ServicePID == 0 && status.State == StateStopped && shimExitedForTest(client.StateDir)
+	}
+	return shimExitedForTest(client.StateDir)
+}
+
+func shimExitedForTest(stateDir string) bool {
+	data, err := os.ReadFile(filepath.Join(stateDir, "shim.pid"))
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return true
+	}
+	err = syscall.Kill(pid, 0)
+	return err == syscall.ESRCH
 }

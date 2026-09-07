@@ -3,19 +3,24 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestResolveDaemonExecutablePrefersSibling(t *testing.T) {
 	dir := t.TempDir()
-	cliPath := filepath.Join(dir, "mango")
-	sibling := filepath.Join(dir, "mangod")
+	cliName, daemonName := "mango", "mangod"
+	if runtime.GOOS == "windows" {
+		cliName, daemonName = "mango.exe", "mangod.exe"
+	}
+	cliPath := filepath.Join(dir, cliName)
+	sibling := filepath.Join(dir, daemonName)
 	if err := os.WriteFile(sibling, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	path, err := resolveDaemonExecutableFrom(cliPath, "darwin", func(string) (string, error) {
+	path, err := resolveDaemonExecutableFrom(cliPath, runtime.GOOS, func(string) (string, error) {
 		t.Fatal("PATH lookup should not be used when sibling exists")
 		return "", nil
 	})
