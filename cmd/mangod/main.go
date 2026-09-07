@@ -12,10 +12,16 @@ import (
 )
 
 func main() {
-	if err := validateArgs(os.Args[1:]); err != nil {
+	mangoHome, err := parseArgs(os.Args[1:])
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "mangod requires the run command")
-		fmt.Fprintln(os.Stderr, "usage: mangod run")
+		fmt.Fprintln(os.Stderr, "usage: mangod run [--home PATH]")
 		os.Exit(2)
+	}
+	if mangoHome != "" {
+		if err := os.Setenv("MANGO_HOME", mangoHome); err != nil {
+			fatal(err)
+		}
 	}
 
 	layout, err := paths.Default()
@@ -30,10 +36,18 @@ func main() {
 }
 
 func validateArgs(args []string) error {
-	if len(args) != 1 || args[0] != "run" {
-		return fmt.Errorf("mangod requires the run command")
+	_, err := parseArgs(args)
+	return err
+}
+
+func parseArgs(args []string) (string, error) {
+	if len(args) == 1 && args[0] == "run" {
+		return "", nil
 	}
-	return nil
+	if len(args) == 3 && args[0] == "run" && args[1] == "--home" && args[2] != "" {
+		return args[2], nil
+	}
+	return "", fmt.Errorf("mangod requires the run command")
 }
 
 func fatal(err error) {

@@ -71,11 +71,15 @@ func installWindows(executable, mangoHome string) error {
 	if err != nil {
 		return err
 	}
-	wrapperPath := windowsWrapperPath(root)
-	if err := os.MkdirAll(filepath.Dir(wrapperPath), 0o700); err != nil {
+	launcherPath := windowsLauncherPath(root)
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(wrapperPath, []byte(windowsWrapper(executable, mangoHome)), 0o600); err != nil {
+	if err := os.WriteFile(launcherPath, windowsLauncherBytes(executable, mangoHome), 0o600); err != nil {
+		return err
+	}
+	userID, err := currentUserID()
+	if err != nil {
 		return err
 	}
 	taskFile, err := os.CreateTemp("", "mango-task-*.xml")
@@ -84,7 +88,7 @@ func installWindows(executable, mangoHome string) error {
 	}
 	taskPath := taskFile.Name()
 	defer os.Remove(taskPath)
-	if _, err := taskFile.Write(windowsTaskXMLBytes(wrapperPath)); err != nil {
+	if _, err := taskFile.Write(windowsTaskXMLBytes(launcherPath, userID)); err != nil {
 		_ = taskFile.Close()
 		return err
 	}
@@ -104,8 +108,10 @@ func uninstallWindows(mangoHome string) error {
 		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	if root, err := startupWrapperHome(mangoHome); err == nil {
-		if err := os.Remove(windowsWrapperPath(root)); err != nil && !os.IsNotExist(err) {
-			return err
+		for _, path := range []string{windowsLauncherPath(root), legacyWindowsWrapperPath(root)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 	}
 	return nil
@@ -298,7 +304,11 @@ func systemdQuote(value string) string {
 	return value
 }
 
-func windowsWrapperPath(mangoHome string) string {
+func windowsLauncherPath(mangoHome string) string {
+	return filepath.Join(mangoHome, "runtime", "mangod-start.vbs")
+}
+
+func legacyWindowsWrapperPath(mangoHome string) string {
 	return filepath.Join(mangoHome, "runtime", "mangod-start.cmd")
 }
 
@@ -313,22 +323,35 @@ func startupWrapperHome(mangoHome string) (string, error) {
 	return filepath.Join(config, "mango"), nil
 }
 
-func windowsWrapper(executable, mangoHome string) string {
-	lines := []string{"@echo off"}
+func windowsLauncher(executable, mangoHome string) string {
+	command := windowsCommandLineArg(executable) + " run"
 	if mangoHome != "" {
-		lines = append(lines, "set \"MANGO_HOME="+batchEscape(mangoHome)+"\"")
+		command += " --home " + windowsCommandLineArg(mangoHome)
 	}
-	lines = append(lines, "\""+batchEscape(executable)+"\" run", "")
-	return strings.Join(lines, "\r\n")
+	command = strings.ReplaceAll(command, `"`, `""`)
+	return strings.Join([]string{
+		"Option Explicit",
+		"Dim shell, exitCode",
+		`Set shell = CreateObject("WScript.Shell")`,
+		`exitCode = shell.Run("` + command + `", 0, True)`,
+		"WScript.Quit exitCode",
+		"",
+	}, "\r\n")
 }
 
-func windowsTaskXML(wrapperPath string) string {
+func windowsLauncherBytes(executable, mangoHome string) []byte {
+	return utf16LEBytes(windowsLauncher(executable, mangoHome))
+}
+
+func windowsTaskXML(launcherPath, userID string) string {
+	escapedUserID := xmlEscape(userID)
+	arguments := "//B //Nologo " + windowsCommandLineArg(launcherPath)
 	lines := []string{
 		"<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
 		"<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">",
 		"  <RegistrationInfo><Description>mango service manager</Description></RegistrationInfo>",
-		"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
-		"  <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
+		"  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + escapedUserID + "</UserId></LogonTrigger></Triggers>",
+		"  <Principals><Principal id=\"Author\"><UserId>" + escapedUserID + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
 		"  <Settings>",
 		"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
@@ -337,14 +360,18 @@ func windowsTaskXML(wrapperPath string) string {
 		"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
 		"    <Enabled>true</Enabled>",
 		"  </Settings>",
-		"  <Actions Context=\"Author\"><Exec><Command>cmd.exe</Command><Arguments>/D /S /C \"" + xmlEscape(wrapperPath) + "\"</Arguments></Exec></Actions>",
+		"  <Actions Context=\"Author\"><Exec><Command>wscript.exe</Command><Arguments>" + xmlEscape(arguments) + "</Arguments></Exec></Actions>",
 		"</Task>",
 	}
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
-func windowsTaskXMLBytes(wrapperPath string) []byte {
-	text := utf16.Encode([]rune(windowsTaskXML(wrapperPath)))
+func windowsTaskXMLBytes(launcherPath, userID string) []byte {
+	return utf16LEBytes(windowsTaskXML(launcherPath, userID))
+}
+
+func utf16LEBytes(value string) []byte {
+	text := utf16.Encode([]rune(value))
 	data := make([]byte, 2+len(text)*2)
 	data[0] = 0xff
 	data[1] = 0xfe
@@ -354,14 +381,30 @@ func windowsTaskXMLBytes(wrapperPath string) []byte {
 	return data
 }
 
-func batchEscape(value string) string {
-	value = strings.ReplaceAll(value, "%", "%%")
-	value = strings.ReplaceAll(value, "^", "^^")
-	value = strings.ReplaceAll(value, "&", "^&")
-	value = strings.ReplaceAll(value, "|", "^|")
-	value = strings.ReplaceAll(value, "<", "^<")
-	value = strings.ReplaceAll(value, ">", "^>")
-	return value
+func windowsCommandLineArg(value string) string {
+	if value != "" && !strings.ContainsAny(value, " \t\n\v\"") {
+		return value
+	}
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	backslashes := 0
+	for _, char := range value {
+		if char == '\\' {
+			backslashes++
+			continue
+		}
+		if char == '"' {
+			quoted.WriteString(strings.Repeat("\\", backslashes*2+1))
+			quoted.WriteRune(char)
+		} else {
+			quoted.WriteString(strings.Repeat("\\", backslashes))
+			quoted.WriteRune(char)
+		}
+		backslashes = 0
+	}
+	quoted.WriteString(strings.Repeat("\\", backslashes*2))
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 func xmlEscape(value string) string {
