@@ -155,6 +155,48 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	}
 }
 
+func TestRecoverActiveExecutionsMarksDurableRunsInterrupted(t *testing.T) {
+	layout := testLayout(t.TempDir())
+	repository, err := history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	d := New(layout)
+	if err := d.scheduler.SetHistoryRepository(repository); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Second)
+	for _, record := range []scheduler.Record{
+		{RunID: "queued-before-restart", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusQueued, Started: started},
+		{RunID: "running-before-restart", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusRunning, Started: started},
+		{RunID: "completed-before-restart", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: started, Finished: started, ExitCode: 0},
+	} {
+		if _, _, err := d.scheduler.BeginExecution(context.Background(), record, "", 11); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.recoverActiveExecutions(); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"queued-before-restart", "running-before-restart"} {
+		execution, err := d.scheduler.GetExecution(context.Background(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if execution.Record.Status != scheduler.StatusInterrupted || execution.Record.ExitCode != 125 || execution.Record.Error == "" {
+			t.Fatalf("recovered %s = %+v", runID, execution.Record)
+		}
+	}
+	completed, err := d.scheduler.GetExecution(context.Background(), "completed-before-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Record.Status != scheduler.StatusSuccess {
+		t.Fatalf("completed execution changed during recovery = %+v", completed.Record)
+	}
+}
+
 func TestHealthReportsHistoryDatabaseConnection(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

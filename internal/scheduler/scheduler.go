@@ -160,6 +160,17 @@ type ExecutionStore interface {
 	RecordExecutionOperation(context.Context, ExecutionOperation) (ExecutionOperation, error)
 }
 
+// ExecutionEventReader and ExecutionOperationReader are optional detail-read
+// boundaries for history.get. Keeping them separate preserves compatibility
+// with older embedders that implement only the execution lifecycle store.
+type ExecutionEventReader interface {
+	ListExecutionEvents(context.Context, string) ([]ExecutionEvent, error)
+}
+
+type ExecutionOperationReader interface {
+	ListExecutionOperations(context.Context, string) ([]ExecutionOperation, error)
+}
+
 // HistoryPurger is the narrow destructive history boundary. It removes only
 // terminal execution data; active execution metadata and lifetime counters are
 // outside its scope.
@@ -465,6 +476,24 @@ func (s *Scheduler) RecordExecutionOperation(ctx context.Context, operation Exec
 		return operation, nil
 	}
 	return store.RecordExecutionOperation(ctx, operation)
+}
+
+func (s *Scheduler) ListExecutionEvents(ctx context.Context, runID string) ([]ExecutionEvent, error) {
+	store := s.executionStore()
+	reader, ok := store.(ExecutionEventReader)
+	if !ok {
+		return []ExecutionEvent{}, nil
+	}
+	return reader.ListExecutionEvents(ctx, runID)
+}
+
+func (s *Scheduler) ListExecutionOperations(ctx context.Context, runID string) ([]ExecutionOperation, error) {
+	store := s.executionStore()
+	reader, ok := store.(ExecutionOperationReader)
+	if !ok {
+		return []ExecutionOperation{}, nil
+	}
+	return reader.ListExecutionOperations(ctx, runID)
 }
 
 // CancelExecution cancels a scheduler-owned execution. Manual executions are

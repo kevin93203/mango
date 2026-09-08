@@ -63,10 +63,17 @@ type memoryHistoryRepository struct {
 	records    []Record
 	counters   map[string]uint64
 	executions map[string]Execution
+	events     map[string][]ExecutionEvent
+	operations map[string][]ExecutionOperation
 }
 
 func newMemoryHistoryRepository() HistoryRepository {
-	return &memoryHistoryRepository{counters: make(map[string]uint64), executions: make(map[string]Execution)}
+	return &memoryHistoryRepository{
+		counters:   make(map[string]uint64),
+		executions: make(map[string]Execution),
+		events:     make(map[string][]ExecutionEvent),
+		operations: make(map[string][]ExecutionOperation),
+	}
 }
 
 func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit int) error {
@@ -136,6 +143,9 @@ func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit
 	if r.executions[record.RunID].CreatedAt.IsZero() {
 		r.executions[record.RunID] = Execution{Record: cloneRecord(record), IdempotencyKey: record.IdempotencyKey, ConfigurationGeneration: record.ConfigurationGeneration, CreatedAt: now, UpdatedAt: now}
 	}
+	if created || previousStatus != record.Status {
+		r.appendEventLocked(ExecutionEvent{RunID: record.RunID, Type: "state_transition", Status: record.Status})
+	}
 	r.pruneLocked(limit)
 	return nil
 }
@@ -153,6 +163,8 @@ func (r *memoryHistoryRepository) Clear(_ context.Context) error {
 	r.records = nil
 	r.counters = make(map[string]uint64)
 	r.executions = make(map[string]Execution)
+	r.events = make(map[string][]ExecutionEvent)
+	r.operations = make(map[string][]ExecutionOperation)
 	return nil
 }
 
@@ -283,6 +295,7 @@ func (r *memoryHistoryRepository) BeginExecution(_ context.Context, record Recor
 	execution := Execution{Record: cloneRecord(record), IdempotencyKey: idempotencyKey, ConfigurationGeneration: configurationGeneration, CreatedAt: now, UpdatedAt: now}
 	r.executions[record.RunID] = execution
 	r.records = append(r.records, cloneRecord(record))
+	r.appendEventLocked(ExecutionEvent{RunID: record.RunID, Type: "created", Status: record.Status})
 	return cloneExecution(execution), true, nil
 }
 
@@ -354,6 +367,8 @@ func (r *memoryHistoryRepository) Purge(_ context.Context, before *time.Time, al
 		purge := IsTerminalStatus(record.Status) && (all || record.Finished.Before(*before))
 		if purge {
 			delete(r.executions, record.RunID)
+			delete(r.events, record.RunID)
+			delete(r.operations, record.RunID)
 			removed++
 			continue
 		}
@@ -363,15 +378,43 @@ func (r *memoryHistoryRepository) Purge(_ context.Context, before *time.Time, al
 	return removed, nil
 }
 
-func (*memoryHistoryRepository) RecordExecutionEvent(context.Context, ExecutionEvent) error {
+func (r *memoryHistoryRepository) RecordExecutionEvent(_ context.Context, event ExecutionEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.appendEventLocked(event)
 	return nil
 }
 
-func (*memoryHistoryRepository) RecordExecutionOperation(_ context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
+func (r *memoryHistoryRepository) RecordExecutionOperation(_ context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if operation.RequestedAt.IsZero() {
-		operation.RequestedAt = time.Now()
+		operation.RequestedAt = time.Now().UTC()
 	}
+	operation.ID = int64(len(r.operations[operation.RunID]) + 1)
+	r.operations[operation.RunID] = append(r.operations[operation.RunID], operation)
+	r.appendEventLocked(ExecutionEvent{RunID: operation.RunID, Type: "operation:" + operation.Type, Status: operation.Status, Details: operation.Error, CreatedAt: operation.RequestedAt})
 	return operation, nil
+}
+
+func (r *memoryHistoryRepository) ListExecutionEvents(_ context.Context, runID string) ([]ExecutionEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ExecutionEvent(nil), r.events[runID]...), nil
+}
+
+func (r *memoryHistoryRepository) ListExecutionOperations(_ context.Context, runID string) ([]ExecutionOperation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ExecutionOperation(nil), r.operations[runID]...), nil
+}
+
+func (r *memoryHistoryRepository) appendEventLocked(event ExecutionEvent) {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	event.ID = int64(len(r.events[event.RunID]) + 1)
+	r.events[event.RunID] = append(r.events[event.RunID], event)
 }
 
 func cloneExecution(execution Execution) Execution {

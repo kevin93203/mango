@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,30 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed[0].Record.RunID != "durable-run" {
 		t.Fatalf("listed executions = %+v, err=%v", listed, err)
 	}
+	if err := repository.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
+		RunID: "durable-run", Type: "admin", Status: "recorded", Details: "test event",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{
+		RunID: "durable-run", Type: "inspect", Status: "requested",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := repository.ListExecutionEvents(context.Background(), "durable-run")
+	foundEvent := false
+	for _, event := range events {
+		if event.Type == "admin" && event.Details == "test event" {
+			foundEvent = true
+		}
+	}
+	if err != nil || len(events) < 3 || !foundEvent {
+		t.Fatalf("execution events = %+v, err=%v", events, err)
+	}
+	operations, err := repository.ListExecutionOperations(context.Background(), "durable-run")
+	if err != nil || len(operations) != 1 || operations[0].Type != "inspect" {
+		t.Fatalf("execution operations = %+v, err=%v", operations, err)
+	}
 
 	mutated := loaded.Record
 	mutated.Attempts = []scheduler.Attempt{{Number: 1, Started: started, Finished: started.Add(100 * time.Millisecond)}}
@@ -97,5 +122,26 @@ func TestSQLiteMigrationCreatesBackupBeforeReopen(t *testing.T) {
 	defer repository.Close()
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatalf("migration backup missing: %v", err)
+	}
+}
+
+func TestSQLiteMigrationRejectsNewerSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	repository, err := Open(Config{Driver: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", currentSchemaVersion+1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(Config{Driver: "sqlite", Path: path}); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("Open with newer schema version = %v, want fail-closed migration error", err)
+	}
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatalf("migration backup missing after refused upgrade: %v", err)
 	}
 }

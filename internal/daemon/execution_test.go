@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/history"
+	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/scheduler"
 )
 
@@ -119,6 +123,72 @@ func TestManualExecutionIdentityIdempotencyWatchAndLogs(t *testing.T) {
 	}
 }
 
+func TestManualExecutionIdempotencyIsConcurrent(t *testing.T) {
+	layout := testLayout(t.TempDir())
+	d := New(layout)
+	repository, err := history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	if err := d.scheduler.SetHistoryRepository(repository); err != nil {
+		t.Fatal(err)
+	}
+	d.workflow.Apply(map[string]config.EffectiveTask{
+		"demo/job": {
+			Project: "demo", Name: "job", Command: os.Args[0],
+			Args: []string{"-test.run=TestExecutionHelper", "--"}, WorkingDir: t.TempDir(),
+			Env: map[string]string{"MANGO_EXECUTION_HELPER": "1"},
+		},
+	}, nil)
+	request := requestForMethod(t, "task.run")
+	request.Params = json.RawMessage(`{"key":"demo/job","idempotency_key":"concurrent-request"}`)
+	const callers = 16
+	responses := make(chan ipc.Response, callers)
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	for range callers {
+		go func() {
+			defer wait.Done()
+			responses <- d.Handle(context.Background(), request)
+		}()
+	}
+	wait.Wait()
+	close(responses)
+	var runID string
+	for response := range responses {
+		if !response.OK {
+			t.Fatalf("concurrent task.run failed: %+v", response.Error)
+		}
+		var data map[string]string
+		if err := decodeTestData(response.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if runID == "" {
+			runID = data["run_id"]
+		}
+		if data["run_id"] != runID {
+			t.Fatalf("concurrent idempotency returned run %q after %q", data["run_id"], runID)
+		}
+	}
+	if runID == "" {
+		t.Fatal("concurrent task.run returned an empty run ID")
+	}
+	watch := requestForMethod(t, "execution.watch")
+	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, runID))
+	response := d.Handle(context.Background(), watch)
+	if !response.OK {
+		t.Fatalf("concurrent execution.watch failed: %+v", response.Error)
+	}
+	rows, err := d.scheduler.ListExecutions(context.Background(), scheduler.ExecutionQuery{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Record.RunID != runID {
+		t.Fatalf("concurrent idempotency executions = %+v, want one run %s", rows, runID)
+	}
+}
+
 func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	d.workflow.Apply(map[string]config.EffectiveTask{
@@ -159,6 +229,34 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 	}
 	if info.RunID != runID || info.Status != scheduler.StatusCancelled {
 		t.Fatalf("cancelled execution = %+v, want run %s cancelled", info, runID)
+	}
+	history := requestForMethod(t, "history.get")
+	history.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))
+	response = d.Handle(context.Background(), history)
+	if !response.OK {
+		t.Fatalf("history.get failed: %+v", response.Error)
+	}
+	var detail struct {
+		Events     []struct{ Type, Status string } `json:"events"`
+		Operations []struct{ Type, Status string } `json:"operations"`
+	}
+	if err := decodeTestData(response.Data, &detail); err != nil {
+		t.Fatal(err)
+	}
+	foundCancelled := false
+	for _, event := range detail.Events {
+		if event.Type == "state_transition" && event.Status == scheduler.StatusCancelled {
+			foundCancelled = true
+		}
+	}
+	foundCancelOperation := false
+	for _, operation := range detail.Operations {
+		if operation.Type == "cancel" && operation.Status == "requested" {
+			foundCancelOperation = true
+		}
+	}
+	if !foundCancelled || !foundCancelOperation {
+		t.Fatalf("history detail events=%+v operations=%+v", detail.Events, detail.Operations)
 	}
 	retry := requestForMethod(t, "execution.retry")
 	retry.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))

@@ -15,7 +15,7 @@ Kubernetes orchestration, or multi-host high availability.
 | Plan | Status | Depends on |
 | --- | --- | --- |
 | [00 Foundation and Platform](00-foundation-and-platform.md) | Completed | None |
-| [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Implemented (core) | 00 |
+| [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Completed | 00 |
 | [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Not started | 01 |
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Not started | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
@@ -30,13 +30,15 @@ Kubernetes orchestration, or multi-host high availability.
   tree/startup checks, CI acceptance steps, and documentation of the local IPC
   ownership, timeout, versioning, and shim attach/recovery boundaries. Existing
   YAML v3 and local-only IPC behavior remain unchanged.
-- **Phase 01 — Implemented (core).** Durable `run_id` records, queued/running/
-  terminal lifecycle transitions, attempts, parent and trigger metadata,
-  idempotency, execution query/watch/cancel/retry/log IPC, versioned metadata
-  migrations with SQLite backup, and active-run interruption recovery are present
-  in the codebase. The status is intentionally recorded as core implementation
-  rather than full phase completion until the remaining restart, migration-failure,
-  and concurrent-idempotency acceptance scenarios have dedicated coverage.
+- **Phase 01 — Completed.** Durable `run_id` records, queued/running/terminal
+  lifecycle transitions, attempts, parent and trigger metadata, configuration
+  generations, concurrent idempotency, execution query/watch/cancel/retry/log
+  IPC, event and operation read-back, versioned metadata migrations with SQLite
+  backup and fail-closed behavior, and active-run interruption recovery are
+  implemented. Workflow parent/child linkage, cancellation cleanup, terminal
+  history compatibility, post-exit logs, migration reopen/backup/failure, and
+  daemon restart recovery are covered by tests. Existing YAML v3 projects and
+  completed history remain readable.
 
 ## Dependency Flow
 

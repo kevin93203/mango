@@ -2848,7 +2848,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if !isTerminalExecution(execution.Record.Status) {
 			return failure(request, "HISTORY_NOT_FOUND", fmt.Errorf("execution %s is not terminal", p.RunID))
 		}
-		return success(request, historyDetail(execution.Record))
+		detail, err := d.historyDetail(d.executionContext(), execution.Record)
+		if err != nil {
+			return failure(request, "HISTORY_READ_FAILED", err)
+		}
+		return success(request, detail)
 	case "history.purge":
 		var p struct {
 			Before string `json:"before"`
@@ -3245,8 +3249,35 @@ func historyInfo(record scheduler.Record, includeDetails bool) api.HistoryInfo {
 	return info
 }
 
-func historyDetail(record scheduler.Record) api.HistoryDetail {
-	return api.HistoryDetail{HistoryInfo: historyInfo(record, true)}
+func (d *Daemon) historyDetail(ctx context.Context, record scheduler.Record) (api.HistoryDetail, error) {
+	detail := api.HistoryDetail{HistoryInfo: historyInfo(record, true)}
+	events, err := d.scheduler.ListExecutionEvents(ctx, record.RunID)
+	if err != nil {
+		return api.HistoryDetail{}, err
+	}
+	for _, event := range events {
+		created := event.CreatedAt
+		detail.Events = append(detail.Events, api.ExecutionEventInfo{
+			Type: event.Type, Status: event.Status, Details: event.Details, CreatedAt: &created,
+		})
+	}
+	operations, err := d.scheduler.ListExecutionOperations(ctx, record.RunID)
+	if err != nil {
+		return api.HistoryDetail{}, err
+	}
+	for _, operation := range operations {
+		item := api.ExecutionOperationInfo{Type: operation.Type, Status: operation.Status, Error: operation.Error}
+		if !operation.RequestedAt.IsZero() {
+			requested := operation.RequestedAt
+			item.RequestedAt = &requested
+		}
+		if !operation.CompletedAt.IsZero() {
+			completed := operation.CompletedAt
+			item.CompletedAt = &completed
+		}
+		detail.Operations = append(detail.Operations, item)
+	}
+	return detail, nil
 }
 
 func historyAttempts(attempts []scheduler.Attempt) []api.HistoryAttemptInfo {

@@ -722,6 +722,21 @@ func (r *Repository) RecordExecutionEvent(ctx context.Context, event scheduler.E
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return createEvent(tx, event) })
 }
 
+func (r *Repository) ListExecutionEvents(ctx context.Context, runID string) ([]scheduler.ExecutionEvent, error) {
+	var rows []eventModel
+	if err := r.db.WithContext(ctx).Where("run_id = ?", runID).Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]scheduler.ExecutionEvent, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, scheduler.ExecutionEvent{
+			ID: row.ID, RunID: row.RunID, Type: row.Type, Status: row.Status,
+			Details: row.Details, CreatedAt: row.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
 func (r *Repository) RecordExecutionOperation(ctx context.Context, operation scheduler.ExecutionOperation) (scheduler.ExecutionOperation, error) {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
@@ -741,6 +756,21 @@ func (r *Repository) RecordExecutionOperation(ctx context.Context, operation sch
 	}
 	operation.ID = model.ID
 	return operation, nil
+}
+
+func (r *Repository) ListExecutionOperations(ctx context.Context, runID string) ([]scheduler.ExecutionOperation, error) {
+	var rows []operationModel
+	if err := r.db.WithContext(ctx).Where("run_id = ?", runID).Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]scheduler.ExecutionOperation, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, scheduler.ExecutionOperation{
+			ID: row.ID, RunID: row.RunID, Type: row.Type, Status: row.Status,
+			Error: row.Error, RequestedAt: row.RequestedAt, CompletedAt: row.CompletedAt,
+		})
+	}
+	return result, nil
 }
 
 // Ping verifies that the database connection used by the repository is
