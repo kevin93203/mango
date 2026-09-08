@@ -61,6 +61,12 @@ that is intentionally stopped must not be restarted by a health or crash
 handler. A health-triggered restart must use the same backoff and crash-loop
 budget as an exit-triggered restart.
 
+The last successfully applied configuration generation is the source of truth
+for daemon startup. On restart, the daemon must restore that generation and
+reconcile it with observed state. It must not re-read or apply the project YAML
+as part of startup; changes to the YAML take effect only through an explicit
+plan or apply operation.
+
 Health state must be separate from lifecycle state and expose readiness,
 liveness/action, probe result, failing streak, and last transition.
 
@@ -70,6 +76,9 @@ liveness/action, probe result, failing streak, and last transition.
 - Produce deterministic plans for added, changed, removed, restarted, and
   unchanged services.
 - Assign a configuration generation to every successful apply.
+- Restore the last successful desired-state generation on daemon startup and
+  avoid treating the current project YAML as applied state without an explicit
+  plan or apply operation.
 - Persist apply operations and partial results.
 - Add rollback to the last successful generation.
 - Add startup timeout and explicit graceful stop policy.
@@ -91,6 +100,8 @@ liveness/action, probe result, failing streak, and last transition.
 
 - Verify deterministic plan output for add, change, remove, and no-op cases.
 - Verify dry-run does not stop or start processes.
+- Verify daemon restart restores the last successfully applied generation even
+  when the project YAML has changed without a subsequent apply.
 - Verify partial apply results and retry behavior.
 - Verify rollback restores the previous desired generation.
 - Verify health actions, startup grace, recovery thresholds, and cooldown.
@@ -103,6 +114,8 @@ liveness/action, probe result, failing streak, and last transition.
 - Operators can preview every process-affecting apply change.
 - Failed apply operations remain queryable and recoverable.
 - Existing v3 configurations behave as before by default.
+- Daemon restart restores the last successful applied generation and does not
+  silently apply uncommitted project YAML changes.
 - Unhealthy services can report, restart, or stop according to configuration.
 - Health-triggered restart cannot create an uncontrolled restart loop.
 - Dependency behavior is deterministic after daemon restart and apply.
