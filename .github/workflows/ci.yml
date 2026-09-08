@@ -37,6 +37,12 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Run cross-platform capability and process-tree acceptance
+        run: |
+          go test ./internal/capability -count=1
+          go test ./internal/process -count=1
+          go test ./internal/startup -count=1
+
       - name: Build CLI and daemon
         run: |
           go build ./cmd/mango

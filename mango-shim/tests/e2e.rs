@@ -17,6 +17,7 @@ fn root_exit_cleans_process_group_and_writes_exit_state() {
     let child_pid_path = root.join("child.pid");
     let stdout = root.join("stdout.log");
     let stderr = root.join("stderr.log");
+    let fixture = env!("CARGO_BIN_EXE_mango-test-fixture");
     fs::create_dir_all(&state_dir).expect("state directory");
     let bootstrap = json!({
         "schema_version": 1,
@@ -25,8 +26,8 @@ fn root_exit_cleans_process_group_and_writes_exit_state() {
         "instance_id": "test/service",
         "incarnation": "test-incarnation",
         "config_fingerprint": "test-fingerprint",
-        "command": "/bin/sh",
-        "args": ["-c", format!("sleep 30 & child=$!; echo $child > {}; exit 7", child_pid_path.display())],
+        "command": fixture,
+        "args": ["--mode", "tree-fail", "--child-pid-file", child_pid_path],
         "working_dir": root,
         "env": {},
         "autostart": true,
@@ -85,6 +86,7 @@ fn always_restart_uses_backoff_and_crash_loop_guard() {
     let root = temporary_directory();
     let state_dir = root.join("state");
     let endpoint = state_dir.join("endpoint.sock");
+    let fixture = env!("CARGO_BIN_EXE_mango-test-fixture");
     fs::create_dir_all(&state_dir).expect("state directory");
     let bootstrap = json!({
         "schema_version": 1,
@@ -93,8 +95,8 @@ fn always_restart_uses_backoff_and_crash_loop_guard() {
         "instance_id": "test/restart",
         "incarnation": "test-incarnation",
         "config_fingerprint": "test-fingerprint",
-        "command": "/bin/sh",
-        "args": ["-c", "exit 7"],
+        "command": fixture,
+        "args": ["--mode", "exit", "--code", "7"],
         "working_dir": root,
         "env": {},
         "autostart": true,

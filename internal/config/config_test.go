@@ -239,9 +239,9 @@ func TestLoadEffectiveWorkflowAndScheduleTargets(t *testing.T) {
 
 tasks:
   extract:
-    command: echo
+    command: mango-test-fixture
   transform:
-    command: echo
+    command: mango-test-fixture
 
 workflows:
   pipeline:
@@ -303,7 +303,7 @@ func TestLoadAndEffectiveTaskTimeoutAndRetry(t *testing.T) {
 
 tasks:
   job:
-    command: echo
+    command: mango-test-fixture
     timeout: 250ms
     retry:
       retries: 3
@@ -462,7 +462,7 @@ func TestVersionOneConfigIsRejected(t *testing.T) {
 }
 
 func TestVersionTwoConfigIsRejected(t *testing.T) {
-	file := File{Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"), Tasks: map[string]Task{"job": {Command: "echo"}}}
+	file := File{Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"), Tasks: map[string]Task{"job": {Command: "mango-test-fixture"}}}
 	err := Validate(file)
 	if err == nil || !strings.Contains(err.Error(), "version 3") {
 		t.Fatalf("error = %v, want version 3 rejection", err)
@@ -471,7 +471,7 @@ func TestVersionTwoConfigIsRejected(t *testing.T) {
 
 func TestLoadRejectsVersionTwoConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	if err := os.WriteFile(path, []byte("version: 2\n\ntasks:\n  job:\n    command: echo\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 2\n\ntasks:\n  job:\n    command: mango-test-fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "version 3") {
@@ -485,7 +485,7 @@ func TestLoadRejectsLegacyServiceEnvField(t *testing.T) {
 
 services:
   api:
-    command: echo
+    command: mango-test-fixture
     env:
       APP_ENV: test
 `
@@ -503,7 +503,7 @@ func TestLoadRejectsUnknownYAMLField(t *testing.T) {
 unknown: true
 services:
   api:
-    command: echo
+    command: mango-test-fixture
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -519,7 +519,7 @@ func TestLoadRejectsProjectYAMLField(t *testing.T) {
 project: demo
 services:
   api:
-    command: echo
+    command: mango-test-fixture
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -534,7 +534,7 @@ func TestLoadRejectsInvalidYAMLType(t *testing.T) {
 	content := `version: invalid
 services:
   api:
-    command: echo
+    command: mango-test-fixture
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -574,7 +574,7 @@ func TestLoadRejectsEmptyHealthCheckProbe(t *testing.T) {
 	content := `version: 3
 services:
   api:
-    command: echo
+    command: mango-test-fixture
     healthcheck:
       checks:
         - {}

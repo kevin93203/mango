@@ -1359,6 +1359,35 @@ required migration is incomplete.
 - `mango startup install` uses Windows Task Scheduler, Linux `systemd --user`,
   or a macOS `launchd` LaunchAgent.
 
+### Capability reporting and local IPC
+
+`mango doctor` and the daemon `health` response expose a `capabilities` map.
+Each capability has one of three states: `supported`, `degraded`, or
+`unsupported`, plus a detail string explaining the platform boundary. The
+report covers process-tree termination, graceful signals, user/group
+execution, CPU/memory limit primitives, startup integration, health probes,
+runtime-state persistence, and local IPC. Windows reports Job Object process
+containment and named-pipe IPC; Linux reports process groups, the shim
+subreaper path, and cgroup availability; macOS reports the process-group
+escape limitation and the absence of a portable Mango resource-limit adapter.
+
+The control plane and shim use versioned local JSON IPC only; Mango does not
+expose a remote API in this phase. Protocol version `2` is carried in every
+request and response, and `request_id` is echoed so callers can correlate a
+response. `mangod` owns desired configuration, reconciliation, scheduling,
+execution metadata, and history. Each `mango-shim` owns one service process
+tree, its restart/stop lifecycle, logs, and durable observed state. A caller's
+context deadline bounds an IPC call; service `stop_timeout` bounds graceful
+shutdown before force termination.
+
+On daemon restart, the daemon scans persisted shim state, validates the
+service key, instance/incarnation identity, configuration fingerprint, and
+shim handshake before attaching. A matching live shim is reused without
+starting a duplicate process. A live mismatch is shut down before replacement;
+an orphaned or uncertain process is surfaced as an error, while dead state is
+cleaned up. This keeps process ownership with the shim while the daemon owns
+the desired state.
+
 ## Development
 
 Run the test suite and static checks:

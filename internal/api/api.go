@@ -18,6 +18,26 @@ const (
 	StateUnknown    = "unknown"
 )
 
+const (
+	CapabilitySupported   = "supported"
+	CapabilityUnsupported = "unsupported"
+	CapabilityDegraded    = "degraded"
+)
+
+// CapabilityInfo describes one host or implementation capability. The state
+// is intentionally explicit so callers can distinguish a supported feature
+// from a known limitation and from a degraded fallback.
+type CapabilityInfo struct {
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// CapabilityReport is returned by the daemon health API and by mango doctor.
+type CapabilityReport struct {
+	Platform     string                    `json:"platform"`
+	Capabilities map[string]CapabilityInfo `json:"capabilities"`
+}
+
 // ServiceInfo is the public representation of a managed service and its
 // process tree.
 type ServiceInfo struct {

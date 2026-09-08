@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kevin93203/mango/internal/testfixture"
 )
 
 type sequenceExecutor struct {
@@ -111,14 +113,16 @@ func TestAggregatePolicies(t *testing.T) {
 }
 
 func TestCommandExecutorSupportsCMDAndShellWithEnvironment(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses POSIX command names")
-	}
+	fixture := testfixture.Build(t)
 	executor := CommandExecutor{Env: []string{"MANGO_HEALTH_TEST=ok"}}
-	if err := executor.Run(context.Background(), []string{"CMD", "true"}); err != nil {
+	if err := executor.Run(context.Background(), []string{"CMD", fixture, "--mode", "exit", "--code", "0"}); err != nil {
 		t.Fatalf("CMD = %v", err)
 	}
-	if err := executor.Run(context.Background(), []string{"CMD-SHELL", "test \"$MANGO_HEALTH_TEST\" = ok"}); err != nil {
+	script := `test "$MANGO_HEALTH_TEST" = ok`
+	if runtime.GOOS == "windows" {
+		script = `if "%MANGO_HEALTH_TEST%"=="ok" (exit /b 0) else (exit /b 1)`
+	}
+	if err := executor.Run(context.Background(), []string{"CMD-SHELL", script}); err != nil {
 		t.Fatalf("CMD-SHELL = %v", err)
 	}
 }

@@ -728,12 +728,13 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		"  location",
 		"  connection",
 		"  history schema",
+		"Capabilities",
 		"Daemon",
 		"  status",
 		"  pid",
 		"  api version",
 		"  daemon binary",
-		"  startup",
+		"  startup          ",
 		"  config errors",
 	}
 	last := -1
@@ -785,6 +786,14 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 	}
 	if !strings.Contains(database["error"].(string), "daemon unavailable") {
 		t.Fatalf("doctor JSON daemon history database error = %+v", database["error"])
+	}
+	capabilityReport, ok := report["capabilities"].(map[string]interface{})
+	if !ok || capabilityReport["platform"] == nil {
+		t.Fatalf("doctor JSON capabilities = %+v", report["capabilities"])
+	}
+	capabilities, ok := capabilityReport["capabilities"].(map[string]interface{})
+	if !ok || capabilities["process_tree_termination"] == nil {
+		t.Fatalf("doctor JSON capability entries = %+v", capabilityReport)
 	}
 	schema, ok := database["schema"].(map[string]interface{})
 	if !ok || schema["status"] != "unknown" {
@@ -1679,7 +1688,7 @@ func TestUnifiedHistoryTaskAttemptsTextOutput(t *testing.T) {
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
-	content := "version: 3\n\nservices:\n  api:\n    command: echo\n"
+	content := "version: 3\n\nservices:\n  api:\n    command: mango-test-fixture\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

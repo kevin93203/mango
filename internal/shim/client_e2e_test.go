@@ -11,6 +11,7 @@ import (
 
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/testfixture"
 )
 
 func TestRustShimClientStartOrAttach(t *testing.T) {
@@ -23,12 +24,13 @@ func TestRustShimClientStartOrAttach(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	fixture := testfixture.Build(t)
 	layout := paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"),
 		Logs: filepath.Join(root, "logs"), DaemonLog: filepath.Join(root, "daemon.log"),
 	}
 	spec := config.EffectiveService{
-		Project: "demo", Name: "api", Command: "/bin/sh", Args: []string{"-c", "sleep 60"},
+		Project: "demo", Name: "api", Command: fixture, Args: []string{"--mode", "sleep", "--duration", "60s"},
 		WorkingDir: root, Environment: map[string]string{"PATH": os.Getenv("PATH")},
 		Autostart: true, Restart: "never", StopTimeout: time.Second,
 		RestartWindow: time.Minute, StableAfter: time.Minute, LogMaxSize: 1 << 20, LogMaxFiles: 2,

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/health"
 	"github.com/kevin93203/mango/internal/history"
@@ -2628,13 +2629,14 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		}
 		d.mu.RUnlock()
 		database := d.historyDatabaseHealth(ctx)
+		capabilities := capability.Discover()
 		status := "ok"
 		if len(configErrors) > 0 || database.Status != "connected" || database.Schema.Status != "ready" {
 			status = "degraded"
 		}
 		return success(request, map[string]interface{}{
 			"status": status, "pid": os.Getpid(), "version": ipc.ProtocolVersion, "config_errors": configErrors,
-			"history_database": database,
+			"history_database": database, "capabilities": capabilities,
 		})
 	case "daemon.stop":
 		d.stopAllServices(true)

@@ -14,13 +14,29 @@ Kubernetes orchestration, or multi-host high availability.
 
 | Plan | Status | Depends on |
 | --- | --- | --- |
-| [00 Foundation and Platform](00-foundation-and-platform.md) | Not started | None |
-| [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Not started | 00 |
+| [00 Foundation and Platform](00-foundation-and-platform.md) | Completed | None |
+| [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Implemented (core) | 00 |
 | [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Not started | 01 |
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Not started | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
 | [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |
+
+## Implementation Audit
+
+- **Phase 00 — Completed.** Added the platform-neutral Go and Rust test
+  fixtures, capability discovery and reporting through `mango doctor` and the
+  health API, direct-executable integration coverage, cross-platform process
+  tree/startup checks, CI acceptance steps, and documentation of the local IPC
+  ownership, timeout, versioning, and shim attach/recovery boundaries. Existing
+  YAML v3 and local-only IPC behavior remain unchanged.
+- **Phase 01 — Implemented (core).** Durable `run_id` records, queued/running/
+  terminal lifecycle transitions, attempts, parent and trigger metadata,
+  idempotency, execution query/watch/cancel/retry/log IPC, versioned metadata
+  migrations with SQLite backup, and active-run interruption recovery are present
+  in the codebase. The status is intentionally recorded as core implementation
+  rather than full phase completion until the remaining restart, migration-failure,
+  and concurrent-idempotency acceptance scenarios have dedicated coverage.
 
 ## Dependency Flow
 

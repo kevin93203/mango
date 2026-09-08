@@ -3,6 +3,10 @@ name = "mango-shim"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "mango-test-fixture"
+path = "test-fixture.rs"
+
 [dependencies]
 fs2 = "0.4"
 serde = { version = "1.0", features = ["derive"] }

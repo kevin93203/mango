@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/testfixture"
 	"github.com/kevin93203/mango/internal/workflow"
 )
 
@@ -136,6 +136,18 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 	}
 	if data["status"] != "degraded" {
 		t.Fatalf("status = %q, want degraded", data["status"])
+	}
+	capabilityReport, ok := data["capabilities"].(map[string]interface{})
+	if !ok || capabilityReport["platform"] == nil {
+		t.Fatalf("capabilities = %+v", data["capabilities"])
+	}
+	capabilities, ok := capabilityReport["capabilities"].(map[string]interface{})
+	if !ok || capabilities["process_tree_termination"] == nil {
+		t.Fatalf("capability entries = %+v", capabilityReport)
+	}
+	processTree, ok := capabilities["process_tree_termination"].(map[string]interface{})
+	if !ok || processTree["state"] == nil || processTree["detail"] == nil {
+		t.Fatalf("process-tree capability = %+v", capabilities["process_tree_termination"])
 	}
 	configErrors, ok := data["config_errors"].(map[string]interface{})
 	if !ok || configErrors["demo"] == nil {
@@ -438,17 +450,12 @@ func TestScheduleRunTimeoutForceStopsAndRetries(t *testing.T) {
 }
 
 func TestV3TaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
-	if os.Getenv("MANGO_TASK_TIMEOUT_HELPER") == "1" {
-		time.Sleep(30 * time.Second)
-		os.Exit(0)
-	}
-
 	root := t.TempDir()
+	fixture := testfixture.Build(t)
 	d := New(testLayout(root))
 	task := config.EffectiveTask{
-		Project: "demo", Name: "slow-task", Command: os.Args[0], WorkingDir: root,
-		Args: []string{"-test.run=TestV3TaskTimeoutUsesIndependentRetryAttempts", "--"},
-		Env:  map[string]string{"MANGO_TASK_TIMEOUT_HELPER": "1"}, Timeout: 40 * time.Millisecond,
+		Project: "demo", Name: "slow-task", Command: fixture, WorkingDir: root,
+		Args: []string{"--mode", "sleep", "--duration", "30s"}, Timeout: 40 * time.Millisecond,
 		Concurrency: "forbid", RetryCount: 1, RetryDelay: 5 * time.Millisecond,
 	}
 	d.workflow.Apply(map[string]config.EffectiveTask{"demo/slow-task": task}, nil)
@@ -474,10 +481,8 @@ func TestV3SchedulesTriggerTasksAndWorkflows(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
-	taskSpec := "    command: echo"
-	if runtime.GOOS == "windows" {
-		taskSpec = "    command: cmd\n    args: [\"/C\", \"echo\"]"
-	}
+	fixture := testfixture.Build(t)
+	taskSpec := fmt.Sprintf("    command: %s\n    args: [--mode, sleep, --duration, 100ms]", yamlSingleQuote(fixture))
 	content := fmt.Sprintf(`version: 3
 
 tasks:
@@ -1340,15 +1345,15 @@ func TestPlanBulkServicesExpandsProjectsInDependencyOrderAndDeduplicates(t *test
 
 services:
   db:
-    command: echo
+    command: mango-test-fixture
     autostart: false
   web:
-    command: echo
+    command: mango-test-fixture
     autostart: false
     depends_on:
       db: {}
   api:
-    command: echo
+    command: mango-test-fixture
     autostart: false
     depends_on:
       web: {}
@@ -1572,14 +1577,10 @@ func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
 	readyPath := filepath.Join(root, "ready")
-	serviceCommand := "sh"
-	serviceArgs := `["-c", "sleep 2"]`
-	healthTest := `[CMD, test, -f, ready]`
-	if runtime.GOOS == "windows" {
-		serviceCommand = "cmd"
-		serviceArgs = `["/C", "ping -n 3 127.0.0.1 >NUL"]`
-		healthTest = `[CMD-SHELL, "if exist ready (exit 0) else (exit 1)"]`
-	}
+	fixture := testfixture.Build(t)
+	serviceCommand := yamlSingleQuote(fixture)
+	serviceArgs := `[--mode, sleep, --duration, 2s]`
+	healthTest := fmt.Sprintf("[CMD, %s, --mode, file-exists, --path, %s]", serviceCommand, yamlSingleQuote(readyPath))
 	content := fmt.Sprintf(`version: 3
 
 defaults:
@@ -1667,17 +1668,10 @@ func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
-	serviceCommand := "sh"
-	serviceArgs := func(argument string) string { return fmt.Sprintf(`["-c", "sleep %s"]`, argument) }
-	if runtime.GOOS == "windows" {
-		serviceCommand = "cmd"
-		serviceArgs = func(argument string) string {
-			count := "4"
-			if argument == "4" {
-				count = "5"
-			}
-			return fmt.Sprintf(`["/C", "ping -n %s 127.0.0.1 >NUL"]`, count)
-		}
+	fixture := testfixture.Build(t)
+	serviceCommand := yamlSingleQuote(fixture)
+	serviceArgs := func(argument string) string {
+		return fmt.Sprintf(`[--mode, sleep, --duration, %ss]`, argument)
 	}
 	writeDependentConfig := func(argument string) {
 		content := fmt.Sprintf(`version: 3
@@ -1850,7 +1844,7 @@ func writeTestConfig(t *testing.T, path string, processNames ...string) {
 	for _, processName := range processNames {
 		lines = append(lines,
 			fmt.Sprintf("  %s:", processName),
-			"    command: echo",
+			"    command: mango-test-fixture",
 			"    autostart: false",
 			"",
 		)
@@ -1866,7 +1860,7 @@ func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 		"",
 		"tasks:",
 		"  nightly-task:",
-		"    command: echo",
+		"    command: mango-test-fixture",
 		"",
 		"schedules:",
 		fmt.Sprintf("  - name: %s", scheduleName),
@@ -1878,6 +1872,10 @@ func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func yamlSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func assertProcessID(t *testing.T, items []ProcessInfo, key string, want int) {

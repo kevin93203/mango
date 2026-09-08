@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/shim"
+	"github.com/kevin93203/mango/internal/testfixture"
 )
 
 func TestDaemonReattachesRustShimAfterControlPlaneShutdown(t *testing.T) {
@@ -27,20 +29,21 @@ func TestDaemonReattachesRustShimAfterControlPlaneShutdown(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(shimBinary)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	root := t.TempDir()
+	fixture := testfixture.Build(t)
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "mango.yaml")
-	configData := []byte(`version: 3
+	configData := []byte(fmt.Sprintf(`version: 3
 
 defaults:
   supervisor: shim
 
 services:
   api:
-    command: /bin/sh
-    args: [-c, "sleep 60"]
+    command: %s
+    args: [--mode, sleep, --duration, 60s]
     autostart: true
     restart: never
-`)
+	`, yamlSingleQuote(fixture)))
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}

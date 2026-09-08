@@ -18,6 +18,7 @@ import (
 
 	mango "github.com/kevin93203/mango"
 	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/ipc"
@@ -1882,15 +1883,17 @@ func doctorCommand(layout paths.Layout) error {
 		"runtime_socket": layout.SocketPath,
 	}
 	databaseReport := doctorDatabaseReport(daemonDatabase)
+	capabilityReport := capability.Discover()
 	if jsonOutput {
 		report := map[string]interface{}{
 			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry, "logs": layout.Logs,
 			"daemon_log": layout.DaemonLog, "execution_history": historyLocation,
 			"history_database": map[string]string{"driver": historyDriver, "location": historyLocation},
 			"registry_ok":      registryOK, "registry_error": registryError,
-			"daemon":      daemonData,
-			"environment": environmentReport,
-			"database":    databaseReport,
+			"daemon":       daemonData,
+			"environment":  environmentReport,
+			"database":     databaseReport,
+			"capabilities": capabilityReport,
 		}
 		if daemonExecutableErr == nil {
 			report["daemon_executable"] = daemonExecutable
@@ -1933,6 +1936,15 @@ func doctorCommand(layout paths.Layout) error {
 		{Name: "connection", Value: doctorDatabaseConnection(daemonDatabase), Style: doctorDatabaseStyle(daemonDatabase)},
 		{Name: "history schema", Value: doctorSchemaStatus(daemonDatabase.Schema), Style: doctorSchemaStyle(daemonDatabase.Schema)},
 	})
+	capabilityFields := make([]doctorField, 0, len(capabilityReport.Capabilities))
+	for name, info := range capabilityReport.Capabilities {
+		capabilityFields = append(capabilityFields, doctorField{
+			Name: name, Value: info.State + capabilityDetailSuffix(info.Detail),
+			Style: capabilityStatusStyle(info.State),
+		})
+	}
+	sort.Slice(capabilityFields, func(i, j int) bool { return capabilityFields[i].Name < capabilityFields[j].Name })
+	printDoctorSection("Capabilities", capabilityFields)
 	configErrors, configErrorsStyle := doctorConfigErrors(daemonHealth.ConfigErrors, daemonAvailable)
 	daemonStatus := daemonHealth.Status
 	if daemonStatus == "" {
@@ -1964,6 +1976,26 @@ func doctorCommand(layout paths.Layout) error {
 		{Name: "config errors", Value: configErrors, Style: configErrorsStyle},
 	})
 	return nil
+}
+
+func capabilityDetailSuffix(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return ": " + detail
+}
+
+func capabilityStatusStyle(state string) cliui.Style {
+	switch state {
+	case api.CapabilitySupported:
+		return cliui.StyleSuccess
+	case api.CapabilityDegraded:
+		return cliui.StyleWarning
+	case api.CapabilityUnsupported:
+		return cliui.StyleError
+	default:
+		return cliui.StyleWarning
+	}
 }
 
 type doctorField struct {
