@@ -49,7 +49,7 @@ func TestTaskAndWorkflowRunShowRunIDWithoutJSON(t *testing.T) {
 		return ipc.Response{OK: true, Data: json.RawMessage(data)}, nil
 	}
 
-	if err := taskCommandWithCaller([]string{"run", "demo/backup"}, caller); err != nil {
+	if err := taskRunCommandWithCaller("demo/backup", caller); err != nil {
 		t.Fatal(err)
 	}
 	if text := output.String(); !strings.Contains(text, "Task demo/backup queued (run_id=task-run-1)") {
@@ -57,7 +57,7 @@ func TestTaskAndWorkflowRunShowRunIDWithoutJSON(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := workflowCommandWithCaller([]string{"run", "demo/release"}, caller); err != nil {
+	if err := workflowRunCommandWithCaller("demo/release", caller); err != nil {
 		t.Fatal(err)
 	}
 	if text := output.String(); !strings.Contains(text, "Workflow demo/release queued (run_id=workflow-run-1)") {
@@ -76,7 +76,7 @@ func TestExecutionListTextOutput(t *testing.T) {
 	jsonOutput = false
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	finished := started.Add(time.Second)
-	err := executionListCommandWithCaller([]string{"--status", "success", "--target", "demo/job", "--limit", "10"}, func(method string, params interface{}) (ipc.Response, error) {
+	err := executionListCommandWithCaller(executionListCLIParams{Status: "success", Target: "demo/job", Limit: 10}, func(method string, params interface{}) (ipc.Response, error) {
 		if method != "execution.ls" {
 			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
 		}
@@ -120,7 +120,7 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	if err := initCommand(nil); err != nil {
+	if err := initCommand(initOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +165,7 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 
 func TestInitCommandCreatesParentDirectoriesAndValidatesCustomConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config", "custom.yaml")
-	if err := initCommand([]string{path}); err != nil {
+	if err := initCommand(initOptions{Path: path}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
@@ -191,7 +191,7 @@ func TestInitCommandPreservesAndForcesExampleFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := initCommand([]string{path}); err != nil {
+	if err := initCommand(initOptions{Path: path}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(examplePath)
@@ -202,7 +202,7 @@ func TestInitCommandPreservesAndForcesExampleFiles(t *testing.T) {
 		t.Fatalf("existing example changed without force: %q", data)
 	}
 
-	if err := initCommand([]string{path, "--force"}); err != nil {
+	if err := initCommand(initOptions{Path: path, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	want, err := fs.ReadFile(mango.ExampleFiles(), "examples/tasks/emit.go")
@@ -235,7 +235,7 @@ func TestInitCommandRefusesExistingFileUnlessForced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := initCommand([]string{path}); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if err := initCommand(initOptions{Path: path}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("init existing file error = %v, want already-exists error", err)
 	}
 	data, err := os.ReadFile(path)
@@ -246,7 +246,7 @@ func TestInitCommandRefusesExistingFileUnlessForced(t *testing.T) {
 		t.Fatalf("existing file changed after rejected init: %q", data)
 	}
 
-	if err := initCommand([]string{path, "--force"}); err != nil {
+	if err := initCommand(initOptions{Path: path, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	data, err = os.ReadFile(path)
@@ -266,17 +266,13 @@ func TestInitCommandRefusesExistingFileUnlessForced(t *testing.T) {
 }
 
 func TestInitCommandValidatesArgumentsAndJSON(t *testing.T) {
-	if err := initCommand([]string{"config.toml"}); err == nil || !strings.Contains(err.Error(), ".yaml") {
+	if err := initCommand(initOptions{Path: "config.toml"}); err == nil || !strings.Contains(err.Error(), ".yaml") {
 		t.Fatalf("invalid extension error = %v, want yaml extension error", err)
 	}
-	if err := initCommand([]string{"one.yaml", "two.yaml"}); err == nil || !strings.Contains(err.Error(), "at most one PATH") {
-		t.Fatalf("too many paths error = %v, want positional argument error", err)
-	}
-
 	previousJSON := jsonOutput
 	jsonOutput = true
 	defer func() { jsonOutput = previousJSON }()
-	if err := initCommand(nil); err == nil || !strings.Contains(err.Error(), "--json is not supported for init") {
+	if err := initCommand(initOptions{}); err == nil || !strings.Contains(err.Error(), "--json is not supported for init") {
 		t.Fatalf("JSON error = %v, want unsupported-json error", err)
 	}
 }
@@ -344,36 +340,6 @@ func TestFollowLogsTargetsUsesSharedWriterAndCanBeCancelled(t *testing.T) {
 	want := "｜demo/api｜ initial\n｜demo/api｜ followed\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
-	}
-}
-
-func TestParseLogsArgsAcceptsZeroOneAndMultipleTargets(t *testing.T) {
-	tests := []struct {
-		name   string
-		args   []string
-		want   []string
-		stream string
-		tail   int
-		follow bool
-	}{
-		{name: "zero", args: nil, want: []string{}, stream: "all", tail: 15},
-		{name: "one", args: []string{"demo/api"}, want: []string{"demo/api"}, stream: "all", tail: 15},
-		{name: "many and flags", args: []string{"demo/api", "demo/job", "7", "--stream", "stderr", "--tail", "4", "--follow"}, want: []string{"demo/api", "demo/job", "7"}, stream: "stderr", tail: 4, follow: true},
-		{name: "flags before targets", args: []string{"--stream=stdout", "--tail=2", "demo/api", "demo/job"}, want: []string{"demo/api", "demo/job"}, stream: "stdout", tail: 2},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			targets, options, err := parseLogsArgs(test.args)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Join(targets, ",") != strings.Join(test.want, ",") {
-				t.Fatalf("targets = %v, want %v", targets, test.want)
-			}
-			if options.stream != test.stream || options.tail != test.tail || options.follow != test.follow {
-				t.Fatalf("options = %+v, want stream=%s tail=%d follow=%t", options, test.stream, test.tail, test.follow)
-			}
-		})
 	}
 }
 
@@ -447,7 +413,7 @@ func TestLogsCommandResolvesMixedTargetsAndPrefixesEveryLine(t *testing.T) {
 		}
 	}
 
-	err := logsCommandWithCaller([]string{"demo/api", "demo/nightly-job", "7", "--stream", "stdout", "--tail", "2"}, caller)
+	err := logsCommandWithCaller([]string{"demo/api", "demo/nightly-job", "7"}, logsOptions{stream: "stdout", tail: 2}, caller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +451,7 @@ func TestLogsCommandDoesNotReadWhenAnyTargetCannotResolve(t *testing.T) {
 		return ipc.Response{Data: map[string]string{"key": request.Key}}, nil
 	}
 
-	err := logsCommandWithCaller([]string{"good", "bad", "--stream", "stdout"}, caller)
+	err := logsCommandWithCaller([]string{"good", "bad"}, logsOptions{stream: "stdout"}, caller)
 	if err == nil || !strings.Contains(err.Error(), `logs target "bad"`) {
 		t.Fatalf("error = %v, want bad target error", err)
 	}
@@ -583,7 +549,7 @@ func TestDaemonLogsCommandDefaultsToLastFifteenLines(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, nil); err != nil {
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, daemonLogsOptions{Tail: 15}); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
@@ -611,7 +577,7 @@ func TestDaemonLogsCommandTailZeroAndMissingFile(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, []string{"--tail", "0"}); err != nil {
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, daemonLogsOptions{Tail: 0}); err != nil {
 		t.Fatal(err)
 	}
 	want := "｜daemon｜ first\n｜daemon｜ \n｜daemon｜ last\n"
@@ -620,7 +586,7 @@ func TestDaemonLogsCommandTailZeroAndMissingFile(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(root, "missing.log")}, nil); err != nil {
+	if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(root, "missing.log")}, daemonLogsOptions{Tail: 15}); err != nil {
 		t.Fatalf("missing daemon log = %v, want success", err)
 	}
 	if output.Len() != 0 {
@@ -633,20 +599,15 @@ func TestDaemonLogsCommandRejectsInvalidArguments(t *testing.T) {
 	defer func() { jsonOutput = previousJSON }()
 	jsonOutput = false
 
-	tests := [][]string{
-		{"--tail", "-1"},
-		{"--stream", "stdout"},
-		{"clear"},
-		{"unexpected-target"},
-	}
-	for _, args := range tests {
-		if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(t.TempDir(), "daemon.log")}, args); err == nil {
-			t.Fatalf("daemon logs %v unexpectedly succeeded", args)
+	tests := []daemonLogsOptions{{Tail: -1}}
+	for _, options := range tests {
+		if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(t.TempDir(), "daemon.log")}, options); err == nil {
+			t.Fatalf("daemon logs %+v unexpectedly succeeded", options)
 		}
 	}
 
 	jsonOutput = true
-	if err := daemonLogsCommand(paths.Layout{}, nil); err == nil || !strings.Contains(err.Error(), "--json is not supported") {
+	if err := daemonLogsCommand(paths.Layout{}, daemonLogsOptions{Tail: 15}); err == nil || !strings.Contains(err.Error(), "--json is not supported") {
 		t.Fatalf("JSON error = %v, want unsupported JSON error", err)
 	}
 }
@@ -867,11 +828,8 @@ func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 func TestConfigValidateUsesPositionalPath(t *testing.T) {
 	configPath := writeCLIConfig(t)
 
-	if err := configCommand([]string{"validate", configPath}); err != nil {
+	if err := configValidateCommand(configPath); err != nil {
 		t.Fatalf("config validate PATH = %v", err)
-	}
-	if err := configCommand([]string{"validate", "--file", configPath}); err == nil {
-		t.Fatal("config validate --file PATH unexpectedly succeeded")
 	}
 }
 
@@ -880,7 +838,7 @@ func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
 	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
 
-	if err := projectCommand(layout, []string{"add", "demo", configPath}); err != nil {
+	if err := projectAddCommand(layout, "demo", configPath); err != nil {
 		t.Fatalf("project add NAME PATH = %v", err)
 	}
 	reg, err := registry.Load(layout.Registry)
@@ -896,7 +854,7 @@ func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	duplicateConfigPath := writeCLIConfig(t)
-	if err := projectCommand(layout, []string{"add", "demo", duplicateConfigPath}); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if err := projectAddCommand(layout, "demo", duplicateConfigPath); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("duplicate project add error = %v, want already registered", err)
 	}
 	currentRegistry, err := os.ReadFile(layout.Registry)
@@ -906,13 +864,7 @@ func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
 	if string(currentRegistry) != string(originalRegistry) {
 		t.Fatalf("registry changed after duplicate add: before=%q after=%q", originalRegistry, currentRegistry)
 	}
-	if err := projectCommand(layout, []string{"add", "--file", configPath}); err == nil {
-		t.Fatal("project add --file PATH unexpectedly succeeded")
-	}
-	if err := projectCommand(layout, []string{"remove", "--name", "demo"}); err == nil {
-		t.Fatal("project remove --name NAME unexpectedly succeeded")
-	}
-	if err := projectCommand(layout, []string{"remove", "demo"}); err != nil {
+	if err := projectRemoveCommand(layout, "demo"); err != nil {
 		t.Fatalf("project remove NAME = %v", err)
 	}
 	reg, err = registry.Load(layout.Registry)
@@ -929,10 +881,10 @@ func TestProjectRenameReusesConfigPathAndRebuildsEntry(t *testing.T) {
 	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
 
-	if err := projectCommand(layout, []string{"add", "a_1", configPath}); err != nil {
+	if err := projectAddCommand(layout, "a_1", configPath); err != nil {
 		t.Fatalf("project add = %v", err)
 	}
-	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err != nil {
+	if err := projectRenameCommand(layout, "a_1", "demo"); err != nil {
 		t.Fatalf("project rename = %v", err)
 	}
 
@@ -962,7 +914,7 @@ func TestProjectRenameRejectsMissingConfigWithoutChangingRegistry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err == nil {
+	if err := projectRenameCommand(layout, "a_1", "demo"); err == nil {
 		t.Fatal("project rename unexpectedly succeeded for missing config")
 	}
 	current, err := os.ReadFile(layout.Registry)
@@ -979,17 +931,17 @@ func TestProjectRenameRejectsRegisteredTargetWithoutChangingRegistry(t *testing.
 	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	oldConfigPath := writeCLIConfig(t)
 	newConfigPath := writeCLIConfig(t)
-	if err := projectCommand(layout, []string{"add", "a_1", oldConfigPath}); err != nil {
+	if err := projectAddCommand(layout, "a_1", oldConfigPath); err != nil {
 		t.Fatalf("project add old = %v", err)
 	}
-	if err := projectCommand(layout, []string{"add", "demo", newConfigPath}); err != nil {
+	if err := projectAddCommand(layout, "demo", newConfigPath); err != nil {
 		t.Fatalf("project add new = %v", err)
 	}
 	original, err := os.ReadFile(layout.Registry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := projectCommand(layout, []string{"rename", "a_1", "demo"}); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if err := projectRenameCommand(layout, "a_1", "demo"); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("project rename error = %v, want registered target error", err)
 	}
 	current, err := os.ReadFile(layout.Registry)
@@ -1005,7 +957,7 @@ func TestProjectAddValidatesNameArgument(t *testing.T) {
 	root := t.TempDir()
 	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
-	if err := projectCommand(layout, []string{"add", "1demo", configPath}); err == nil || !strings.Contains(err.Error(), "project name must start with an ASCII letter") {
+	if err := projectAddCommand(layout, "1demo", configPath); err == nil || !strings.Contains(err.Error(), "project name must start with an ASCII letter") {
 		t.Fatalf("project add error = %v, want project name validation error", err)
 	}
 }
@@ -1041,16 +993,9 @@ func TestPrintDaemonWarningsIncludesApplyAction(t *testing.T) {
 }
 
 func TestProjectApplyUsesPositionalName(t *testing.T) {
-	name, err := projectApplyName([]string{"demo"})
-	if err != nil || name != "demo" {
-		t.Fatalf("project apply NAME = %q, %v", name, err)
-	}
-	if _, err := projectApplyName([]string{"--project", "demo"}); err == nil {
-		t.Fatal("project apply --project NAME unexpectedly succeeded")
-	}
-
+	name := "demo"
 	called := false
-	err = applyProjectCommandWithCaller(name, func(method string, params interface{}) (ipc.Response, error) {
+	err := applyProjectCommandWithCaller(name, func(method string, params interface{}) (ipc.Response, error) {
 		called = true
 		if method != "config.apply" {
 			t.Fatalf("method = %q, want config.apply", method)
@@ -1206,7 +1151,7 @@ func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
 
 	var method string
 	var params interface{}
-	err := scheduleCommandWithCaller([]string{"history", "--tail", "2", "--attempts"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 2, Attempts: true}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		params = gotParams
 		return ipc.Response{Data: []scheduler.Record{{
@@ -1214,7 +1159,7 @@ func TestScheduleHistoryTailAndStderrSummary(t *testing.T) {
 			Stderr:   "Traceback (most recent call last):\nZeroDivisionError: division by zero\n",
 			Attempts: []scheduler.Attempt{{Number: 1, ExitCode: 1, Stderr: "Traceback (most recent call last):\nZeroDivisionError: division by zero\n"}},
 		}}}, nil
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1245,7 +1190,7 @@ func TestScheduleHistoryAttemptsTextOutput(t *testing.T) {
 
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	finished := started.Add(1250 * time.Millisecond)
-	err := scheduleCommandWithCaller([]string{"history", "--attempts"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100, Attempts: true}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{{
 			RunID: "run-1", Project: "demo", Name: "job", TargetType: "task", Target: "job", Trigger: scheduler.ScheduleTrigger("job"), ExitCode: 0,
 			Attempts: []scheduler.Attempt{
@@ -1259,7 +1204,7 @@ func TestScheduleHistoryAttemptsTextOutput(t *testing.T) {
 				},
 			},
 		}}}, nil
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1287,9 +1232,9 @@ func TestScheduleHistoryAttemptsShowsNoAttemptStatus(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
 	jsonOutput = false
 
-	err := scheduleCommandWithCaller([]string{"history", "--attempts"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100, Attempts: true}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{{Project: "demo", Name: "legacy"}}}, nil
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1330,7 +1275,7 @@ func TestScheduleListJSONIncludesRuntimeFields(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
 	jsonOutput = true
 
-	err := scheduleCommandWithCaller([]string{"ls"}, func(method string, params interface{}) (ipc.Response, error) {
+	err := scheduleListCommandWithCaller(func(method string, params interface{}) (ipc.Response, error) {
 		if method != "schedule.ls" || params != nil {
 			t.Fatalf("request = method %q params %#v, want schedule.ls with nil params", method, params)
 		}
@@ -1368,7 +1313,7 @@ func TestScheduleEnableDisableCommandUsesBulkIPC(t *testing.T) {
 		Action  string   `json:"action"`
 		Targets []string `json:"targets"`
 	}
-	err := scheduleCommandWithCaller([]string{"disable", "demo", "demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := scheduleOperationCommandWithCaller("disable", []string{"demo", "demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		encoded, err := json.Marshal(gotParams)
 		if err != nil {
@@ -1394,7 +1339,7 @@ func TestScheduleEnableDisableCommandUsesBulkIPC(t *testing.T) {
 
 	output.Reset()
 	jsonOutput = true
-	err = scheduleCommandWithCaller([]string{"enable", "demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err = scheduleOperationCommandWithCaller("enable", []string{"demo/nightly"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		if gotMethod != "schedule.bulk" {
 			t.Fatalf("method = %q, want schedule.bulk", gotMethod)
 		}
@@ -1423,7 +1368,7 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 	jsonOutput = true
 
 	var tail int
-	err := scheduleCommandWithCaller([]string{"history", "--tail", "0"}, func(_ string, params interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 0}, func(_ string, params interface{}) (ipc.Response, error) {
 		encoded, err := json.Marshal(params)
 		if err != nil {
 			return ipc.Response{}, err
@@ -1439,7 +1384,7 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 			Project: "demo", Name: "job", ExitCode: 0, Stderr: "notice\n",
 			Attempts: []scheduler.Attempt{{Number: 1, ExitCode: 0}},
 		}}}, nil
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1455,9 +1400,9 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := scheduleCommandWithCaller([]string{"history"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	if err := historyListCommandWithCaller(historyOptions{Tail: 100}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{}}, nil
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(output.String()) != "[]" {
@@ -1466,10 +1411,10 @@ func TestScheduleHistoryJSONIncludesStderrAndEmptyArray(t *testing.T) {
 }
 
 func TestScheduleHistoryRejectsNegativeTail(t *testing.T) {
-	err := scheduleCommandWithCaller([]string{"history", "--tail", "-1"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: -1}, func(_ string, _ interface{}) (ipc.Response, error) {
 		t.Fatal("caller should not be invoked for a negative tail")
 		return ipc.Response{}, nil
-	})
+	}, true)
 	if err == nil || !strings.Contains(err.Error(), "non-negative") {
 		t.Fatalf("error = %v, want non-negative validation", err)
 	}
@@ -1485,11 +1430,11 @@ func TestScheduleHistorySuccessWithStderrRemainsSuccessful(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	err := scheduleCommandWithCaller([]string{"history"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{{
 			RunID: "run-1", Project: "demo", Name: "job", TargetType: "task", Target: "job", Trigger: scheduler.ScheduleTrigger("job"), ExitCode: 0, Stderr: "diagnostic\n",
 		}}}, nil
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1512,7 +1457,7 @@ func TestHistoryWithoutTargetUsesUnifiedHistoryLoader(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	var method string
 	var params interface{}
-	err := historyCommandWithCaller(nil, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		params = gotParams
 		return ipc.Response{Data: []scheduler.Record{{
@@ -1550,11 +1495,11 @@ func TestHistoryClearCommand(t *testing.T) {
 
 	var method string
 	var params interface{}
-	err := historyCommandWithCaller([]string{"clear"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := historyClearCommandWithCaller(func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		params = gotParams
 		return ipc.Response{Data: map[string]string{"status": "cleared"}}, nil
-	}, false)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1565,28 +1510,15 @@ func TestHistoryClearCommand(t *testing.T) {
 		t.Fatalf("output = %q, want confirmation", output.String())
 	}
 
-	if err := historyCommandWithCaller([]string{"clear", "unexpected"}, func(string, interface{}) (ipc.Response, error) {
-		t.Fatal("history.clear caller invoked with invalid arguments")
-		return ipc.Response{}, nil
-	}, false); err == nil {
-		t.Fatal("history clear unexpectedly accepted arguments")
-	}
-	if err := historyCommandWithCaller([]string{"clear"}, func(string, interface{}) (ipc.Response, error) {
-		t.Fatal("schedule history clear caller invoked")
-		return ipc.Response{}, nil
-	}, true); err == nil {
-		t.Fatal("schedule history clear unexpectedly succeeded")
-	}
-
 	output.Reset()
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
 	jsonOutput = true
-	if err := historyCommandWithCaller([]string{"clear"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	if err := historyClearCommandWithCaller(func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		if gotMethod != "history.clear" || gotParams != nil {
 			t.Fatalf("JSON method = %q, params = %#v", gotMethod, gotParams)
 		}
 		return ipc.Response{Data: map[string]string{"status": "cleared"}}, nil
-	}, false); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var result map[string]string
@@ -1608,7 +1540,7 @@ func TestUnifiedHistoryWorkflowAttemptsTextOutput(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
 	jsonOutput = false
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	err := historyCommandWithCaller([]string{"--attempts", "--target-type", "workflow", "--target", "demo/pipeline"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100, Attempts: true, TargetType: "workflow", Target: "demo/pipeline"}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{{
 			Project: "demo", TargetType: "workflow", Target: "pipeline", Started: started,
 			Tasks: []scheduler.TaskRecord{{
@@ -1649,7 +1581,7 @@ func TestUnifiedHistoryJSONDoesNotEnterTUI(t *testing.T) {
 	jsonOutput = true
 
 	called := false
-	err := historyCommandWithCaller([]string{"--tail", "7"}, func(method string, params interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 7}, func(method string, params interface{}) (ipc.Response, error) {
 		called = true
 		if method != "history.ls" {
 			t.Fatalf("method = %q, want history.ls", method)
@@ -1691,7 +1623,7 @@ func TestUnifiedHistoryTaskFilterUsesHistoryLoader(t *testing.T) {
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	var method string
 	var params interface{}
-	err := historyCommandWithCaller([]string{"--target-type", "task"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100, TargetType: "task"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		params = gotParams
 		return ipc.Response{Data: []scheduler.Record{{
@@ -1727,7 +1659,7 @@ func TestUnifiedHistoryTaskAttemptsTextOutput(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 240})
 	jsonOutput = false
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	err := historyCommandWithCaller([]string{"--attempts", "--target-type", "task", "--target", "demo/compile"}, func(_ string, _ interface{}) (ipc.Response, error) {
+	err := historyListCommandWithCaller(historyOptions{Tail: 100, Attempts: true, TargetType: "task", Target: "demo/compile"}, func(_ string, _ interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []scheduler.Record{{
 			RunID: "run-1", Project: "demo", TargetType: "task", Target: "compile", Trigger: scheduler.ManualTrigger(), Started: started,
 			Tasks: []scheduler.TaskRecord{{Node: "compile", Task: "compile", Command: "compiler", Args: []string{"--mode", "release"}, WorkingDir: "/workspace", EnvKeys: []string{"MODE"}, Attempts: []scheduler.Attempt{{Number: 1, Started: started, Finished: started.Add(time.Second), DurationSeconds: 1, ExitCode: 1, Error: "failed", Stderr: "details\n"}}}},

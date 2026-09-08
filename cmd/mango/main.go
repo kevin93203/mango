@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -28,7 +27,6 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
 	"github.com/kevin93203/mango/internal/tui"
-	"github.com/spf13/pflag"
 	"golang.org/x/term"
 )
 
@@ -55,23 +53,20 @@ func main() {
 	}
 }
 
-func initCommand(args []string) error {
+type initOptions struct {
+	Path    string
+	HasPath bool
+	Force   bool
+}
+
+func initCommand(options initOptions) error {
 	if err := rejectJSON("init"); err != nil {
 		return err
 	}
 
-	flags := newFlagSet("init")
-	force := flags.Bool("force", false, "overwrite an existing configuration file")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) > 1 {
-		return errors.New("init accepts at most one PATH")
-	}
-
 	path := "mango.yaml"
-	if len(flags.Args()) == 1 {
-		path = flags.Args()[0]
+	if options.HasPath || options.Path != "" {
+		path = options.Path
 	}
 	if !strings.EqualFold(filepath.Ext(path), ".yaml") {
 		return fmt.Errorf("unsupported config file %q: only .yaml files are supported", path)
@@ -86,7 +81,7 @@ func initCommand(args []string) error {
 	}
 
 	data := []byte(mango.ExampleConfig())
-	if *force {
+	if options.Force {
 		if err := os.WriteFile(abs, data, 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", abs, err)
 		}
@@ -111,7 +106,7 @@ func initCommand(args []string) error {
 			return fmt.Errorf("close %s: %w", abs, err)
 		}
 	}
-	if err := copyExampleFiles(filepath.Dir(abs), *force); err != nil {
+	if err := copyExampleFiles(filepath.Dir(abs), options.Force); err != nil {
 		return err
 	}
 
@@ -160,75 +155,67 @@ func copyExampleFiles(root string, force bool) error {
 	})
 }
 
-func daemonCommand(layout paths.Layout, args []string) error {
-	if len(args) == 0 {
-		return errors.New("daemon requires start, stop, restart, status, or logs")
-	}
-	switch args[0] {
-	case "start":
-		if err := rejectJSON("daemon start"); err != nil {
-			return err
-		}
-		return startDaemon(layout)
-	case "stop":
-		if err := rejectJSON("daemon stop"); err != nil {
-			return err
-		}
-		_, err := callWithTimeout("daemon.stop", nil, processOperationTimeout)
+func daemonStartCommand(layout paths.Layout) error {
+	if err := rejectJSON("daemon start"); err != nil {
 		return err
-	case "restart":
-		if err := rejectJSON("daemon restart"); err != nil {
-			return err
-		}
-		if _, err := callWithTimeout("daemon.stop", nil, processOperationTimeout); err == nil {
-			if err := waitForDaemonStop(); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, ipc.ErrDaemonUnavailable) {
-			return fmt.Errorf("stop daemon before restart: %w", err)
-		}
-		return startDaemon(layout)
-	case "status":
-		response, err := call("health", nil)
-		if err != nil {
-			if jsonOutput {
-				return cliOutput.JSON(map[string]string{"status": "stopped"})
-			}
-			cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon: stopped"))
-			return nil
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		return printDaemonStatus(response.Data)
-	case "logs":
-		return daemonLogsCommand(layout, args[1:])
-	default:
-		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
+	return startDaemon(layout)
 }
 
-func daemonLogsCommand(layout paths.Layout, args []string) error {
+func daemonStopCommand() error {
+	if err := rejectJSON("daemon stop"); err != nil {
+		return err
+	}
+	_, err := callWithTimeout("daemon.stop", nil, processOperationTimeout)
+	return err
+}
+
+func daemonRestartCommand(layout paths.Layout) error {
+	if err := rejectJSON("daemon restart"); err != nil {
+		return err
+	}
+	if _, err := callWithTimeout("daemon.stop", nil, processOperationTimeout); err == nil {
+		if err := waitForDaemonStop(); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, ipc.ErrDaemonUnavailable) {
+		return fmt.Errorf("stop daemon before restart: %w", err)
+	}
+	return startDaemon(layout)
+}
+
+func daemonStatusCommand() error {
+	response, err := call("health", nil)
+	if err != nil {
+		if jsonOutput {
+			return cliOutput.JSON(map[string]string{"status": "stopped"})
+		}
+		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon: stopped"))
+		return nil
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	return printDaemonStatus(response.Data)
+}
+
+type daemonLogsOptions struct {
+	Tail   int
+	Follow bool
+}
+
+func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
 	if err := rejectJSON("daemon logs"); err != nil {
 		return err
 	}
-	flags := newFlagSet("daemon logs")
-	tail := flags.Int("tail", 15, "number of lines")
-	follow := flags.Bool("follow", false, "follow new output")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) != 0 {
-		return errors.New("daemon logs does not accept positional arguments")
-	}
-	if *tail < 0 {
+	if options.Tail < 0 {
 		return errors.New("daemon logs tail must be non-negative")
 	}
-	if *follow {
-		return followDaemonLogs(layout.DaemonLog, *tail)
+	if options.Follow {
+		return followDaemonLogs(layout.DaemonLog, options.Tail)
 	}
 
-	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, *tail)
+	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, options.Tail)
 	if err != nil {
 		return fmt.Errorf("read daemon log: %w", err)
 	}
@@ -436,120 +423,104 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 	return "", fmt.Errorf("mangod executable not found; install mango and mangod together or add %s to PATH", name)
 }
 
-func projectCommand(layout paths.Layout, args []string) error {
-	if len(args) == 0 {
-		return errors.New("project requires add, remove, rename, apply, or ls")
+func projectAddCommand(layout paths.Layout, projectName, configPath string) error {
+	if err := rejectJSON("project add"); err != nil {
+		return err
 	}
-	switch args[0] {
-	case "add":
-		if err := rejectJSON("project add"); err != nil {
-			return err
-		}
-		if len(args) != 3 {
-			return errors.New("project add requires NAME and PATH")
-		}
-		projectName, configPath := args[1], args[2]
-		if err := config.ValidateProjectName(projectName); err != nil {
-			return err
-		}
-		loaded, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-		reg, err := registry.Load(layout.Registry)
-		if err != nil {
-			return err
-		}
-		if err := addProjectToRegistry(&reg, projectName, loaded); err != nil {
-			return err
-		}
-		if err := registry.Save(layout.Registry, reg); err != nil {
-			return err
-		}
-		_, _ = call("project.reload", nil)
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", projectName)))
-		return nil
-	case "remove":
-		if err := rejectJSON("project remove"); err != nil {
-			return err
-		}
-		if len(args) != 2 {
-			return errors.New("project remove requires NAME")
-		}
-		name := args[1]
-		reg, err := registry.Load(layout.Registry)
-		if err != nil {
-			return err
-		}
-		if _, err := removeProjectFromRegistry(&reg, name); err != nil {
-			return err
-		}
-		if err := registry.Save(layout.Registry, reg); err != nil {
-			return err
-		}
-		_, _ = call("project.reload", nil)
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
-		return nil
-	case "rename":
-		if err := rejectJSON("project rename"); err != nil {
-			return err
-		}
-		if len(args) != 3 {
-			return errors.New("project rename requires OLD and NEW")
-		}
-		oldName, newName := args[1], args[2]
-		if oldName == newName {
-			return fmt.Errorf("project %q is already named %q", oldName, newName)
-		}
-		if err := config.ValidateProjectName(newName); err != nil {
-			return err
-		}
-		reg, err := registry.Load(layout.Registry)
-		if err != nil {
-			return err
-		}
-		oldProject, ok := reg.Projects[oldName]
-		if !ok {
-			return fmt.Errorf("project %q is not registered", oldName)
-		}
-		if _, ok := reg.Projects[newName]; ok {
-			return fmt.Errorf("project %q is already registered", newName)
-		}
-		loaded, err := config.Load(oldProject.ConfigPath)
-		if err != nil {
-			return err
-		}
-		if _, err := removeProjectFromRegistry(&reg, oldName); err != nil {
-			return err
-		}
-		if err := addProjectToRegistry(&reg, newName, loaded); err != nil {
-			return err
-		}
-		if err := registry.Save(layout.Registry, reg); err != nil {
-			return err
-		}
-		_, _ = call("project.reload", nil)
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", oldName, newName)))
-		return nil
-	case "apply":
-		return applyProjectCommand(args[1:])
-	case "ls":
-		response, err := call("project.ls", nil)
-		if err != nil {
-			return err
-		}
-		var projects []registry.Project
-		if err := decodeData(response.Data, &projects); err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(projects)
-		}
-		printProjectTable(projects)
-		return nil
-	default:
-		return fmt.Errorf("unknown project command %q", args[0])
+	if err := config.ValidateProjectName(projectName); err != nil {
+		return err
 	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return err
+	}
+	if err := addProjectToRegistry(&reg, projectName, loaded); err != nil {
+		return err
+	}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		return err
+	}
+	_, _ = call("project.reload", nil)
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", projectName)))
+	return nil
+}
+
+func projectRemoveCommand(layout paths.Layout, name string) error {
+	if err := rejectJSON("project remove"); err != nil {
+		return err
+	}
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return err
+	}
+	if _, err := removeProjectFromRegistry(&reg, name); err != nil {
+		return err
+	}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		return err
+	}
+	_, _ = call("project.reload", nil)
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
+	return nil
+}
+
+func projectRenameCommand(layout paths.Layout, oldName, newName string) error {
+	if err := rejectJSON("project rename"); err != nil {
+		return err
+	}
+	if oldName == newName {
+		return fmt.Errorf("project %q is already named %q", oldName, newName)
+	}
+	if err := config.ValidateProjectName(newName); err != nil {
+		return err
+	}
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return err
+	}
+	oldProject, ok := reg.Projects[oldName]
+	if !ok {
+		return fmt.Errorf("project %q is not registered", oldName)
+	}
+	if _, ok := reg.Projects[newName]; ok {
+		return fmt.Errorf("project %q is already registered", newName)
+	}
+	loaded, err := config.Load(oldProject.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if _, err := removeProjectFromRegistry(&reg, oldName); err != nil {
+		return err
+	}
+	if err := addProjectToRegistry(&reg, newName, loaded); err != nil {
+		return err
+	}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		return err
+	}
+	_, _ = call("project.reload", nil)
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", oldName, newName)))
+	return nil
+}
+
+func projectListCommand() error {
+	response, err := call("project.ls", nil)
+	if err != nil {
+		return err
+	}
+	var projects []registry.Project
+	if err := decodeData(response.Data, &projects); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(projects)
+	}
+	printProjectTable(projects)
+	return nil
 }
 
 func addProjectToRegistry(reg *registry.File, name string, loaded config.File) error {
@@ -574,17 +545,11 @@ func removeProjectFromRegistry(reg *registry.File, name string) (registry.Projec
 	return project, nil
 }
 
-func configCommand(args []string) error {
+func configValidateCommand(path string) error {
 	if err := rejectJSON("config validate"); err != nil {
 		return err
 	}
-	if len(args) == 0 || args[0] != "validate" {
-		return errors.New("config currently supports validate")
-	}
-	if len(args) != 2 {
-		return errors.New("config validate requires PATH")
-	}
-	loaded, err := config.Load(args[1])
+	loaded, err := config.Load(path)
 	if err != nil {
 		return err
 	}
@@ -592,11 +557,7 @@ func configCommand(args []string) error {
 	return nil
 }
 
-func applyProjectCommand(args []string) error {
-	project, err := projectApplyName(args)
-	if err != nil {
-		return err
-	}
+func applyProjectCommand(project string) error {
 	return applyProjectCommandWithCaller(project, call)
 }
 
@@ -616,13 +577,6 @@ func applyProjectCommandWithCaller(project string, caller func(string, interface
 	return nil
 }
 
-func projectApplyName(args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errors.New("project apply requires NAME")
-	}
-	return args[0], nil
-}
-
 func lsCommand() error {
 	response, err := call("service.ls", nil)
 	if err != nil {
@@ -639,11 +593,8 @@ func lsCommand() error {
 	return nil
 }
 
-func statusCommand(args []string) error {
-	if len(args) != 1 {
-		return errors.New("status requires PROJECT/SERVICE or ID")
-	}
-	response, err := call("service.get", struct{ Key string }{args[0]})
+func statusCommand(key string) error {
+	response, err := call("service.get", struct{ Key string }{key})
 	if err != nil {
 		return err
 	}
@@ -785,13 +736,6 @@ func containsArgument(args []string, target string) bool {
 	return false
 }
 
-func newFlagSet(name string) *pflag.FlagSet {
-	flags := pflag.NewFlagSet(name, pflag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	flags.SetInterspersed(true)
-	return flags
-}
-
 func rejectJSON(command string) error {
 	if jsonOutput {
 		return fmt.Errorf("--json is not supported for %s", command)
@@ -799,8 +743,8 @@ func rejectJSON(command string) error {
 	return nil
 }
 
-func logsCommand(args []string) error {
-	return logsCommandWithCaller(args, logsCall)
+func logsCommand(targets []string, options logsOptions) error {
+	return logsCommandWithCaller(targets, options, logsCall)
 }
 
 func monitorLogs(output *cliui.Renderer, key string, input <-chan byte) error {
@@ -850,18 +794,8 @@ type logEvent struct {
 	offset int64
 }
 
-func logsCommandWithCaller(args []string, caller logsCaller) error {
+func logsCommandWithCaller(targets []string, options logsOptions, caller logsCaller) error {
 	if err := rejectJSON("logs"); err != nil {
-		return err
-	}
-	if len(args) == 0 {
-		return errors.New("logs requires PROJECT/SERVICE, PROJECT/task/TASK, PROJECT/workflow/WORKFLOW/NODE, or ID")
-	}
-	if args[0] == "clear" {
-		return clearLogsCommand(args[1:])
-	}
-	targets, options, err := parseLogsArgs(args)
-	if err != nil {
 		return err
 	}
 	if len(targets) == 0 {
@@ -875,54 +809,6 @@ func logsCommandWithCaller(args []string, caller logsCaller) error {
 		return followLogsTargets(resolved, options.stream, options.tail, caller)
 	}
 	return readLogsTargets(resolved, options.stream, options.tail, caller)
-}
-
-func parseLogsArgs(args []string) ([]string, logsOptions, error) {
-	options := logsOptions{stream: "all", tail: 15}
-	fs := newFlagSet("logs")
-	stream := fs.String("stream", options.stream, "stdout, stderr, or all")
-	tail := fs.Int("tail", options.tail, "number of lines")
-	follow := fs.Bool("follow", false, "follow new output")
-
-	flagArgs := make([]string, 0, len(args))
-	targets := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			targets = append(targets, args[i+1:]...)
-			break
-		}
-		if isLogsFlag(arg, "follow") {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if isLogsFlag(arg, "stream") || isLogsFlag(arg, "tail") {
-			flagArgs = append(flagArgs, arg)
-			if !strings.Contains(arg, "=") {
-				if i+1 >= len(args) {
-					return nil, logsOptions{}, fmt.Errorf("%s requires a value", arg)
-				}
-				i++
-				flagArgs = append(flagArgs, args[i])
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			return nil, logsOptions{}, fmt.Errorf("flag provided but not defined: %s", arg)
-		}
-		targets = append(targets, arg)
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return nil, logsOptions{}, err
-	}
-	if len(fs.Args()) != 0 {
-		targets = append(targets, fs.Args()...)
-	}
-	return targets, logsOptions{stream: *stream, tail: *tail, follow: *follow}, nil
-}
-
-func isLogsFlag(arg, name string) bool {
-	return arg == "--"+name || arg == "-"+name || strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"=")
 }
 
 func resolveLogTargets(targets []string, caller logsCaller) ([]resolvedLogTarget, error) {
@@ -1056,11 +942,8 @@ func joinLogErrors(errs []error) error {
 	return joined
 }
 
-func clearLogsCommand(args []string) error {
-	if len(args) != 1 {
-		return errors.New("logs clear requires PROJECT/SERVICE, PROJECT/task/TASK, or PROJECT/workflow/WORKFLOW/NODE")
-	}
-	response, err := call("logs.clear", struct{ Key string }{args[0]})
+func clearLogsCommand(target string) error {
+	response, err := call("logs.clear", struct{ Key string }{target})
 	if err != nil {
 		return err
 	}
@@ -1262,42 +1145,28 @@ type followLogResponse struct {
 	NextOffset int64  `json:"next_offset"`
 }
 
-func scheduleCommand(args []string) error {
-	return scheduleCommandWithCaller(args, call)
+func scheduleListCommand() error {
+	return scheduleListCommandWithCaller(call)
 }
 
-func scheduleCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
-	if len(args) == 0 {
-		return errors.New("schedule requires ls, enable, disable, or history")
+func scheduleListCommandWithCaller(caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("schedule.ls", nil)
+	if err != nil {
+		return err
 	}
-	switch args[0] {
-	case "ls":
-		if len(args) != 1 {
-			return errors.New("schedule ls does not accept arguments")
-		}
-		response, err := caller("schedule.ls", nil)
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var schedules []api.ScheduleInfo
-		if err := decodeData(response.Data, &schedules); err != nil {
-			return err
-		}
-		printScheduleTable(schedules)
-		return nil
-	case "enable", "disable":
-		if len(args) < 2 {
-			return fmt.Errorf("schedule %s requires at least one PROJECT or PROJECT/SCHEDULE", args[0])
-		}
-		return scheduleOperationCommandWithCaller(args[0], args[1:], caller)
-	case "history":
-		return historyCommandWithCaller(args[1:], caller, true)
-	default:
-		return fmt.Errorf("unknown schedule command %q", args[0])
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
 	}
+	var schedules []api.ScheduleInfo
+	if err := decodeData(response.Data, &schedules); err != nil {
+		return err
+	}
+	printScheduleTable(schedules)
+	return nil
+}
+
+func scheduleOperationCommand(action string, targets []string) error {
+	return scheduleOperationCommandWithCaller(action, targets, call)
 }
 
 func scheduleOperationCommandWithCaller(action string, targets []string, caller func(string, interface{}) (ipc.Response, error)) error {
@@ -1338,119 +1207,91 @@ func scheduleOperationCommandWithCaller(action string, targets []string, caller 
 	return errors.Join(errs...)
 }
 
-func workflowCommand(args []string) error { return workflowCommandWithCaller(args, call) }
-
-func workflowCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
-	if len(args) == 0 {
-		return errors.New("workflow requires ls or run")
-	}
-	switch args[0] {
-	case "ls":
-		if len(args) != 1 {
-			return errors.New("workflow ls does not accept arguments")
-		}
-		response, err := caller("workflow.ls", nil)
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var items []api.WorkflowInfo
-		if err := decodeData(response.Data, &items); err != nil {
-			return err
-		}
-		printWorkflowTable(items)
-		return nil
-	case "run":
-		if len(args) != 2 {
-			return errors.New("workflow run requires PROJECT/WORKFLOW")
-		}
-		response, err := caller("workflow.run", struct{ Key string }{args[1]})
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var result map[string]string
-		if err := decodeData(response.Data, &result); err != nil {
-			return err
-		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s queued (run_id=%s)", result["key"], result["run_id"])))
-		return nil
-	default:
-		return fmt.Errorf("unknown workflow command %q", args[0])
-	}
+func workflowListCommand() error {
+	return workflowListCommandWithCaller(call)
 }
 
-func taskCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
-	if len(args) == 0 {
-		return errors.New("task requires ls or run")
+func workflowListCommandWithCaller(caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("workflow.ls", nil)
+	if err != nil {
+		return err
 	}
-	switch args[0] {
-	case "ls":
-		if len(args) != 1 {
-			return errors.New("task ls does not accept arguments")
-		}
-		response, err := caller("task.ls", nil)
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var items []api.TaskInfo
-		if err := decodeData(response.Data, &items); err != nil {
-			return err
-		}
-		printTaskTable(items)
-		return nil
-	case "run":
-		if len(args) != 2 {
-			return errors.New("task run requires PROJECT/TASK")
-		}
-		response, err := caller("task.run", struct{ Key string }{args[1]})
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var result map[string]string
-		if err := decodeData(response.Data, &result); err != nil {
-			return err
-		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s queued (run_id=%s)", result["key"], result["run_id"])))
-		return nil
-	default:
-		return fmt.Errorf("unknown task command %q", args[0])
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
 	}
+	var items []api.WorkflowInfo
+	if err := decodeData(response.Data, &items); err != nil {
+		return err
+	}
+	printWorkflowTable(items)
+	return nil
 }
 
-func executionCommand(args []string) error {
-	if len(args) == 0 {
-		return errors.New("execution requires ls, get, watch, cancel, retry, or logs")
+func taskListCommand() error {
+	return taskListCommandWithCaller(call)
+}
+
+func taskListCommandWithCaller(caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("task.ls", nil)
+	if err != nil {
+		return err
 	}
-	if args[0] == "ls" {
-		return executionListCommand(args[1:])
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
 	}
-	if args[0] == "logs" {
-		return executionLogsCommand(args[1:])
+	var items []api.TaskInfo
+	if err := decodeData(response.Data, &items); err != nil {
+		return err
 	}
-	if args[0] == "watch" {
-		return executionWatchCommand(args[1:])
+	printTaskTable(items)
+	return nil
+}
+
+func taskRunCommand(key string) error {
+	return taskRunCommandWithCaller(key, call)
+}
+
+func taskRunCommandWithCaller(key string, caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("task.run", struct{ Key string }{key})
+	if err != nil {
+		return err
 	}
-	if len(args) != 2 {
-		return fmt.Errorf("execution %s requires RUN_ID", args[0])
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
 	}
-	method := "execution." + args[0]
-	if args[0] != "get" && args[0] != "watch" && args[0] != "cancel" && args[0] != "retry" {
-		return fmt.Errorf("unknown execution command %q", args[0])
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
 	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s queued (run_id=%s)", result["key"], result["run_id"])))
+	return nil
+}
+
+func workflowRunCommand(key string) error {
+	return workflowRunCommandWithCaller(key, call)
+}
+
+func workflowRunCommandWithCaller(key string, caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("workflow.run", struct{ Key string }{key})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s queued (run_id=%s)", result["key"], result["run_id"])))
+	return nil
+}
+
+func executionCommand(action, runID string) error {
+	method := "execution." + action
 	response, err := call(method, struct {
 		RunID string `json:"run_id"`
-	}{RunID: args[1]})
+	}{RunID: runID})
 	if err != nil {
 		return err
 	}
@@ -1461,7 +1302,7 @@ func executionCommand(args []string) error {
 	if err := decodeData(response.Data, &info); err != nil {
 		return err
 	}
-	verb := map[string]string{"get": "Execution", "watch": "Execution", "cancel": "Cancellation requested for execution", "retry": "Retry started for execution"}[args[0]]
+	verb := map[string]string{"get": "Execution", "cancel": "Cancellation requested for execution", "retry": "Retry started for execution"}[action]
 	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, verb), info.RunID, info.Status)
 	return nil
 }
@@ -1476,32 +1317,15 @@ type executionListCLIParams struct {
 	Limit       int    `json:"limit,omitempty"`
 }
 
-func executionListCommand(args []string) error {
-	return executionListCommandWithCaller(args, call)
+func executionListCommand(options executionListCLIParams) error {
+	return executionListCommandWithCaller(options, call)
 }
 
-func executionListCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error)) error {
-	flags := newFlagSet("execution ls")
-	status := flags.String("status", "", "filter by status: queued, running, success, failed, cancelled, skipped, or interrupted")
-	triggerType := flags.String("trigger-type", "", "filter by trigger type: schedule, webhook, or manual")
-	trigger := flags.String("trigger", "", "filter by trigger name")
-	project := flags.String("project", "", "filter by project")
-	targetType := flags.String("target-type", "", "filter by target type: task or workflow")
-	target := flags.String("target", "", "filter by PROJECT/NAME or target name")
-	limit := flags.Int("limit", 0, "maximum number of executions; 0 means all")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) != 0 {
-		return errors.New("execution ls does not accept positional arguments")
-	}
-	if *limit < 0 {
+func executionListCommandWithCaller(options executionListCLIParams, caller func(string, interface{}) (ipc.Response, error)) error {
+	if options.Limit < 0 {
 		return errors.New("execution ls limit must be non-negative")
 	}
-	response, err := caller("execution.ls", executionListCLIParams{
-		Status: *status, TriggerType: *triggerType, Trigger: *trigger, Project: *project,
-		TargetType: *targetType, Target: *target, Limit: *limit,
-	})
+	response, err := caller("execution.ls", options)
 	if err != nil {
 		return err
 	}
@@ -1559,22 +1383,19 @@ const (
 	executionWatchGracePeriod    = 5 * time.Second
 )
 
-func executionWatchCommand(args []string) error {
-	flags := newFlagSet("execution watch")
-	timeout := flags.Duration("timeout", executionWatchDefaultTimeout, "maximum watch wait, for example 45s or 2m")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) != 1 {
-		return errors.New("execution watch requires exactly one RUN_ID")
-	}
-	if *timeout <= 0 || *timeout > executionWatchMaxTimeout {
+type executionWatchOptions struct {
+	RunID   string
+	Timeout time.Duration
+}
+
+func executionWatchCommand(options executionWatchOptions) error {
+	if options.Timeout <= 0 || options.Timeout > executionWatchMaxTimeout {
 		return fmt.Errorf("execution watch timeout must be greater than 0 and no more than %s", executionWatchMaxTimeout)
 	}
 	response, err := callWithTimeout("execution.watch", struct {
 		RunID     string `json:"run_id"`
 		TimeoutMS int    `json:"timeout_ms"`
-	}{RunID: flags.Args()[0], TimeoutMS: int((*timeout) / time.Millisecond)}, *timeout+executionWatchGracePeriod)
+	}{RunID: options.RunID, TimeoutMS: int(options.Timeout / time.Millisecond)}, options.Timeout+executionWatchGracePeriod)
 	if err != nil {
 		return err
 	}
@@ -1589,27 +1410,21 @@ func executionWatchCommand(args []string) error {
 	return nil
 }
 
-func executionLogsCommand(args []string) error {
-	if len(args) == 0 {
-		return errors.New("execution logs requires RUN_ID")
-	}
-	flags := newFlagSet("execution logs")
-	stream := flags.String("stream", "all", "stdout, stderr, or all")
-	tail := flags.Int("tail", 0, "number of lines")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if len(flags.Args()) != 1 {
-		return errors.New("execution logs requires exactly one RUN_ID")
-	}
-	if *tail < 0 {
+type executionLogsOptions struct {
+	RunID  string
+	Stream string
+	Tail   int
+}
+
+func executionLogsCommand(options executionLogsOptions) error {
+	if options.Tail < 0 {
 		return errors.New("execution logs tail must be non-negative")
 	}
 	response, err := call("execution.logs", struct {
 		RunID  string `json:"run_id"`
 		Stream string `json:"stream,omitempty"`
 		Tail   int    `json:"tail,omitempty"`
-	}{RunID: flags.Args()[0], Stream: *stream, Tail: *tail})
+	}{RunID: options.RunID, Stream: options.Stream, Tail: options.Tail})
 	if err != nil {
 		return err
 	}
@@ -1641,58 +1456,32 @@ type historyCLIParams struct {
 	Target      string `json:"target,omitempty"`
 }
 
-func historyCommand(args []string) error {
-	return historyCommandWithCaller(args, call, false)
+type historyOptions struct {
+	Tail        int
+	Attempts    bool
+	TriggerType string
+	Trigger     string
+	TargetType  string
+	Target      string
 }
 
-func historyCommandWithCaller(args []string, caller func(string, interface{}) (ipc.Response, error), scheduleOnly bool) error {
-	if len(args) > 0 && args[0] == "clear" {
-		if scheduleOnly {
-			return errors.New("schedule history does not support clear")
-		}
-		if len(args) != 1 {
-			return errors.New("history clear does not accept arguments")
-		}
-		response, err := caller("history.clear", nil)
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(response.Data)
-		}
-		var result map[string]string
-		if err := decodeData(response.Data, &result); err != nil {
-			return err
-		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, "History cleared."))
-		return nil
-	}
+func historyListCommand(options historyOptions) error {
+	return historyListCommandWithCaller(options, call, false)
+}
 
-	fs := newFlagSet("history")
-	tail := fs.Int("tail", 100, "number of history records")
-	triggerType := fs.String("trigger-type", "", "filter by trigger type: schedule, webhook, or manual")
-	trigger := fs.String("trigger", "", "filter by trigger name")
-	targetType := fs.String("target-type", "", "filter by target type: task or workflow")
-	target := fs.String("target", "", "filter by PROJECT/TASK or PROJECT/WORKFLOW")
-	attempts := fs.Bool("attempts", false, "show attempt details")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if len(fs.Args()) != 0 {
-		return errors.New("history does not accept positional arguments")
-	}
-	if *tail < 0 {
+func historyListCommandWithCaller(options historyOptions, caller func(string, interface{}) (ipc.Response, error), scheduleOnly bool) error {
+	if options.Tail < 0 {
 		return errors.New("history tail must be non-negative")
 	}
-	if scheduleOnly && *triggerType != "" && *triggerType != scheduler.TriggerSchedule {
+	if scheduleOnly && options.TriggerType != "" && options.TriggerType != scheduler.TriggerSchedule {
 		return errors.New("schedule history only supports --trigger-type schedule")
 	}
 	if scheduleOnly {
-		*triggerType = scheduler.TriggerSchedule
+		options.TriggerType = scheduler.TriggerSchedule
 	}
-	params := historyCLIParams{Tail: *tail, TriggerType: *triggerType, Trigger: *trigger, TargetType: *targetType, Target: *target}
+	params := historyCLIParams{Tail: options.Tail, TriggerType: options.TriggerType, Trigger: options.Trigger, TargetType: options.TargetType, Target: options.Target}
 	if !jsonOutput && termIsInteractive() {
-		filter := tui.HistoryFilter{Tail: *tail, TriggerType: *triggerType, Trigger: *trigger, TargetType: *targetType, Target: *target, ShowAttempts: *attempts}
+		filter := tui.HistoryFilter{Tail: options.Tail, TriggerType: options.TriggerType, Trigger: options.Trigger, TargetType: options.TargetType, Target: options.Target, ShowAttempts: options.Attempts}
 		method := "history.ls"
 		if scheduleOnly {
 			method = "schedule.history"
@@ -1724,7 +1513,7 @@ func historyCommandWithCaller(args []string, caller func(string, interface{}) (i
 	if err := decodeData(response.Data, &records); err != nil {
 		return err
 	}
-	if *attempts {
+	if options.Attempts {
 		printUnifiedHistoryAttempts(records)
 	} else {
 		printUnifiedHistory(records)
@@ -1732,49 +1521,65 @@ func historyCommandWithCaller(args []string, caller func(string, interface{}) (i
 	return nil
 }
 
+func historyClearCommand() error {
+	return historyClearCommandWithCaller(call)
+}
+
+func historyClearCommandWithCaller(caller func(string, interface{}) (ipc.Response, error)) error {
+	response, err := caller("history.clear", nil)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var result map[string]string
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, "History cleared."))
+	return nil
+}
+
 func termIsInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-func taskCommand(args []string) error { return taskCommandWithCaller(args, call) }
+func startupInstallCommand() error {
+	if err := rejectJSON("startup install"); err != nil {
+		return err
+	}
+	executable, err := resolveDaemonExecutable()
+	if err != nil {
+		return err
+	}
+	if err := startup.Install(executable); err != nil {
+		return err
+	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration installed"))
+	return nil
+}
 
-func startupCommand(layout paths.Layout, args []string) error {
-	if len(args) == 0 {
-		return errors.New("startup requires install, uninstall, or status")
+func startupUninstallCommand() error {
+	if err := rejectJSON("startup uninstall"); err != nil {
+		return err
 	}
-	switch args[0] {
-	case "install":
-		if err := rejectJSON("startup install"); err != nil {
-			return err
-		}
-		executable, err := resolveDaemonExecutable()
-		if err != nil {
-			return err
-		}
-		if err := startup.Install(executable); err != nil {
-			return err
-		}
-		cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration installed"))
-	case "uninstall":
-		if err := rejectJSON("startup uninstall"); err != nil {
-			return err
-		}
-		if err := startup.Uninstall(); err != nil {
-			return err
-		}
-		cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration uninstalled"))
-	case "status":
-		status, err := startup.GetStatus()
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return cliOutput.JSON(status)
-		}
-		printStartupStatus(status)
-	default:
-		return fmt.Errorf("unknown startup command %q", args[0])
+	if err := startup.Uninstall(); err != nil {
+		return err
 	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration uninstalled"))
+	return nil
+}
+
+func startupStatusCommand() error {
+	status, err := startup.GetStatus()
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(status)
+	}
+	printStartupStatus(status)
 	return nil
 }
 
