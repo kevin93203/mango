@@ -50,7 +50,7 @@ func main() {
 	ipc.SetEndpoint(layout.SocketPath)
 	app := newCLIApp(layout, os.Stdout, os.Stderr)
 	if err := app.rootCommand().Execute(); err != nil {
-		app.output.Errorf("error: %v", err)
+		app.printCommandError(err)
 		os.Exit(1)
 	}
 }

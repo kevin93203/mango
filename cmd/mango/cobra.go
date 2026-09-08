@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kevin93203/mango/internal/cliui"
@@ -81,7 +82,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
 		a.simpleCmd("ls", "List services", func() error { return lsCommand() }),
-		a.argsCmd("status TARGET", "Show service status", func(args []string) error { return statusCommand(args) }),
+		a.leafCmd("status TARGET", "Show service status", cobra.ExactArgs(1), func(args []string) error { return statusCommand(args) }),
 		a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"), a.processCmd("enable"), a.processCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
 		a.historyCmd(), a.executionCmd(), a.startupCmd(),
@@ -91,11 +92,61 @@ func (a *cliApp) rootCommand() *cobra.Command {
 }
 
 func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error { return run() }}
+	return a.actionCmd(use, short, run)
 }
 
-func (a *cliApp) argsCmd(use, short string, run func([]string) error) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, RunE: func(_ *cobra.Command, args []string) error { return run(args) }}
+func (a *cliApp) namespaceCmd(use, short string) *cobra.Command {
+	return &cobra.Command{Use: use, Short: short}
+}
+
+type usageShownError struct {
+	err error
+}
+
+func (e *usageShownError) Error() string { return e.err.Error() }
+func (e *usageShownError) Unwrap() error { return e.err }
+
+func commandErrorWasShown(err error) bool {
+	var target *usageShownError
+	return errors.As(err, &target)
+}
+
+func (a *cliApp) printCommandError(err error) {
+	if !commandErrorWasShown(err) {
+		a.output.Errorf("error: %v", err)
+	}
+}
+
+func usageOnError(validate cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := validate(cmd, args); err != nil {
+			usage := cmd.UsageString()
+			cmd.PrintErr(usage)
+			if !strings.HasSuffix(usage, "\n") {
+				cmd.PrintErrln("")
+			}
+			return &usageShownError{err: err}
+		}
+		return nil
+	}
+}
+
+func (a *cliApp) leafCmd(use, short string, validate cobra.PositionalArgs, run func([]string) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  usageOnError(validate),
+		RunE:  func(_ *cobra.Command, args []string) error { return run(args) },
+	}
+}
+
+func (a *cliApp) actionCmd(use, short string, run func() error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  usageOnError(cobra.NoArgs),
+		RunE:  func(_ *cobra.Command, _ []string) error { return run() },
+	}
 }
 
 func boolArg(name string, value bool) []string {
@@ -128,7 +179,7 @@ func durationArg(name string, value, defaultValue time.Duration) []string {
 
 func (a *cliApp) initCmd() *cobra.Command {
 	var force bool
-	cmd := a.argsCmd("init [PATH]", "Create an example configuration", func(args []string) error {
+	cmd := a.leafCmd("init [PATH]", "Create an example configuration", cobra.MaximumNArgs(1), func(args []string) error {
 		return initCommand(append(boolArg("force", force), args...))
 	})
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
@@ -136,7 +187,7 @@ func (a *cliApp) initCmd() *cobra.Command {
 }
 
 func (a *cliApp) daemonCmd() *cobra.Command {
-	cmd := a.argsCmd("daemon", "Manage the Mango daemon", func(args []string) error { return daemonCommand(a.layout, args) })
+	cmd := a.namespaceCmd("daemon", "Manage the Mango daemon")
 	for _, action := range []string{"start", "stop", "restart", "status"} {
 		action := action
 		cmd.AddCommand(a.simpleCmd(action, action+" the daemon", func() error { return daemonCommand(a.layout, []string{action}) }))
@@ -154,33 +205,42 @@ func (a *cliApp) daemonCmd() *cobra.Command {
 }
 
 func (a *cliApp) projectCmd() *cobra.Command {
-	cmd := a.argsCmd("project", "Manage registered projects", func(args []string) error { return projectCommand(a.layout, args) })
+	cmd := a.namespaceCmd("project", "Manage registered projects")
 	for _, spec := range []struct{ use, short, action string }{
 		{"add NAME PATH", "Register a project", "add"}, {"remove NAME", "Remove a project", "remove"},
 		{"rename OLD NEW", "Rename a project", "rename"}, {"apply NAME", "Apply project configuration", "apply"},
 		{"ls", "List registered projects", "ls"},
 	} {
 		spec := spec
-		cmd.AddCommand(a.argsCmd(spec.use, spec.short, func(args []string) error { return projectCommand(a.layout, append([]string{spec.action}, args...)) }))
+		validate := cobra.ArbitraryArgs
+		switch spec.action {
+		case "add", "rename":
+			validate = cobra.ExactArgs(2)
+		case "remove", "apply":
+			validate = cobra.ExactArgs(1)
+		case "ls":
+			validate = cobra.NoArgs
+		}
+		cmd.AddCommand(a.leafCmd(spec.use, spec.short, validate, func(args []string) error { return projectCommand(a.layout, append([]string{spec.action}, args...)) }))
 	}
 	return cmd
 }
 
 func (a *cliApp) configCmd() *cobra.Command {
-	cmd := a.argsCmd("config", "Inspect configuration", configCommand)
-	cmd.AddCommand(a.argsCmd("validate PATH", "Validate a configuration", func(args []string) error { return configCommand(append([]string{"validate"}, args...)) }))
+	cmd := a.namespaceCmd("config", "Inspect configuration")
+	cmd.AddCommand(a.leafCmd("validate PATH", "Validate a configuration", cobra.ExactArgs(1), func(args []string) error { return configCommand(append([]string{"validate"}, args...)) }))
 	return cmd
 }
 
 func (a *cliApp) processCmd(action string) *cobra.Command {
-	return a.argsCmd(action+" TARGET [TARGET...]", action+" services", func(args []string) error { return processCommand(action, args) })
+	return a.leafCmd(action+" TARGET [TARGET...]", action+" services", cobra.MinimumNArgs(1), func(args []string) error { return processCommand(action, args) })
 }
 
 func (a *cliApp) logsCmd() *cobra.Command {
 	var stream string
 	var tail int
 	var follow bool
-	cmd := a.argsCmd("logs TARGET [TARGET...]", "Read service logs", func(args []string) error {
+	cmd := a.leafCmd("logs TARGET [TARGET...]", "Read service logs", cobra.MinimumNArgs(1), func(args []string) error {
 		flags := append(stringArg("stream", stream), intArg("tail", tail, 15)...)
 		flags = append(flags, boolArg("follow", follow)...)
 		return logsCommand(append(flags, args...))
@@ -188,7 +248,7 @@ func (a *cliApp) logsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
 	cmd.Flags().IntVar(&tail, "tail", 15, "number of lines")
 	cmd.Flags().BoolVar(&follow, "follow", false, "follow new output")
-	cmd.AddCommand(a.argsCmd("clear TARGET", "Clear service logs", func(args []string) error { return logsCommand(append([]string{"clear"}, args...)) }))
+	cmd.AddCommand(a.leafCmd("clear TARGET", "Clear service logs", cobra.ExactArgs(1), func(args []string) error { return logsCommand(append([]string{"clear"}, args...)) }))
 	return cmd
 }
 
@@ -220,11 +280,11 @@ func historyArgs(tail int, attempts bool, triggerType, trigger, targetType, targ
 }
 
 func (a *cliApp) scheduleCmd() *cobra.Command {
-	cmd := a.argsCmd("schedule", "Manage schedules", func(args []string) error { return scheduleCommand(args) })
+	cmd := a.namespaceCmd("schedule", "Manage schedules")
 	cmd.AddCommand(a.simpleCmd("ls", "List schedules", func() error { return scheduleCommand([]string{"ls"}) }))
 	for _, action := range []string{"enable", "disable"} {
 		action := action
-		cmd.AddCommand(a.argsCmd(action+" TARGET [TARGET...]", action+" schedules", func(args []string) error { return scheduleCommand(append([]string{action}, args...)) }))
+		cmd.AddCommand(a.leafCmd(action+" TARGET [TARGET...]", action+" schedules", cobra.MinimumNArgs(1), func(args []string) error { return scheduleCommand(append([]string{action}, args...)) }))
 	}
 	var tail int
 	var attempts bool
@@ -238,33 +298,35 @@ func (a *cliApp) scheduleCmd() *cobra.Command {
 }
 
 func (a *cliApp) workflowCmd() *cobra.Command {
-	cmd := a.argsCmd("workflow", "Manage workflows", workflowCommand)
+	cmd := a.namespaceCmd("workflow", "Manage workflows")
 	cmd.AddCommand(a.simpleCmd("ls", "List workflows", func() error { return workflowCommand([]string{"ls"}) }))
-	cmd.AddCommand(a.argsCmd("run PROJECT/WORKFLOW", "Run a workflow", func(args []string) error { return workflowCommand(append([]string{"run"}, args...)) }))
+	cmd.AddCommand(a.leafCmd("run PROJECT/WORKFLOW", "Run a workflow", cobra.ExactArgs(1), func(args []string) error { return workflowCommand(append([]string{"run"}, args...)) }))
 	return cmd
 }
 
 func (a *cliApp) taskCmd() *cobra.Command {
-	cmd := a.argsCmd("task", "Manage tasks", taskCommand)
+	cmd := a.namespaceCmd("task", "Manage tasks")
 	cmd.AddCommand(a.simpleCmd("ls", "List tasks", func() error { return taskCommand([]string{"ls"}) }))
-	cmd.AddCommand(a.argsCmd("run PROJECT/TASK", "Run a task", func(args []string) error { return taskCommand(append([]string{"run"}, args...)) }))
+	cmd.AddCommand(a.leafCmd("run PROJECT/TASK", "Run a task", cobra.ExactArgs(1), func(args []string) error { return taskCommand(append([]string{"run"}, args...)) }))
 	return cmd
 }
 
 func (a *cliApp) historyCmd() *cobra.Command {
+	cmd := a.namespaceCmd("history", "Browse execution history")
 	var tail int
 	var attempts bool
 	var triggerType, trigger, targetType, target string
-	cmd := a.simpleCmd("history", "Browse execution history", func() error {
+	list := a.simpleCmd("ls", "List execution history", func() error {
 		return historyCommand(historyArgs(tail, attempts, triggerType, trigger, targetType, target))
 	})
-	addHistoryFlags(cmd, &tail, &attempts, &triggerType, &trigger, &targetType, &target)
+	addHistoryFlags(list, &tail, &attempts, &triggerType, &trigger, &targetType, &target)
+	cmd.AddCommand(list)
 	cmd.AddCommand(a.simpleCmd("clear", "Clear execution history", func() error { return historyCommand([]string{"clear"}) }))
 	return cmd
 }
 
 func (a *cliApp) executionCmd() *cobra.Command {
-	cmd := a.argsCmd("execution", "Inspect and control executions", executionCommand)
+	cmd := a.namespaceCmd("execution", "Inspect and control executions")
 	var status, triggerType, trigger, project, targetType, target string
 	var limit int
 	ls := a.simpleCmd("ls", "List executions", func() error {
@@ -287,17 +349,17 @@ func (a *cliApp) executionCmd() *cobra.Command {
 	cmd.AddCommand(ls)
 	for _, action := range []string{"get", "cancel", "retry"} {
 		action := action
-		cmd.AddCommand(a.argsCmd(action+" RUN_ID", action+" an execution", func(args []string) error { return executionCommand(append([]string{action}, args...)) }))
+		cmd.AddCommand(a.leafCmd(action+" RUN_ID", action+" an execution", cobra.ExactArgs(1), func(args []string) error { return executionCommand(append([]string{action}, args...)) }))
 	}
 	var timeout time.Duration
-	watch := a.argsCmd("watch RUN_ID", "Wait for an execution", func(args []string) error {
+	watch := a.leafCmd("watch RUN_ID", "Wait for an execution", cobra.ExactArgs(1), func(args []string) error {
 		return executionWatchCommand(append(durationArg("timeout", timeout, executionWatchDefaultTimeout), args...))
 	})
 	watch.Flags().DurationVar(&timeout, "timeout", executionWatchDefaultTimeout, "maximum watch wait")
 	cmd.AddCommand(watch)
 	var stream string
 	var tail int
-	logs := a.argsCmd("logs RUN_ID", "Read execution logs", func(args []string) error {
+	logs := a.leafCmd("logs RUN_ID", "Read execution logs", cobra.ExactArgs(1), func(args []string) error {
 		flags := append(stringArg("stream", stream), intArg("tail", tail, 0)...)
 		return executionLogsCommand(append(flags, args...))
 	})
@@ -308,7 +370,7 @@ func (a *cliApp) executionCmd() *cobra.Command {
 }
 
 func (a *cliApp) startupCmd() *cobra.Command {
-	cmd := a.argsCmd("startup", "Manage startup integration", func(args []string) error { return startupCommand(a.layout, args) })
+	cmd := a.namespaceCmd("startup", "Manage startup integration")
 	for _, action := range []string{"install", "uninstall", "status"} {
 		action := action
 		cmd.AddCommand(a.simpleCmd(action, fmt.Sprintf("%s startup integration", action), func() error { return startupCommand(a.layout, []string{action}) }))
