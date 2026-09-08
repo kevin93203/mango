@@ -154,9 +154,16 @@ func TestCobraProjectExposesPlanAsOnlyPreviewCommand(t *testing.T) {
 	if apply.Flag("dry-run") != nil {
 		t.Fatal("removed project apply --dry-run flag still exposed")
 	}
-	operations, _, err := root.Find([]string{"project", "operations"})
-	if err != nil || operations == root {
-		t.Fatalf("project operations command missing: command=%v err=%v", operations, err)
+	status, _, err := root.Find([]string{"project", "status"})
+	if err != nil || status == root {
+		t.Fatalf("project status command missing: command=%v err=%v", status, err)
+	}
+	if apply.Flag("wait") == nil {
+		t.Fatal("project apply --wait flag missing")
+	}
+	rollback, _, err := root.Find([]string{"project", "rollback"})
+	if err != nil || rollback == root || rollback.Flag("wait") == nil {
+		t.Fatalf("project rollback --wait flag missing: command=%v err=%v", rollback, err)
 	}
 }
 
@@ -165,7 +172,7 @@ func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 		{"status"}, {"start"}, {"stop"}, {"restart"}, {"enable"}, {"disable"}, {"logs"},
 		{"logs", "clear"}, {"config", "validate"}, {"project", "add"}, {"project", "remove"},
 		{"project", "rename"}, {"project", "apply"}, {"task", "run"}, {"workflow", "run"},
-		{"project", "rollback"}, {"project", "operations"},
+		{"project", "rollback"}, {"project", "status"},
 		{"schedule", "enable"}, {"schedule", "disable"}, {"execution", "get"}, {"execution", "watch"},
 		{"execution", "cancel"}, {"execution", "retry"}, {"execution", "logs"},
 	}

@@ -75,9 +75,42 @@ type Daemon struct {
 }
 
 type projectRuntime struct {
-	file             config.File
-	processes        map[string]*managedProcess
-	reconcileRunning bool
+	file              config.File
+	desired           reconcile.DesiredState
+	desiredGeneration uint64
+	acceptedAt        time.Time
+	processes         map[string]*managedProcess
+	resourceErrors    map[reconcile.ResourceKey]string
+	lastError         *api.ReconcileError
+	wake              chan struct{}
+	reconcileRunning  bool
+	lastReconcileAt   time.Time
+}
+
+type reconciliationFailure struct {
+	Key reconcile.ResourceKey
+	Err error
+}
+
+func (failure reconciliationFailure) Error() string { return failure.Err.Error() }
+func (failure reconciliationFailure) Unwrap() error { return failure.Err }
+
+type reconciliationFailures struct {
+	Failures []reconciliationFailure
+}
+
+func (failures reconciliationFailures) Error() string {
+	if len(failures.Failures) == 0 || failures.Failures[0].Err == nil {
+		return "reconciliation failed"
+	}
+	return failures.Failures[0].Err.Error()
+}
+
+func (failures reconciliationFailures) Unwrap() error {
+	if len(failures.Failures) == 0 {
+		return nil
+	}
+	return failures.Failures[0]
 }
 
 type managedProcess struct {
@@ -611,9 +644,6 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	if err != nil {
 		return err
 	}
-	if err := d.recoverPendingOperations(&reg); err != nil {
-		return err
-	}
 	if resetProcessIDs {
 		reg.NextProcessID = 0
 		for name, project := range reg.Projects {
@@ -667,10 +697,10 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	return nil
 }
 
-// restoreOrMigrateProject keeps daemon startup anchored to the last
-// successfully applied generation. Projects created by older versions have
-// no snapshot yet and use the legacy YAML bootstrap once; subsequent starts
-// use the persisted generation exclusively.
+// restoreOrMigrateProject keeps daemon startup anchored to the latest
+// accepted desired generation. Projects created by older versions have no
+// snapshot yet and use the legacy YAML bootstrap once; subsequent starts use
+// the persisted generation exclusively.
 func (d *Daemon) restoreOrMigrateProject(name string, project registry.Project) error {
 	if project.ConfigurationGeneration > 0 {
 		path := project.DesiredStatePath
@@ -679,34 +709,53 @@ func (d *Daemon) restoreOrMigrateProject(name string, project registry.Project) 
 		}
 		snapshot, err := generation.LoadSnapshot(path, name, project.ConfigurationGeneration)
 		if err != nil {
-			return fmt.Errorf("project %s cannot restore applied generation %d: %w; run an explicit apply after recovering the generation metadata", name, project.ConfigurationGeneration, err)
+			return fmt.Errorf("project %s cannot restore accepted generation %d: %w; run an explicit apply after recovering the generation metadata", name, project.ConfigurationGeneration, err)
 		}
 		if snapshot.Status != generation.SnapshotCommit {
-			return fmt.Errorf("project %s cannot restore applied generation %d: snapshot status is %q", name, project.ConfigurationGeneration, snapshot.Status)
+			return fmt.Errorf("project %s cannot restore accepted generation %d: snapshot status is %q", name, project.ConfigurationGeneration, snapshot.Status)
 		}
 		snapshot.Config.Path = project.ConfigPath
-		return d.applyProjectFileWithDesired(name, snapshot.Config, project.ConfigurationGeneration, false, "startup-restore", snapshot.Desired)
+		desired, desiredErr := d.loadAcceptedDesiredState(name, project)
+		if desiredErr != nil {
+			return desiredErr
+		}
+		d.installProjectDesired(name, snapshot.Config, desired, project.ConfigurationGeneration, snapshot.AppliedAt, project)
+		d.ensureReconciler(name)
+		d.waitForProjectReconcileAttempt(name, project.ConfigurationGeneration)
+		return nil
 	}
-	return d.applyProject(name, project.ConfigPath)
+	result, err := d.applyProject(name, project.ConfigPath)
+	if err == nil {
+		d.waitForProjectReconcileAttempt(name, result.Generation)
+	}
+	return err
 }
 
 func (d *Daemon) ApplyProject(name string) error {
-	if err := d.ensureScheduleStateLoaded(); err != nil {
-		return err
+	result, err := d.ApplyProjectResult(name)
+	if err == nil {
+		d.waitForProjectReconcileAttempt(name, result.Generation)
+	}
+	return err
+}
+
+func (d *Daemon) ApplyProjectResult(name string) (api.ApplyResult, error) {
+	if err := config.ValidateProjectName(name); err != nil {
+		return api.ApplyResult{}, err
 	}
 	d.mu.RLock()
 	project, ok := d.registry.Projects[name]
 	d.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("project %q is not registered", name)
+		return api.ApplyResult{}, fmt.Errorf("project %q is not registered", name)
 	}
-	err := d.applyProject(name, project.ConfigPath)
+	result, err := d.applyProject(name, project.ConfigPath)
 	if err != nil {
 		d.recordConfigError(name, err)
-		return err
+		return api.ApplyResult{}, err
 	}
 	d.clearConfigError(name)
-	return nil
+	return result, nil
 }
 
 // PlanProject reads the current YAML explicitly and compares it with the
@@ -733,36 +782,37 @@ func (d *Daemon) PlanProject(name string) (reconcile.Plan, error) {
 	if err != nil {
 		return reconcile.Plan{}, err
 	}
-	current, err := d.loadAppliedDesiredState(name, projectRecord)
+	current, err := d.loadAcceptedDesiredState(name, projectRecord)
 	if err != nil {
 		return reconcile.Plan{}, err
 	}
 	observed := d.observedProjectState(name)
-	completed, err := completedResourcesFromLatestFailure(d.layout.State, name, desired)
-	if err != nil {
-		return reconcile.Plan{}, fmt.Errorf("project %s load apply recovery state: %w", name, err)
-	}
 	currentGeneration := projectRecord.ConfigurationGeneration
-	return reconcile.Build(name, current, desired, observed, completed, currentGeneration, proposed), nil
+	return reconcile.Build(name, current, desired, observed, currentGeneration, proposed), nil
 }
 
 func (d *Daemon) RollbackProject(name string, requestedGeneration uint64) error {
+	_, err := d.RollbackProjectResult(name, requestedGeneration)
+	return err
+}
+
+func (d *Daemon) RollbackProjectResult(name string, requestedGeneration uint64) (api.ApplyResult, error) {
 	if err := config.ValidateProjectName(name); err != nil {
-		return err
+		return api.ApplyResult{}, err
 	}
 	d.mu.RLock()
 	projectRecord, ok := d.registry.Projects[name]
 	d.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("project %q is not registered", name)
+		return api.ApplyResult{}, fmt.Errorf("project %q is not registered", name)
 	}
 	if projectRecord.ConfigurationGeneration == 0 {
-		return fmt.Errorf("project %q has no applied configuration generation to roll back", name)
+		return api.ApplyResult{}, fmt.Errorf("project %q has no accepted configuration generation to roll back", name)
 	}
 	if requestedGeneration == 0 {
-		generations, err := generation.ListSuccessfulProjectGenerations(d.layout.State, name)
+		generations, err := generation.ListAcceptedProjectGenerations(d.layout.State, name)
 		if err != nil {
-			return err
+			return api.ApplyResult{}, err
 		}
 		for index := len(generations) - 1; index >= 0; index-- {
 			if generations[index] < projectRecord.ConfigurationGeneration {
@@ -771,7 +821,7 @@ func (d *Daemon) RollbackProject(name string, requestedGeneration uint64) error 
 			}
 		}
 		if requestedGeneration == 0 {
-			return fmt.Errorf("project %q has no previous successful configuration generation", name)
+			return api.ApplyResult{}, fmt.Errorf("project %q has no previous accepted configuration generation", name)
 		}
 	}
 	path := generation.SnapshotPath(d.layout.State, name, requestedGeneration)
@@ -780,18 +830,27 @@ func (d *Daemon) RollbackProject(name string, requestedGeneration uint64) error 
 	}
 	snapshot, err := generation.LoadSnapshot(path, name, requestedGeneration)
 	if err != nil {
-		return fmt.Errorf("project %s rollback generation %d: %w", name, requestedGeneration, err)
+		return api.ApplyResult{}, fmt.Errorf("project %s rollback generation %d: %w", name, requestedGeneration, err)
 	}
 	if snapshot.Status != generation.SnapshotCommit {
-		return fmt.Errorf("project %s rollback generation %d: generation status is %q, only a committed generation can be restored", name, requestedGeneration, snapshot.Status)
+		return api.ApplyResult{}, fmt.Errorf("project %s rollback generation %d: generation status is %q, only an accepted generation can be restored", name, requestedGeneration, snapshot.Status)
 	}
 	snapshot.Config.Path = projectRecord.ConfigPath
-	if err := d.applyProjectFileWithDesired(name, snapshot.Config, requestedGeneration, true, "rollback", snapshot.Desired); err != nil {
+	desired := snapshot.Desired
+	if desired == nil {
+		compiled, compileErr := reconcile.Compile(snapshot.Config, name)
+		if compileErr != nil {
+			return api.ApplyResult{}, fmt.Errorf("project %s rollback generation %d: %w", name, requestedGeneration, compileErr)
+		}
+		desired = &compiled
+	}
+	result, err := d.acceptProjectDesired(name, snapshot.Config, *desired, requestedGeneration)
+	if err != nil {
 		d.recordConfigError(name, err)
-		return err
+		return api.ApplyResult{}, err
 	}
 	d.clearConfigError(name)
-	return nil
+	return result, nil
 }
 
 func (d *Daemon) recordConfigError(project string, err error) {
@@ -809,102 +868,46 @@ func (d *Daemon) clearConfigError(project string) {
 	d.mu.Unlock()
 }
 
-func (d *Daemon) applyProject(name, path string) error {
+func (d *Daemon) applyProject(name, path string) (api.ApplyResult, error) {
 	if err := config.ValidateProjectName(name); err != nil {
-		return fmt.Errorf("project %s: %w", name, err)
+		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
 	file, err := config.Load(path)
 	if err != nil {
-		return fmt.Errorf("project %s: %w", name, err)
+		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
-	return d.applyProjectFile(name, file, 0, true, "apply")
+	desired, err := reconcile.Compile(file, name)
+	if err != nil {
+		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
+	}
+	return d.acceptProjectDesired(name, file, desired, 0)
 }
 
-func (d *Daemon) applyProjectFile(name string, file config.File, requestedGeneration uint64, persistSnapshot bool, operationType string) error {
-	return d.applyProjectFileWithDesired(name, file, requestedGeneration, persistSnapshot, operationType, nil)
-}
-
-func (d *Daemon) applyProjectFileWithDesired(name string, file config.File, requestedGeneration uint64, persistSnapshot bool, operationType string, desiredOverride *reconcile.DesiredState) error {
+func (d *Daemon) acceptProjectDesired(name string, file config.File, desired reconcile.DesiredState, sourceGeneration uint64) (api.ApplyResult, error) {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
-	var desiredState reconcile.DesiredState
-	var err error
-	if desiredOverride != nil {
-		if err := config.Validate(file); err != nil {
-			return fmt.Errorf("project %s: invalid persisted desired configuration: %w", name, err)
-		}
-		desiredState = *desiredOverride
-	} else {
-		desiredState, err = reconcile.Compile(file, name)
-		if err != nil {
-			return err
-		}
+	if err := config.Validate(file); err != nil {
+		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
-	specs := desiredState.Services
-	tasks := desiredState.Tasks
-	workflows := desiredState.Workflows
-	schedules := desiredState.Schedules
-	desired := map[string]config.EffectiveService{}
-	for _, spec := range specs {
-		desired[spec.Name] = spec
-	}
-	orderedSpecs := topologicalSpecs(specs)
-
 	d.mu.RLock()
-	registeredProject := d.registry.Projects[name]
+	_, registered := d.registry.Projects[name]
 	d.mu.RUnlock()
-	previousGeneration := registeredProject.ConfigurationGeneration
-	previousDesired, err := d.loadAppliedDesiredState(name, registeredProject)
-	if err != nil {
-		return err
-	}
-	observed := d.observedProjectState(name)
-	completed, err := completedResourcesFromLatestFailure(d.layout.State, name, desiredState)
-	if err != nil {
-		return fmt.Errorf("project %s load apply recovery state: %w", name, err)
+	if !registered {
+		return api.ApplyResult{}, fmt.Errorf("project %q is not registered", name)
 	}
 	d.mu.Lock()
-	if requestedGeneration == 0 {
-		d.configurationGeneration++
-		requestedGeneration = d.configurationGeneration
-	} else if requestedGeneration > d.configurationGeneration {
-		d.configurationGeneration = requestedGeneration
-	}
+	d.configurationGeneration++
+	requestedGeneration := d.configurationGeneration
 	d.mu.Unlock()
-	plan := reconcile.Build(name, previousDesired, desiredState, observed, completed, previousGeneration, requestedGeneration)
-	var operation *generation.ApplyOperation
-	if persistSnapshot {
-		created := generation.NewOperation(name, operationType, plan, requestedGeneration, previousGeneration)
-		previousOperationID, operationErr := generation.LatestFailedOperationID(d.layout.State, name)
-		if operationErr != nil {
-			return operationErr
-		}
-		created.PreviousOperationID = previousOperationID
-		operation = &created
-		if err := generation.SaveOperation(d.layout.State, *operation); err != nil {
-			return err
-		}
-		snapshot := generation.Snapshot{Project: name, Generation: requestedGeneration, Status: generation.SnapshotPending, AppliedAt: time.Now().UTC(), Config: file, Desired: &desiredState, ScheduleTimezones: scheduleTimezones(schedules)}
-		snapshot.Config.Path = ""
-		if _, err := generation.SaveSnapshot(d.layout.State, snapshot); err != nil {
-			return d.finishApplyOperation(operation, err)
-		}
-	}
-	if err := d.reconcileProjectFile(name, file, specs, tasks, workflows, schedules, orderedSpecs, desired, requestedGeneration, plan, operation); err != nil {
-		if persistSnapshot {
-			return d.finishApplyOperation(operation, err)
-		}
-		return err
-	}
 	now := time.Now().UTC()
-	d.mu.RLock()
-	processIDs := make(map[string]int)
-	if current := d.projects[name]; current != nil {
-		for serviceName, managed := range current.processes {
-			processIDs[serviceName] = managed.id
-		}
+	schedules := desired.Schedules
+	snapshot := generation.Snapshot{Project: name, Generation: requestedGeneration, Status: generation.SnapshotCommit, AppliedAt: now, Config: file, Desired: &desired, ScheduleTimezones: scheduleTimezones(schedules)}
+	snapshot.Config.Path = ""
+	if _, err := generation.SaveSnapshot(d.layout.State, snapshot); err != nil {
+		return api.ApplyResult{}, err
 	}
-	baseRegistry := d.registry
+	d.mu.RLock()
+	baseRegistry := cloneRegistry(d.registry)
 	d.mu.RUnlock()
 	if baseRegistry.Projects == nil {
 		baseRegistry.Projects = map[string]registry.Project{}
@@ -918,55 +921,28 @@ func (d *Daemon) applyProjectFileWithDesired(name string, file config.File, requ
 	projectRecord.LastApplied = &now
 	projectRecord.ConfigurationGeneration = requestedGeneration
 	projectRecord.DesiredStatePath = generation.SnapshotPath(d.layout.State, name, requestedGeneration)
-	projectRecord.ProcessIDs = processIDs
+	projectRecord.LastReconcileError = ""
+	projectRecord.LastReconcileErrorAt = nil
+	projectRecord.LastReconcileGeneration = 0
 	if nextRegistry.NextProcessID < 0 {
 		nextRegistry.NextProcessID = 0
 	}
-	for _, id := range processIDs {
-		if id >= nextRegistry.NextProcessID {
-			nextRegistry.NextProcessID = id + 1
-		}
-	}
-	d.mu.RLock()
-	projectRecord.ShimInstances = d.shimInstancesLocked(name)
-	d.mu.RUnlock()
 	nextRegistry.Projects[name] = projectRecord
-	if persistSnapshot {
-		operation.Phase = generation.SnapshotReady
-		if err := generation.SaveOperation(d.layout.State, *operation); err != nil {
-			return d.finishApplyOperation(operation, err)
-		}
-		if err := generation.UpdateSnapshotStatus(d.layout.State, name, requestedGeneration, generation.SnapshotReady); err != nil {
-			return d.finishApplyOperation(operation, err)
-		}
-		// The committed marker is written before the registry pointer. If the
-		// registry write fails, startup recovery sees the old pointer and
-		// safely aborts this orphaned generation.
-		if err := generation.UpdateSnapshotStatus(d.layout.State, name, requestedGeneration, generation.SnapshotCommit); err != nil {
-			return d.finishApplyOperation(operation, err)
-		}
-	}
 	if err := registry.Save(d.layout.Registry, nextRegistry); err != nil {
-		if persistSnapshot {
-			_ = generation.UpdateSnapshotStatus(d.layout.State, name, requestedGeneration, generation.SnapshotAborted)
-			operation.Phase = generation.SnapshotAborted
-			return d.finishApplyOperation(operation, err)
-		}
-		return err
+		// The snapshot was durably written, but without a registry pointer it
+		// was never accepted. Retain it as an explicitly unaccepted historical
+		// artifact so rollback cannot mistake it for desired-state history.
+		orphaned := snapshot
+		orphaned.Status = generation.SnapshotAborted
+		_, _ = generation.SaveSnapshot(d.layout.State, orphaned)
+		return api.ApplyResult{}, err
 	}
 	d.mu.Lock()
 	d.registry = nextRegistry
+	d.installProjectDesiredLocked(name, file, desired, requestedGeneration, now, projectRecord)
 	d.mu.Unlock()
-	if persistSnapshot {
-		operation.Phase = generation.SnapshotCommit
-		operation.Status = generation.OperationSuccess
-		completed := time.Now().UTC()
-		operation.CompletedAt = &completed
-		if err := generation.SaveOperation(d.layout.State, *operation); err != nil {
-			return fmt.Errorf("record committed apply operation: %w", err)
-		}
-	}
-	return nil
+	d.ensureReconciler(name)
+	return api.ApplyResult{Project: name, Generation: requestedGeneration, Status: "accepted", AcceptedAt: now, SourceGeneration: sourceGeneration}, nil
 }
 
 func cloneRegistry(source registry.File) registry.File {
@@ -991,37 +967,28 @@ func cloneRegistry(source registry.File) registry.File {
 	return copyFile
 }
 
-func (d *Daemon) finishApplyOperation(operation *generation.ApplyOperation, applyErr error) error {
-	if operation == nil {
-		return applyErr
-	}
-	if applyErr != nil {
-		operation.Status = generation.OperationFailed
-		operation.Error = applyErr.Error()
-		if operation.Phase == generation.SnapshotAborted {
-			_ = generation.UpdateSnapshotStatus(d.layout.State, operation.Project, operation.Generation, generation.SnapshotAborted)
-		} else {
-			operation.Phase = generation.SnapshotFailed
-			_ = generation.UpdateSnapshotStatus(d.layout.State, operation.Project, operation.Generation, generation.SnapshotFailed)
+func (d *Daemon) reconcileProjectFile(name string, file config.File, desiredState reconcile.DesiredState, generationValue uint64) error {
+	specs := desiredState.Services
+	tasks := desiredState.Tasks
+	workflows := desiredState.Workflows
+	schedules := desiredState.Schedules
+	failures := make([]reconciliationFailure, 0)
+	recordFailure := func(key reconcile.ResourceKey, err error) {
+		if err != nil {
+			failures = append(failures, reconciliationFailure{Key: key, Err: err})
 		}
-	} else {
-		operation.Status = generation.OperationSuccess
-		operation.Phase = generation.SnapshotCommit
 	}
-	completed := time.Now().UTC()
-	operation.CompletedAt = &completed
-	if err := generation.SaveOperation(d.layout.State, *operation); err != nil && applyErr == nil {
-		return fmt.Errorf("record apply operation result: %w", err)
+	desired := map[string]config.EffectiveService{}
+	for _, spec := range specs {
+		desired[spec.Name] = spec
 	}
-	return applyErr
-}
-
-func (d *Daemon) reconcileProjectFile(name string, file config.File, specs []config.EffectiveService, tasks map[string]config.EffectiveTask, workflows map[string]config.EffectiveWorkflow, schedules []config.EffectiveSchedule, orderedSpecs []config.EffectiveService, desired map[string]config.EffectiveService, generationValue uint64, plan reconcile.Plan, operation *generation.ApplyOperation) error {
+	orderedSpecs := topologicalSpecs(specs)
 	d.mu.Lock()
 	processIDs, _ := d.allocateProcessIDsLocked(name, desired)
 	current := d.projects[name]
-	if current == nil {
-		current = &projectRuntime{processes: map[string]*managedProcess{}}
+	if current == nil || current.desiredGeneration != generationValue {
+		d.mu.Unlock()
+		return errReconciliationSuperseded
 	}
 	changed := make([]string, 0)
 	recreateRunning := make(map[string]bool)
@@ -1083,7 +1050,7 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, specs []con
 		} else {
 			managed := current.processes[processName]
 			managed.id = processIDs[processName]
-			if spec.Autostart && !serviceActiveForPropagation(managed) {
+			if spec.Autostart && managed.state != StateCrashLoop && (!serviceActiveForPropagation(managed) || managed.state == StateWaiting) {
 				toStart = append(toStart, managed)
 			}
 		}
@@ -1092,159 +1059,57 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, specs []con
 	d.projects[name] = current
 	d.mu.Unlock()
 
-	plannedResources := operationResources(plan)
-	serviceStarted := make(map[string]bool)
-	beginService := func(serviceName string) error {
-		resource, ok := plannedResources[reconcile.ResourceKey{Kind: reconcile.KindService, Name: serviceName}]
-		if !ok || serviceStarted[serviceName] {
-			return nil
-		}
-		if err := d.operationStart(operation, resource); err != nil {
-			return err
-		}
-		serviceStarted[serviceName] = true
-		return nil
-	}
-	finishService := func(serviceName string, applyErr error) error {
-		resource, ok := plannedResources[reconcile.ResourceKey{Kind: reconcile.KindService, Name: serviceName}]
-		if !ok {
-			return applyErr
-		}
-		fingerprint := ""
-		if spec, exists := desired[serviceName]; exists {
-			fingerprint = reconcile.Fingerprint(spec)
-		}
-		return d.operationFinish(operation, resource, fingerprint, applyErr)
-	}
-	willStart := make(map[string]bool)
-	for _, managed := range toStart {
-		willStart[managed.spec.Name] = true
-	}
-	for _, target := range dependentRestarts {
-		willStart[target.managed.spec.Name] = true
-	}
-	willStop := make(map[string]bool)
 	for _, managed := range toStop {
-		willStop[managed.spec.Name] = true
-	}
-	// A disabled or already-stopped definition is fully reconciled when it is
-	// installed in the runtime map; checkpoint it before a later service can
-	// fail, so retry only revisits the unfinished resource.
-	for _, resource := range plan.Resources {
-		if resource.Kind != reconcile.KindService || !resource.Pending || willStart[resource.Name] || willStop[resource.Name] {
-			continue
-		}
-		if err := beginService(resource.Name); err != nil {
-			return err
-		}
-		if err := finishService(resource.Name, nil); err != nil {
-			return err
-		}
-	}
-	for _, managed := range toStop {
-		if err := beginService(managed.spec.Name); err != nil {
-			return err
+		if !d.desiredGenerationCurrent(name, generationValue) {
+			return errReconciliationSuperseded
 		}
 		if err := d.stopManaged(managed); err != nil {
 			stopErr := fmt.Errorf("stop service %s/%s: %w", name, managed.spec.Name, err)
-			_ = finishService(managed.spec.Name, stopErr)
-			return stopErr
+			recordFailure(reconcile.ResourceKey{Kind: reconcile.KindService, Name: managed.spec.Name}, stopErr)
+			continue
 		}
 		if managed.shim != nil && !d.isManagedProcess(managed) {
 			d.shutdownDetachedShim(managed)
 		}
-		if !willStart[managed.spec.Name] {
-			if err := finishService(managed.spec.Name, nil); err != nil {
-				return err
-			}
-		}
 	}
 	d.adoptShimServices(name)
 	for _, managed := range toStart {
-		if err := beginService(managed.spec.Name); err != nil {
-			return err
+		if !d.desiredGenerationCurrent(name, generationValue) {
+			return errReconciliationSuperseded
 		}
 		if err := d.startService(name, managed); err != nil {
 			startErr := fmt.Errorf("start service %s/%s: %w", name, managed.spec.Name, err)
-			_ = finishService(managed.spec.Name, startErr)
-			return startErr
-		}
-		if err := finishService(managed.spec.Name, nil); err != nil {
-			return err
+			recordFailure(reconcile.ResourceKey{Kind: reconcile.KindService, Name: managed.spec.Name}, startErr)
 		}
 	}
 	for _, target := range dependentRestarts {
-		if err := beginService(target.managed.spec.Name); err != nil {
-			return err
+		if !d.desiredGenerationCurrent(name, generationValue) {
+			return errReconciliationSuperseded
 		}
 		if err := d.startService(name, target.managed); err != nil {
 			restartErr := fmt.Errorf("restart dependent service %s/%s: %w", name, target.managed.spec.Name, err)
-			_ = finishService(target.managed.spec.Name, restartErr)
-			return restartErr
-		}
-		if err := finishService(target.managed.spec.Name, nil); err != nil {
-			return err
+			recordFailure(reconcile.ResourceKey{Kind: reconcile.KindService, Name: target.managed.spec.Name}, restartErr)
 		}
 	}
-	d.ensureReconciler(name)
-	for _, resource := range plan.Resources {
-		if resource.Kind == reconcile.KindTask || resource.Kind == reconcile.KindWorkflow {
-			if err := d.operationStart(operation, resource); err != nil {
-				return err
-			}
-		}
+	if !d.desiredGenerationCurrent(name, generationValue) {
+		return errReconciliationSuperseded
 	}
 	d.workflow.Apply(d.allTasksWith(tasks, name), d.allWorkflowsWith(workflows, name))
-	for _, resource := range plan.Resources {
-		if resource.Kind != reconcile.KindTask && resource.Kind != reconcile.KindWorkflow {
-			continue
-		}
-		fingerprint := ""
-		if resource.Kind == reconcile.KindTask {
-			fingerprint = reconcile.Fingerprint(tasks[resource.Name])
-		} else {
-			fingerprint = reconcile.Fingerprint(workflows[resource.Name])
-		}
-		if err := d.operationFinish(operation, resource, fingerprint, nil); err != nil {
-			return err
-		}
-	}
-	for _, resource := range plan.Resources {
-		if resource.Kind == reconcile.KindSchedule {
-			if err := d.operationStart(operation, resource); err != nil {
-				return err
-			}
-		}
+	if !d.desiredGenerationCurrent(name, generationValue) {
+		return errReconciliationSuperseded
 	}
 	if err := d.scheduler.Apply(d.allSchedulesWith(schedules, name, generationValue)); err != nil {
-		for _, resource := range plan.Resources {
-			if resource.Kind == reconcile.KindSchedule {
-				_ = d.operationFinish(operation, resource, resource.ObservedFingerprint, err)
-			}
-		}
-		return err
+		recordFailure(reconcile.ResourceKey{Kind: reconcile.KindSchedule}, err)
 	}
 	if err := d.pruneScheduleStateForProject(name, schedules); err != nil {
-		return err
+		recordFailure(reconcile.ResourceKey{Kind: reconcile.KindSchedule}, err)
 	}
-	for _, resource := range plan.Resources {
-		if resource.Kind != reconcile.KindSchedule {
-			continue
-		}
-		fingerprint := ""
-		for _, schedule := range schedules {
-			if schedule.Name == resource.Name {
-				fingerprint = reconcile.Fingerprint(schedule)
-				break
-			}
-		}
-		if err := d.operationFinish(operation, resource, fingerprint, nil); err != nil {
-			return err
-		}
+	if !d.desiredGenerationCurrent(name, generationValue) {
+		return errReconciliationSuperseded
 	}
 	if d.historyRepo != nil {
 		if err := d.scheduler.RefreshHistorySummary(d.executionContext()); err != nil {
-			return fmt.Errorf("refresh history summary: %w", err)
+			recordFailure(reconcile.ResourceKey{}, err)
 		}
 	}
 	d.mu.Lock()
@@ -1254,10 +1119,43 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, specs []con
 		}
 	}
 	d.mu.Unlock()
-	if err := d.verifyOperation(operation, plan, reconcile.DesiredState{Services: specs, Tasks: tasks, Workflows: workflows, Schedules: schedules}, d.observedProjectState(name)); err != nil {
-		return err
+	if len(failures) == 0 {
+		return nil
 	}
-	return nil
+	if len(failures) == 1 {
+		return failures[0]
+	}
+	return reconciliationFailures{Failures: failures}
+}
+
+func (d *Daemon) installProjectDesired(name string, file config.File, desired reconcile.DesiredState, generationValue uint64, acceptedAt time.Time, project registry.Project) {
+	d.mu.Lock()
+	d.installProjectDesiredLocked(name, file, desired, generationValue, acceptedAt, project)
+	d.mu.Unlock()
+}
+
+func (d *Daemon) installProjectDesiredLocked(name string, file config.File, desired reconcile.DesiredState, generationValue uint64, acceptedAt time.Time, project registry.Project) {
+	runtime := d.projects[name]
+	if runtime == nil {
+		runtime = &projectRuntime{processes: map[string]*managedProcess{}, resourceErrors: map[reconcile.ResourceKey]string{}, wake: make(chan struct{}, 1)}
+	}
+	if runtime.processes == nil {
+		runtime.processes = map[string]*managedProcess{}
+	}
+	if runtime.resourceErrors == nil {
+		runtime.resourceErrors = map[reconcile.ResourceKey]string{}
+	}
+	runtime.file = file
+	runtime.desired = desired
+	runtime.desiredGeneration = generationValue
+	runtime.acceptedAt = acceptedAt
+	runtime.lastReconcileAt = time.Time{}
+	runtime.resourceErrors = map[reconcile.ResourceKey]string{}
+	runtime.lastError = nil
+	if project.LastReconcileError != "" && project.LastReconcileGeneration == generationValue && project.LastReconcileErrorAt != nil {
+		runtime.lastError = &api.ReconcileError{Message: project.LastReconcileError, At: *project.LastReconcileErrorAt, Generation: generationValue}
+	}
+	d.projects[name] = runtime
 }
 
 func (d *Daemon) shimInstancesLocked(projectName string) map[string]registry.ServiceInstance {
@@ -2207,64 +2105,6 @@ func (d *Daemon) dependenciesSatisfiedLocked(project *projectRuntime, managed *m
 		}
 	}
 	return true
-}
-
-func (d *Daemon) ensureReconciler(projectName string) {
-	d.mu.Lock()
-	project := d.projects[projectName]
-	if project == nil || project.reconcileRunning {
-		d.mu.Unlock()
-		return
-	}
-	project.reconcileRunning = true
-	d.mu.Unlock()
-	go d.reconcileProject(projectName)
-}
-
-func (d *Daemon) reconcileProject(projectName string) {
-	defer func() {
-		d.mu.Lock()
-		if project := d.projects[projectName]; project != nil {
-			project.reconcileRunning = false
-		}
-		d.mu.Unlock()
-	}()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		started := false
-		d.mu.RLock()
-		project := d.projects[projectName]
-		waiting := make([]*managedProcess, 0)
-		if project != nil {
-			for _, managed := range project.processes {
-				if managed.state == StateWaiting {
-					waiting = append(waiting, managed)
-				}
-			}
-		}
-		d.mu.RUnlock()
-		if project == nil || len(waiting) == 0 {
-			return
-		}
-		sort.Slice(waiting, func(i, j int) bool { return waiting[i].spec.Name < waiting[j].spec.Name })
-		for _, managed := range waiting {
-			if err := d.startService(projectName, managed); err == nil {
-				started = true
-			}
-		}
-		if !started {
-			ctx := d.ctx
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}
 }
 
 func (d *Daemon) resetFailuresWhenStable(project string, managed *managedProcess, generation uint64) {
@@ -3251,8 +3091,15 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 	if request.Version != ipc.ProtocolVersion {
 		return failure(request, "UNSUPPORTED_VERSION", fmt.Errorf("unsupported API version %d", request.Version))
 	}
-	if err := d.ensureScheduleStateLoaded(); err != nil {
-		return failure(request, "SCHEDULE_STATE_FAILED", err)
+	scheduleStateRequired := true
+	switch request.Method {
+	case "config.plan", "config.apply", "config.rollback", "project.rollback", "project.status", "config.status":
+		scheduleStateRequired = false
+	}
+	if scheduleStateRequired {
+		if err := d.ensureScheduleStateLoaded(); err != nil {
+			return failure(request, "SCHEDULE_STATE_FAILED", err)
+		}
 	}
 	switch request.Method {
 	case "health":
@@ -3317,13 +3164,32 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		var p struct {
 			Project string `json:"project"`
 		}
-		if err := json.Unmarshal(request.Params, &p); err != nil {
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Project == "" {
+			if err == nil {
+				err = errors.New("project is required")
+			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.ApplyProject(p.Project); err != nil {
+		result, err := d.ApplyProjectResult(p.Project)
+		if err != nil {
 			return failure(request, "CONFIG_APPLY_FAILED", err)
 		}
-		return success(request, map[string]string{"project": p.Project, "status": "applied"})
+		return success(request, result)
+	case "project.status", "config.status":
+		var p struct {
+			Project string `json:"project"`
+		}
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Project == "" {
+			if err == nil {
+				err = errors.New("project is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		status, err := d.ProjectStatus(p.Project)
+		if err != nil {
+			return failure(request, "PROJECT_STATUS_FAILED", err)
+		}
+		return success(request, status)
 	case "config.rollback", "project.rollback":
 		var p struct {
 			Project    string `json:"project"`
@@ -3335,31 +3201,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.RollbackProject(p.Project, p.Generation); err != nil {
+		result, err := d.RollbackProjectResult(p.Project, p.Generation)
+		if err != nil {
 			return failure(request, "CONFIG_ROLLBACK_FAILED", err)
 		}
-		return success(request, map[string]interface{}{"project": p.Project, "status": "rolled_back", "generation": d.projectGeneration(p.Project)})
-	case "config.operations", "project.operations":
-		operations, err := generation.LoadOperations(d.layout.State)
-		if err != nil {
-			return failure(request, "CONFIG_OPERATIONS_FAILED", err)
-		}
-		var p struct {
-			Project string `json:"project"`
-		}
-		if err := json.Unmarshal(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		if p.Project != "" {
-			filtered := operations[:0]
-			for _, operation := range operations {
-				if operation.Project == p.Project {
-					filtered = append(filtered, operation)
-				}
-			}
-			operations = filtered
-		}
-		return success(request, operations)
+		return success(request, result)
 	case "service.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)

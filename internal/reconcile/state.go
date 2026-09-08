@@ -102,6 +102,8 @@ type ResourceObservation struct {
 	Fingerprint string
 	State       string
 	Active      bool
+	Health      string
+	Error       string
 }
 
 // ObservedState is deliberately separate from DesiredState. It represents

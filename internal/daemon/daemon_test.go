@@ -560,6 +560,7 @@ schedules:
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Ready })
 	for _, key := range []string{"demo/direct-task", "demo/pipeline-run"} {
 		if err := d.scheduler.RunNow(context.Background(), key); err != nil {
 			t.Fatal(err)
@@ -1237,6 +1238,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatalf("reloadRegistry() error = %v", err)
 	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
 	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
 	assertProcessID(t, d.ListProcesses(""), "beta/worker", 1)
 
@@ -1416,6 +1418,7 @@ services:
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
 	keys, results := d.planBulkServices([]string{"alpha/api", "alpha", "alpha/api"})
 	if len(results) != 0 {
 		t.Fatalf("planning results = %+v, want no errors", results)
@@ -1444,6 +1447,7 @@ func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
 	results := d.BulkServiceOperation("disable", []string{"alpha", "missing"})
 	if len(results) != 3 {
 		t.Fatalf("results = %+v, want project services plus one target error", results)
@@ -1495,6 +1499,8 @@ func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	if err := d.reloadRegistryForStart(); err != nil {
 		t.Fatalf("reloadRegistryForStart() error = %v", err)
 	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
+	waitForDaemonStatus(t, d, "beta", func(status api.ProjectStatus) bool { return status.Ready })
 	assertProcessID(t, d.ListProcesses(""), "alpha/api", 0)
 	assertProcessID(t, d.ListProcesses(""), "beta/worker", 1)
 	if project, name, err := d.resolveProcessRef("0"); err != nil || project+"/"+name != "alpha/api" {
@@ -1661,14 +1667,22 @@ services:
 		t.Fatal(err)
 	}
 	defer d.removeProject("demo")
-	items := d.ListProcesses("demo")
+	var items []ProcessInfo
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		items = d.ListProcesses("demo")
+		if len(items) == 2 && items[1].State == StateWaiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(items) != 2 || items[1].State != StateWaiting {
 		t.Fatalf("initial services = %+v, want web waiting", items)
 	}
 	if err := os.WriteFile(readyPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		items = d.ListProcesses("demo")
 		for _, item := range items {

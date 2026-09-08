@@ -11,7 +11,7 @@ import (
 	"github.com/kevin93203/mango/internal/registry"
 )
 
-func (d *Daemon) loadAppliedDesiredState(name string, project registry.Project) (reconcile.DesiredState, error) {
+func (d *Daemon) loadAcceptedDesiredState(name string, project registry.Project) (reconcile.DesiredState, error) {
 	if project.ConfigurationGeneration == 0 {
 		return reconcile.DesiredState{}, nil
 	}
@@ -21,14 +21,14 @@ func (d *Daemon) loadAppliedDesiredState(name string, project registry.Project) 
 	}
 	snapshot, err := generation.LoadSnapshot(path, name, project.ConfigurationGeneration)
 	if err != nil {
-		return reconcile.DesiredState{}, fmt.Errorf("project %s applied generation %d: %w; recover the generation metadata before applying", name, project.ConfigurationGeneration, err)
+		return reconcile.DesiredState{}, fmt.Errorf("project %s accepted generation %d: %w; recover the generation metadata before applying", name, project.ConfigurationGeneration, err)
 	}
 	if snapshot.Status != generation.SnapshotCommit {
-		return reconcile.DesiredState{}, fmt.Errorf("project %s applied generation %d: snapshot status is %q, want %q", name, project.ConfigurationGeneration, snapshot.Status, generation.SnapshotCommit)
+		return reconcile.DesiredState{}, fmt.Errorf("project %s accepted generation %d: snapshot status is %q, want %q", name, project.ConfigurationGeneration, snapshot.Status, generation.SnapshotCommit)
 	}
 	snapshot.Config.Path = project.ConfigPath
 	if err := config.Validate(snapshot.Config); err != nil {
-		return reconcile.DesiredState{}, fmt.Errorf("project %s applied generation %d: invalid snapshot configuration: %w", name, project.ConfigurationGeneration, err)
+		return reconcile.DesiredState{}, fmt.Errorf("project %s accepted generation %d: invalid snapshot configuration: %w", name, project.ConfigurationGeneration, err)
 	}
 	if snapshot.Desired != nil {
 		state := *snapshot.Desired
@@ -40,7 +40,7 @@ func (d *Daemon) loadAppliedDesiredState(name string, project registry.Project) 
 			}
 			location, loadErr := time.LoadLocation(zone)
 			if loadErr != nil {
-				return reconcile.DesiredState{}, fmt.Errorf("project %s applied generation %d: load schedule timezone %q: %w", name, project.ConfigurationGeneration, zone, loadErr)
+				return reconcile.DesiredState{}, fmt.Errorf("project %s accepted generation %d: load schedule timezone %q: %w", name, project.ConfigurationGeneration, zone, loadErr)
 			}
 			state.Schedules[index].Timezone = location
 		}
@@ -48,7 +48,7 @@ func (d *Daemon) loadAppliedDesiredState(name string, project registry.Project) 
 	}
 	state, err := reconcile.Compile(snapshot.Config, name)
 	if err != nil {
-		return reconcile.DesiredState{}, fmt.Errorf("project %s applied generation %d: %w", name, project.ConfigurationGeneration, err)
+		return reconcile.DesiredState{}, fmt.Errorf("project %s accepted generation %d: %w", name, project.ConfigurationGeneration, err)
 	}
 	return state, nil
 }
@@ -59,9 +59,13 @@ func (d *Daemon) observedProjectState(name string) reconcile.ObservedState {
 	project := d.projects[name]
 	if project != nil {
 		for serviceName, managed := range project.processes {
+			healthStatus := ""
+			if managed.health != nil {
+				healthStatus = managed.health.Status
+			}
 			observed.Resources[reconcile.ResourceKey{Kind: reconcile.KindService, Name: serviceName}] = reconcile.ResourceObservation{
 				Present: true, Fingerprint: reconcile.Fingerprint(managed.spec), State: managed.state,
-				Active: serviceActiveForPropagation(managed),
+				Active: managed.state == StateRunning, Health: healthStatus, Error: managed.lastError,
 			}
 		}
 	}
@@ -86,48 +90,6 @@ func (d *Daemon) observedProjectState(name string) reconcile.ObservedState {
 		}
 	}
 	return observed
-}
-
-func completedResourcesFromLatestFailure(state string, project string, desired reconcile.DesiredState) (map[reconcile.ResourceKey]bool, error) {
-	operations, err := generation.LoadOperations(state)
-	if err != nil {
-		return nil, err
-	}
-	desiredByKey := make(map[reconcile.ResourceKey]string)
-	for _, resource := range desired.Resources() {
-		desiredByKey[resource.Key] = resource.Fingerprint
-	}
-	var latest *generation.ApplyOperation
-	for index := range operations {
-		operation := &operations[index]
-		if operation.Project != project || operation.Status != "failed" {
-			continue
-		}
-		if latest == nil || operation.RequestedAt.After(latest.RequestedAt) {
-			latest = operation
-		}
-	}
-	completed := make(map[reconcile.ResourceKey]bool)
-	if latest == nil {
-		return completed, nil
-	}
-	for _, result := range latest.Results {
-		if result.Status != "succeeded" {
-			continue
-		}
-		key := reconcile.ResourceKey{Kind: result.Kind, Name: result.Name}
-		desiredFingerprint, desiredOK := desiredByKey[key]
-		if !desiredOK {
-			continue
-		}
-		for _, resource := range latest.Plan.Resources {
-			if resource.Kind == key.Kind && resource.Name == key.Name && resource.AfterFingerprint == desiredFingerprint {
-				completed[key] = true
-				break
-			}
-		}
-	}
-	return completed, nil
 }
 
 func sortResourceKeys(keys map[reconcile.ResourceKey]bool) []reconcile.ResourceKey {

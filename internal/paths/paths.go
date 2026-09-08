@@ -6,19 +6,18 @@ import (
 )
 
 type Layout struct {
-	Root            string
-	Runtime         string
-	Logs            string
-	State           string
-	Generations     string
-	ApplyOperations string
-	ScheduleState   string
-	Registry        string
-	DaemonConfig    string
-	SocketPath      string
-	DaemonLog       string
-	PIDFile         string
-	LockPath        string
+	Root          string
+	Runtime       string
+	Logs          string
+	State         string
+	Generations   string
+	ScheduleState string
+	Registry      string
+	DaemonConfig  string
+	SocketPath    string
+	DaemonLog     string
+	PIDFile       string
+	LockPath      string
 }
 
 func Default() (Layout, error) {
@@ -29,7 +28,7 @@ func Default() (Layout, error) {
 		}
 		return Layout{
 			Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
-			State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"), ApplyOperations: filepath.Join(root, "state", "apply-operations.json"), ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+			State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"), ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
 			DaemonConfig: filepath.Join(root, "daemon.yaml"),
 			SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 			DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
@@ -49,7 +48,7 @@ func Default() (Layout, error) {
 	runtime := filepath.Join(root, "runtime")
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),
-		State: filepath.Join(data, "state"), Generations: filepath.Join(data, "state", "generations"), ApplyOperations: filepath.Join(data, "state", "apply-operations.json"), ScheduleState: filepath.Join(data, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+		State: filepath.Join(data, "state"), Generations: filepath.Join(data, "state", "generations"), ScheduleState: filepath.Join(data, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(runtime, "mango.sock"),
 		DaemonLog:    filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),

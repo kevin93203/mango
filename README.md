@@ -274,9 +274,9 @@ Validate and register the generated configuration separately:
 mango config validate PATH
 mango project add NAME PATH
 mango project plan PROJECT
-mango project operations PROJECT [--json]
-mango project apply NAME
-mango project rollback PROJECT [GENERATION]
+mango project status PROJECT [--json]
+mango project apply NAME [--wait]
+mango project rollback PROJECT [GENERATION] [--wait]
 mango project ls
 mango project rename OLD NEW
 mango project remove NAME
@@ -284,11 +284,11 @@ mango project remove NAME
 
 `project add` stores the absolute YAML path in the registry. It does not copy
 or modify the configuration file. `project plan` explicitly reads the YAML and
-previews the changes. `project apply` explicitly reloads the file and
-reconciles the daemon with the new definition. `project operations` is a
-read-only view of apply checkpoints and resource events. A daemon restart
-restores the last successfully applied generation; editing the YAML alone does
-not change running or restored services.
+previews the changes. `project apply` accepts a validated and compiled desired
+snapshot immediately, then reconciles the daemon in the background. Use
+`project status` to inspect convergence; `--wait` waits for readiness without a
+timeout. A daemon restart restores the latest accepted generation; editing the
+YAML alone does not change running or restored services.
 
 ### Services
 
@@ -782,9 +782,9 @@ mango project add NAME PATH
 mango project remove NAME
 mango project rename OLD NEW
 mango project plan PROJECT [--json]
-mango project operations PROJECT [--json]
-mango project apply NAME [--json]
-mango project rollback PROJECT [GENERATION] [--json]
+mango project status PROJECT [--json]
+mango project apply NAME [--wait] [--json]
+mango project rollback PROJECT [GENERATION] [--wait] [--json]
 mango project ls [--json]
 ```
 
@@ -794,22 +794,22 @@ mango project ls [--json]
 | `remove` | `NAME` | Removes the project from the registry. It does not delete the YAML file, application files, or logs. A running daemon unloads the project's services and execution definitions. |
 | `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
 | `plan` | `PROJECT` | Reads the current YAML and shows the deterministic plan v2 resources for services, tasks, workflows, and schedules without changing runtime or metadata state. |
-| `operations` | `PROJECT` | Read-only operation status, per-resource checkpoints, and ordered reconciliation events. `--json` returns the full operation records. |
-| `apply` | `NAME` | Reloads and validates the YAML, persists a new generation, then reconciles services, tasks, workflows, and schedules. |
-| `rollback` | `PROJECT`, optional `GENERATION` | Restores the specified or previous successful desired-state generation. Missing generation metadata fails with an actionable error. |
-| `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last applied time. Requires the daemon. |
+| `status` | `PROJECT` | Shows the accepted generation, reconciliation phase, readiness, last project error, and resource status. |
+| `apply` | `NAME`, optional `--wait` | Validates and compiles the YAML, stores an immutable accepted generation, and starts background reconciliation. Runtime failures are shown by `status`; `--wait` waits until ready. |
+| `rollback` | `PROJECT`, optional `GENERATION`, `--wait` | Accepts an earlier accepted snapshot as a new generation and starts background reconciliation. `--wait` waits until ready. |
+| `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last accepted time. Requires the daemon. |
 
 Plan v2 JSON has `plan_version: 2`, a current generation, an advisory
 `proposed_generation`, and one sorted `resources` array. Each resource has a
 `kind`, `name`, `action`, `pending`, `process_affecting`, and deterministic
 fingerprints; dependency restarts include a stable sorted reason. Applying a
-project persists a pending operation and generation, checkpoints each resource,
-then commits the registry and snapshot together. If apply fails, the next
-ordinary apply recalculates from the last committed generation and skips only
-resources verified to already match. Unsupported or missing generation
-metadata fails closed with an actionable error. Legacy v1 apply-operation
-metadata is intentionally discarded (not migrated); the next apply writes the
-v2 operation format. Successful v1 generation snapshots remain readable.
+project validates and compiles the YAML, writes a committed immutable
+snapshot, then updates the registry pointer before waking reconciliation. The
+registry therefore represents the latest accepted desired state, not the last
+runtime-successful generation. Runtime failures are retried in the background
+and exposed through `project status`; an old `apply-operations.json`, if
+present, is ignored and is not removed automatically. Committed v1 generation
+snapshots remain readable.
 
 Examples:
 
@@ -1332,7 +1332,7 @@ MANGO_HOME/
 └── state/
     ├── history.db
     ├── schedules.json       # persisted schedule enable/disable state
-    ├── apply-operations.json
+    ├── apply-operations.json     # legacy file, ignored if present
     └── generations/
         └── <project>/<generation>.json  # last and previous desired states
 ```

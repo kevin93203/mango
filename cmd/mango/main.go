@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -21,7 +22,6 @@ import (
 	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
-	"github.com/kevin93203/mango/internal/generation"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/paths"
@@ -40,6 +40,8 @@ var (
 	jsonOutput bool
 )
 
+var cliCommandContext = context.Background()
+
 func main() {
 	layout, err := paths.Default()
 	if err != nil {
@@ -50,7 +52,10 @@ func main() {
 	}
 	ipc.SetEndpoint(layout.SocketPath)
 	app := newCLIApp(layout, os.Stdout, os.Stderr)
-	if err := app.rootCommand().Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	cliCommandContext = ctx
+	if err := app.rootCommand().ExecuteContext(ctx); err != nil {
 		app.printCommandError(err)
 		os.Exit(1)
 	}
@@ -565,18 +570,37 @@ func applyProjectCommand(project string) error {
 }
 
 func applyProjectCommandWithCaller(project string, caller func(string, interface{}) (ipc.Response, error)) error {
+	return applyProjectCommandWithCallerAndOptions(project, false, caller)
+}
+
+func applyProjectCommandWithOptions(project string, wait bool) error {
+	return applyProjectCommandWithCallerAndOptions(project, wait, call)
+}
+
+func applyProjectCommandWithCallerAndOptions(project string, wait bool, caller func(string, interface{}) (ipc.Response, error)) error {
 	response, err := caller("config.apply", struct{ Project string }{project})
 	if err != nil {
 		return err
 	}
-	if jsonOutput {
-		return cliOutput.JSON(response.Data)
-	}
-	var result map[string]string
+	var result api.ApplyResult
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s applied", result["project"])))
+	if wait {
+		status, err := waitForProjectGeneration(project, result.Generation)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cliOutput.JSON(status)
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s is ready at generation %d", project, status.Generation)))
+		return nil
+	}
+	if jsonOutput {
+		return cliOutput.JSON(result)
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s accepted as desired generation %d", result.Project, result.Generation)))
 	return nil
 }
 
@@ -594,43 +618,45 @@ func projectPlanCommand(project string) error {
 	return printProjectPlan(plan)
 }
 
-func projectOperationsCommand(project string) error {
-	response, err := call("config.operations", struct {
+func projectStatusCommand(project string) error {
+	response, err := call("project.status", struct {
 		Project string `json:"project"`
 	}{Project: project})
 	if err != nil {
 		return err
 	}
-	var operations []generation.ApplyOperation
-	if err := decodeData(response.Data, &operations); err != nil {
+	var status api.ProjectStatus
+	if err := decodeData(response.Data, &status); err != nil {
 		return err
 	}
 	if jsonOutput {
-		return cliOutput.JSON(operations)
+		return cliOutput.JSON(status)
 	}
-	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, fmt.Sprintf("Project operations: %s", project)))
-	rows := make([][]cliui.Cell, 0, len(operations))
-	for _, operation := range operations {
-		rows = append(rows, []cliui.Cell{
-			{Text: operation.ID}, {Text: operation.Type}, {Text: operation.Status},
-			{Text: operation.Phase}, {Text: fmt.Sprintf("%d", operation.Generation)},
-			{Text: operation.RequestedAt.Local().Format(time.RFC3339)},
-		})
-	}
-	if len(rows) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No operations found."))
-		return nil
-	}
-	cliOutput.Table([]string{"ID", "TYPE", "STATUS", "PHASE", "GENERATION", "REQUESTED"}, rows)
-	for _, operation := range operations {
-		for _, event := range operation.Events {
-			cliOutput.Printf("  #%d %s/%s %s %s\n", event.Sequence, event.Kind, event.Name, event.Status, event.Details)
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, fmt.Sprintf("Project status: %s", project)))
+	cliOutput.KeyValues([][]cliui.Cell{
+		{{Text: "generation"}, {Text: fmt.Sprintf("%d", status.Generation)}},
+		{{Text: "phase"}, {Text: status.Phase}},
+		{{Text: "ready"}, {Text: fmt.Sprintf("%t", status.Ready)}},
+	})
+	rows := make([][]cliui.Cell, 0, len(status.Resources))
+	for _, resource := range status.Resources {
+		healthy := "-"
+		if resource.Healthy != nil {
+			healthy = fmt.Sprintf("%t", *resource.Healthy)
 		}
+		rows = append(rows, []cliui.Cell{{Text: resource.Kind}, {Text: resource.Name}, {Text: resource.Phase}, {Text: healthy}, {Text: resource.ObservedState}, {Text: resource.Error}})
+	}
+	if len(rows) > 0 {
+		cliOutput.Table([]string{"KIND", "NAME", "PHASE", "HEALTHY", "OBSERVED", "ERROR"}, rows)
 	}
 	return nil
 }
 
 func projectRollbackCommand(project string, generation uint64) error {
+	return projectRollbackCommandWithOptions(project, generation, false)
+}
+
+func projectRollbackCommandWithOptions(project string, generation uint64, wait bool) error {
 	response, err := call("config.rollback", struct {
 		Project    string `json:"project"`
 		Generation uint64 `json:"generation,omitempty"`
@@ -638,15 +664,59 @@ func projectRollbackCommand(project string, generation uint64) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput {
-		return cliOutput.JSON(response.Data)
-	}
-	var result map[string]interface{}
+	var result api.ApplyResult
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s rolled back to generation %v", project, result["generation"])))
+	if wait {
+		status, err := waitForProjectGeneration(project, result.Generation)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cliOutput.JSON(status)
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s rollback is ready at generation %d", project, status.Generation)))
+		return nil
+	}
+	if jsonOutput {
+		return cliOutput.JSON(result)
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s rollback accepted as generation %d", project, result.Generation)))
 	return nil
+}
+
+func waitForProjectGeneration(project string, generation uint64) (api.ProjectStatus, error) {
+	for {
+		pollContext, cancel := context.WithTimeout(cliCommandContext, 5*time.Second)
+		response, err := callWithContext(pollContext, "project.status", struct {
+			Project string `json:"project"`
+		}{Project: project})
+		cancel()
+		if err != nil {
+			if errors.Is(cliCommandContext.Err(), context.Canceled) {
+				return api.ProjectStatus{}, fmt.Errorf("wait for project %s cancelled", project)
+			}
+			return api.ProjectStatus{}, err
+		}
+		var status api.ProjectStatus
+		if err := decodeData(response.Data, &status); err != nil {
+			return api.ProjectStatus{}, err
+		}
+		if status.Generation != generation {
+			return api.ProjectStatus{}, fmt.Errorf("project %s generation %d was superseded by generation %d", project, generation, status.Generation)
+		}
+		if status.Ready && status.Phase == api.ProjectPhaseReady {
+			return status, nil
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-cliCommandContext.Done():
+			timer.Stop()
+			return api.ProjectStatus{}, fmt.Errorf("wait for project %s cancelled", project)
+		case <-timer.C:
+		}
+	}
 }
 
 func printProjectPlan(plan reconcile.Plan) error {

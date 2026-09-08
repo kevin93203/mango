@@ -30,7 +30,7 @@ func TestBuildProducesDeterministicResources(t *testing.T) {
 		service("web", "new", true), service("added", "new", true),
 	}}
 	observed := observationFor(current, map[string]bool{"web": true})
-	plan := Build("demo", current, desired, observed, nil, 4, 5)
+	plan := Build("demo", current, desired, observed, 4, 5)
 	if plan.PlanVersion != PlanVersion || plan.CurrentGeneration != 4 || plan.ProposedGeneration != 5 {
 		t.Fatalf("plan metadata = %+v", plan)
 	}
@@ -51,7 +51,7 @@ func TestBuildProducesDeterministicResources(t *testing.T) {
 
 func TestBuildMarksObservedResourcesUnchangedAndNotPending(t *testing.T) {
 	desired := DesiredState{Services: []config.EffectiveService{service("api", "same", true)}}
-	plan := Build("demo", desired, desired, observationFor(desired, map[string]bool{"api": true}), nil, 1, 2)
+	plan := Build("demo", desired, desired, observationFor(desired, map[string]bool{"api": true}), 1, 2)
 	if len(plan.Resources) != 1 || plan.Resources[0].Action != ActionUnchanged || plan.Resources[0].Pending {
 		t.Fatalf("plan = %+v", plan)
 	}
@@ -60,7 +60,7 @@ func TestBuildMarksObservedResourcesUnchangedAndNotPending(t *testing.T) {
 func TestBuildMarksStoppedDefinitionChangesWithoutRestart(t *testing.T) {
 	current := DesiredState{Services: []config.EffectiveService{service("api", "old", false)}}
 	desired := DesiredState{Services: []config.EffectiveService{service("api", "new", false)}}
-	plan := Build("demo", current, desired, observationFor(current, nil), nil, 1, 2)
+	plan := Build("demo", current, desired, observationFor(current, nil), 1, 2)
 	if len(plan.Resources) != 1 || plan.Resources[0].Action != ActionChanged || !plan.Resources[0].Pending {
 		t.Fatalf("plan = %+v", plan)
 	}
@@ -80,7 +80,7 @@ func TestBuildIncludesDependencyInducedRestartWithSortedReasons(t *testing.T) {
 	zNew := service("z", "new", true)
 	desired := DesiredState{Services: []config.EffectiveService{aNew, dbNew, zNew, api}}
 	observed := observationFor(current, map[string]bool{"a": true, "db": true, "z": true, "api": true})
-	plan := Build("demo", current, desired, observed, nil, 1, 2)
+	plan := Build("demo", current, desired, observed, 1, 2)
 	var dependent ResourceChange
 	for _, resource := range plan.Resources {
 		if resource.Name == "api" {
@@ -107,7 +107,7 @@ func TestBuildIncludesAllResourceKindsAndStableOrder(t *testing.T) {
 			{Project: "demo", Name: "night", Cron: "0 0 * * *"},
 		},
 	}
-	plan := Build("demo", current, desired, NewObservedState(), nil, 0, 1)
+	plan := Build("demo", current, desired, NewObservedState(), 0, 1)
 	if len(plan.Resources) != 5 {
 		t.Fatalf("resources = %+v", plan.Resources)
 	}
@@ -123,12 +123,17 @@ func TestBuildIncludesAllResourceKindsAndStableOrder(t *testing.T) {
 	}
 }
 
-func TestBuildReusesVerifiedCompletedResource(t *testing.T) {
-	desired := DesiredState{Services: []config.EffectiveService{service("api", "same", true)}}
-	observed := observationFor(desired, map[string]bool{"api": true})
-	key := ResourceKey{Kind: KindService, Name: "api"}
-	plan := Build("demo", DesiredState{}, desired, observed, map[ResourceKey]bool{key: true}, 1, 2)
-	if len(plan.Resources) != 1 || plan.Resources[0].Pending {
-		t.Fatalf("plan = %+v", plan)
+func TestResourceReadyRequiresHealthcheckToBeHealthy(t *testing.T) {
+	desiredService := service("api", "same", true)
+	desiredService.HealthCheck = &config.EffectiveHealthCheck{}
+	desired := DesiredState{Services: []config.EffectiveService{desiredService}}
+	resource := desired.Resources()[0]
+	observation := ResourceObservation{Present: true, Fingerprint: resource.Fingerprint, State: "running", Active: true, Health: "starting"}
+	if ResourceReady(resource, observation) {
+		t.Fatal("resource with starting health unexpectedly ready")
+	}
+	observation.Health = "healthy"
+	if !ResourceReady(resource, observation) {
+		t.Fatal("healthy resource is not ready")
 	}
 }

@@ -39,14 +39,15 @@ Kubernetes orchestration, or multi-host high availability.
   history compatibility, post-exit logs, migration reopen/backup/failure, and
   daemon restart recovery are covered by tests. Existing YAML v3 projects and
   completed history remain readable.
-- **Phase 02 — Completed.** Added one desired/observed state model for plan and
-  apply, plan v2 resources across services/tasks/workflows/schedules,
-  per-resource checkpoints and operation-specific events, normal-apply partial
-  recovery, two-phase generation commit/startup recovery, atomic scheduler
-  replacement, and the read-only `project operations` query. Existing YAML v3
-  projects and the project registry remain readable; disposable operation v1
-  metadata is ignored, while unsupported newer or incomplete metadata fails
-  closed. Acceptance, recovery, race, and vet checks pass.
+- **Phase 02 — Completed.** Uses one desired/observed state model for plan
+  and apply, plan v2 resources across services/tasks/workflows/schedules,
+  immutable accepted snapshots, asynchronous latest-generation-wins
+  reconciliation, readiness status, retry backoff, and accepted-state
+  rollback. Runtime failures no longer roll back the registry pointer. Existing
+  YAML v3 projects and committed generation snapshots remain readable; legacy
+  apply-operation metadata is ignored and is not removed automatically.
+  `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build ./...`
+  pass.
 
 ## Dependency Flow
 
@@ -78,7 +79,7 @@ Kubernetes orchestration, or multi-host high availability.
   - YAML and the project registry own desired configuration.
   - Runtime files and `mango-shim` state own process ownership and observed
     process state.
-  - The metadata database owns executions, operations, events, audit records,
+  - The metadata database owns executions, execution operations, events, audit records,
     and schedule occurrences.
   - Log files own execution output.
 - Mango remains single-host and process-native. A future remote-control design

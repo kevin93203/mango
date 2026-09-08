@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/generation"
 	"github.com/kevin93203/mango/internal/ipc"
-	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
 )
@@ -30,7 +30,7 @@ func TestPhase2ExecutionListRejectsAllAndStatusTogether(t *testing.T) {
 	request.Params = json.RawMessage(`{"all":true,"status":"failed"}`)
 	response := d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
-		t.Fatalf("execution.ls response = %+v, want BAD_PARAMS", response)
+		t.Fatalf("execution.ls response = %+v, want BAD_PARAMS", response.Error)
 	}
 }
 
@@ -44,7 +44,7 @@ func TestPhase2RetryRejectsMissingTargetBeforeCreatingExecution(t *testing.T) {
 	request.Params = json.RawMessage(`{"run_id":"source-run"}`)
 	response := d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "EXECUTION_RETRY_FAILED" {
-		t.Fatalf("execution.retry response = %+v, want EXECUTION_RETRY_FAILED", response)
+		t.Fatalf("execution.retry response = %+v, want EXECUTION_RETRY_FAILED", response.Error)
 	}
 	rows, err := d.scheduler.ListExecutions(context.Background(), scheduler.ExecutionQuery{All: true})
 	if err != nil {
@@ -59,14 +59,11 @@ func timeForDaemonTest(offset int64) time.Time {
 	return time.Unix(offset, 0).UTC()
 }
 
-func TestDaemonRestartRestoresLastAppliedGenerationInsteadOfReloadingYAML(t *testing.T) {
+func TestDaemonRestartRestoresAcceptedGenerationInsteadOfReloadingYAML(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
-	original := []byte("version: 3\nservices:\n  api:\n    command: original-command\n    autostart: false\n")
-	if err := os.WriteFile(configPath, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePhase2Project(t, configPath, "original-command")
 	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
 		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 	}}); err != nil {
@@ -76,12 +73,13 @@ func TestDaemonRestartRestoresLastAppliedGenerationInsteadOfReloadingYAML(t *tes
 	if err := first.reloadRegistry(); err != nil {
 		t.Fatalf("initial reload = %v", err)
 	}
+	waitForDaemonStatus(t, first, "demo", func(status api.ProjectStatus) bool { return status.Ready })
 	stored, err := registry.Load(layout.Registry)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored.Projects["demo"].ConfigurationGeneration == 0 {
-		t.Fatalf("registry = %+v, want applied generation", stored.Projects["demo"])
+		t.Fatalf("registry = %+v, want accepted generation", stored.Projects["demo"])
 	}
 	if err := os.WriteFile(configPath, []byte("version: 3\nservices:\n  api:\n    command: changed-without-apply\n    autostart: false\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -90,6 +88,7 @@ func TestDaemonRestartRestoresLastAppliedGenerationInsteadOfReloadingYAML(t *tes
 	if err := second.reloadRegistryForStart(); err != nil {
 		t.Fatalf("restart reload = %v", err)
 	}
+	waitForDaemonStatus(t, second, "demo", func(status api.ProjectStatus) bool { return status.Ready })
 	second.mu.RLock()
 	project := second.projects["demo"]
 	command := ""
@@ -102,7 +101,7 @@ func TestDaemonRestartRestoresLastAppliedGenerationInsteadOfReloadingYAML(t *tes
 	}
 }
 
-func TestProjectPlanDoesNotMutateAppliedGeneration(t *testing.T) {
+func TestProjectPlanDoesNotMutateAcceptedGenerationOrReadLegacyOperations(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
@@ -110,6 +109,14 @@ func TestProjectPlanDoesNotMutateAppliedGeneration(t *testing.T) {
 	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
 		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 	}}); err != nil {
+		t.Fatal(err)
+	}
+	legacyOperations := filepath.Join(layout.State, "apply-operations.json")
+	if err := os.MkdirAll(layout.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyData := []byte("not valid operation metadata")
+	if err := os.WriteFile(legacyOperations, legacyData, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d := New(layout)
@@ -117,78 +124,24 @@ func TestProjectPlanDoesNotMutateAppliedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := d.projectGeneration("demo")
-	operationsBefore, err := generation.LoadOperations(layout.State)
-	if err != nil {
-		t.Fatal(err)
-	}
 	writePhase2Project(t, configPath, "changed-without-apply")
-	request := requestForMethod(t, "config.plan")
-	request.Params = json.RawMessage(`{"project":"demo"}`)
-	response := d.Handle(context.Background(), request)
-	if !response.OK {
-		t.Fatalf("plan response = %+v", response.Error)
-	}
-	var plan map[string]interface{}
-	if err := json.Unmarshal(mustJSON(t, response.Data), &plan); err != nil {
-		t.Fatal(err)
-	}
-	operationsAfter, err := generation.LoadOperations(layout.State)
+	plan, err := d.PlanProject("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before != d.projectGeneration("demo") || len(plan["resources"].([]interface{})) != 1 || len(operationsBefore) != len(operationsAfter) {
-		t.Fatalf("plan generation/plan = %d/%+v", d.projectGeneration("demo"), plan)
+	if before != d.projectGeneration("demo") || len(plan.Resources) != 1 || plan.Resources[0].Action != "changed" {
+		t.Fatalf("generation/plan = %d/%+v", d.projectGeneration("demo"), plan)
 	}
-	d.removeProject("demo")
+	if got, err := os.ReadFile(legacyOperations); err != nil || string(got) != string(legacyData) {
+		t.Fatalf("legacy operation metadata changed: data=%q err=%v", got, err)
+	}
 }
 
-func TestProjectApplyPersistsResourceCheckpointsAndEvents(t *testing.T) {
+func TestApplyAcceptsRuntimeFailureAndPublishesStatus(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
-	writePhase2Project(t, configPath, "original-command")
-	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
-		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	d := New(layout)
-	if err := d.reloadRegistry(); err != nil {
-		t.Fatal(err)
-	}
-	operations, err := generation.LoadOperations(layout.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(operations) != 1 {
-		t.Fatalf("operations = %+v, want one bootstrap apply", operations)
-	}
-	operation := operations[0]
-	if operation.Status != generation.OperationSuccess || operation.Phase != generation.SnapshotCommit || operation.PlanVersion != reconcile.PlanVersion {
-		t.Fatalf("operation = %+v, want committed plan v2", operation)
-	}
-	if len(operation.Results) != 1 || operation.Results[0].Status != generation.OperationSuccess || len(operation.Events) != 2 {
-		t.Fatalf("operation results/events = %+v/%+v", operation.Results, operation.Events)
-	}
-	if operation.Events[0].Sequence != 1 || operation.Events[1].Sequence != 2 || operation.Events[0].Status != generation.OperationRunning || operation.Events[1].Status != generation.OperationSuccess {
-		t.Fatalf("events = %+v", operation.Events)
-	}
-	snapshot, err := generation.LoadSnapshot(generation.SnapshotPath(layout.State, "demo", d.projectGeneration("demo")), "demo", d.projectGeneration("demo"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Status != generation.SnapshotCommit || snapshot.Desired == nil {
-		t.Fatalf("snapshot = %+v, want committed compiled desired state", snapshot)
-	}
-	d.removeProject("demo")
-}
-
-func TestFailedApplyRetriesOnlyResourcesAlreadyVerifiedAsComplete(t *testing.T) {
-	root := t.TempDir()
-	layout := testLayout(root)
-	configPath := filepath.Join(root, "project.yaml")
-	failed := []byte("version: 3\nservices:\n  a:\n    command: unused-a\n    autostart: false\n  b:\n    command: C:/path/that/does/not/exist.exe\n    autostart: true\n")
-	if err := os.WriteFile(configPath, failed, 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("version: 3\nservices:\n  api:\n    command: C:/path/that/does/not/exist.exe\n    autostart: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
@@ -200,83 +153,27 @@ func TestFailedApplyRetriesOnlyResourcesAlreadyVerifiedAsComplete(t *testing.T) 
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
-	operations, err := generation.LoadOperations(layout.State)
+	status := waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Phase == api.ProjectPhaseDegraded })
+	if status.Generation == 0 || status.LastError == nil || len(status.Resources) != 1 || status.Resources[0].Phase != api.ResourcePhaseDegraded {
+		t.Fatalf("status = %+v, want accepted generation with resource failure", status)
+	}
+	stored, err := registry.Load(layout.Registry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].Status != generation.OperationFailed {
-		t.Fatalf("failed operations = %+v", operations)
+	if stored.Projects["demo"].ConfigurationGeneration != status.Generation {
+		t.Fatalf("registry generation = %d, status generation = %d", stored.Projects["demo"].ConfigurationGeneration, status.Generation)
 	}
-	failedOperation := operations[0]
-	if len(failedOperation.Results) != 2 || failedOperation.Results[0].Name != "a" || failedOperation.Results[0].Status != generation.OperationSuccess || failedOperation.Results[1].Name != "b" || failedOperation.Results[1].Status != generation.OperationFailed {
-		t.Fatalf("failed resource results = %+v", failedOperation.Results)
-	}
-	if err := os.WriteFile(configPath, []byte("version: 3\nservices:\n  a:\n    command: unused-a\n    autostart: false\n  b:\n    command: unused-b\n    autostart: false\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.ApplyProject("demo"); err != nil {
-		t.Fatal(err)
-	}
-	operations, err = generation.LoadOperations(layout.State)
+	snapshot, err := generation.LoadSnapshot(generation.SnapshotPath(layout.State, "demo", status.Generation), "demo", status.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 2 || operations[1].Status != generation.OperationSuccess || operations[1].PreviousOperationID != failedOperation.ID {
-		t.Fatalf("retry operations = %+v", operations)
+	if snapshot.Status != generation.SnapshotCommit {
+		t.Fatalf("snapshot status = %q, want committed", snapshot.Status)
 	}
-	for _, result := range operations[1].Results {
-		if result.Name == "a" && len(operations[1].Events) != 2 {
-			t.Fatalf("retry should only execute b, events = %+v", operations[1].Events)
-		}
-	}
-	d.removeProject("demo")
 }
 
-func TestPlanResourcesMatchApplyOperationPlan(t *testing.T) {
-	root := t.TempDir()
-	layout := testLayout(root)
-	configPath := filepath.Join(root, "project.yaml")
-	writePhase2Project(t, configPath, "original-command")
-	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
-		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	d := New(layout)
-	if err := d.reloadRegistry(); err != nil {
-		t.Fatal(err)
-	}
-	writePhase2Project(t, configPath, "changed-command")
-	planned, err := d.PlanProject("demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.ApplyProject("demo"); err != nil {
-		t.Fatal(err)
-	}
-	operations, err := generation.LoadOperations(layout.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(operations) != 2 {
-		t.Fatalf("operations = %+v", operations)
-	}
-	applied := operations[1].Plan
-	plannedJSON, err := json.Marshal(planned)
-	if err != nil {
-		t.Fatal(err)
-	}
-	appliedJSON, err := json.Marshal(applied)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(plannedJSON) != string(appliedJSON) {
-		t.Fatalf("plan/apply mismatch:\nplan=%s\napply=%s", plannedJSON, appliedJSON)
-	}
-	d.removeProject("demo")
-}
-
-func TestRegistryWriteFailureDoesNotReplaceSuccessfulGeneration(t *testing.T) {
+func TestRegistryWriteFailureLeavesAcceptedGenerationUnchanged(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
@@ -298,30 +195,22 @@ func TestRegistryWriteFailureDoesNotReplaceSuccessfulGeneration(t *testing.T) {
 	if err := os.Mkdir(layout.Registry, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ApplyProject("demo"); err == nil {
+	if _, err := d.ApplyProjectResult("demo"); err == nil {
 		t.Fatal("apply unexpectedly succeeded with registry path replaced by directory")
 	}
 	if got := d.projectGeneration("demo"); got != previousGeneration {
 		t.Fatalf("in-memory generation = %d, want previous %d", got, previousGeneration)
 	}
-	operations, err := generation.LoadOperations(layout.State)
+	orphaned, err := generation.LoadSnapshot(generation.SnapshotPath(layout.State, "demo", previousGeneration+1), "demo", previousGeneration+1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 2 || operations[1].Status != generation.OperationFailed || operations[1].Phase != generation.SnapshotAborted {
-		t.Fatalf("failed registry operation = %+v", operations)
+	if orphaned.Status != generation.SnapshotAborted {
+		t.Fatalf("orphaned snapshot status = %q, want %q", orphaned.Status, generation.SnapshotAborted)
 	}
-	snapshot, err := generation.LoadSnapshot(generation.SnapshotPath(layout.State, "demo", operations[1].Generation), "demo", operations[1].Generation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Status != generation.SnapshotAborted {
-		t.Fatalf("snapshot status = %q, want aborted", snapshot.Status)
-	}
-	d.removeProject("demo")
 }
 
-func TestRollbackRestoresPreviousSuccessfulGeneration(t *testing.T) {
+func TestRollbackCreatesNewAcceptedGenerationFromPreviousSnapshot(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
@@ -335,24 +224,43 @@ func TestRollbackRestoresPreviousSuccessfulGeneration(t *testing.T) {
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Ready })
 	firstGeneration := d.projectGeneration("demo")
 	writePhase2Project(t, configPath, "new-command")
-	if err := d.ApplyProject("demo"); err != nil {
+	second, err := d.ApplyProjectResult("demo")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if d.projectGeneration("demo") == firstGeneration {
-		t.Fatal("second apply did not create a new generation")
-	}
-	if err := d.RollbackProject("demo", 0); err != nil {
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Generation == second.Generation && status.Ready })
+	rollback, err := d.RollbackProjectResult("demo", 0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if rollback.Generation <= second.Generation || rollback.SourceGeneration != firstGeneration {
+		t.Fatalf("rollback result = %+v, want a new generation from %d", rollback, firstGeneration)
+	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Generation == rollback.Generation && status.Ready })
 	d.mu.RLock()
 	command := d.projects["demo"].processes["api"].spec.Command
 	d.mu.RUnlock()
-	if command != "original-command" || d.projectGeneration("demo") != firstGeneration {
-		t.Fatalf("rollback command/generation = %q/%d, want original-command/%d", command, d.projectGeneration("demo"), firstGeneration)
+	if command != "original-command" {
+		t.Fatalf("rollback command = %q, want original-command", command)
 	}
-	d.removeProject("demo")
+}
+
+func waitForDaemonStatus(t *testing.T, d *Daemon, project string, predicate func(api.ProjectStatus) bool) api.ProjectStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := d.ProjectStatus(project)
+		if err == nil && predicate(status) {
+			return status
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	status, err := d.ProjectStatus(project)
+	t.Fatalf("project status did not reach expected state: status=%+v err=%v", status, err)
+	return api.ProjectStatus{}
 }
 
 func writePhase2Project(t *testing.T, path, command string) {

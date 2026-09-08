@@ -1013,7 +1013,7 @@ func TestProjectApplyUsesPositionalName(t *testing.T) {
 		if !ok || projectParams.Project != "demo" {
 			t.Fatalf("params = %#v, want project demo", params)
 		}
-		return ipc.Response{Version: 1, OK: true, Data: map[string]string{"project": "demo"}}, nil
+		return ipc.Response{Version: 1, OK: true, Data: api.ApplyResult{Project: "demo", Generation: 7, Status: "accepted"}}, nil
 	})
 	if err != nil {
 		t.Fatalf("project apply caller = %v", err)

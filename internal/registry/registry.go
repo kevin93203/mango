@@ -10,13 +10,18 @@ import (
 )
 
 type Project struct {
-	Name                    string         `json:"name"`
-	ConfigPath              string         `json:"config_path"`
-	Enabled                 bool           `json:"enabled"`
-	ConfigVersion           int            `json:"config_version"`
+	Name          string `json:"name"`
+	ConfigPath    string `json:"config_path"`
+	Enabled       bool   `json:"enabled"`
+	ConfigVersion int    `json:"config_version"`
+	// These legacy field names now point to the latest accepted desired state,
+	// not the last generation that happened to converge at runtime.
 	LastApplied             *time.Time     `json:"last_applied,omitempty"`
 	ConfigurationGeneration uint64         `json:"configuration_generation,omitempty"`
 	DesiredStatePath        string         `json:"desired_state_path,omitempty"`
+	LastReconcileError      string         `json:"last_reconcile_error,omitempty"`
+	LastReconcileErrorAt    *time.Time     `json:"last_reconcile_error_at,omitempty"`
+	LastReconcileGeneration uint64         `json:"last_reconcile_generation,omitempty"`
 	ProcessIDs              map[string]int `json:"process_ids,omitempty"`
 	// ShimInstances is advisory metadata. Runtime state and process identity
 	// remain authoritative in each shim instance directory.

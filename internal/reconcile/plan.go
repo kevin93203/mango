@@ -49,12 +49,10 @@ func (p Plan) HasChanges() bool {
 	return false
 }
 
-// Build compares the last successfully applied desired state with a newly
-// compiled state while using observed state only to determine pending work.
-// completed contains resource keys that a prior failed operation reported as
-// successfully reconciled; it is consulted only after observed state still
-// matches the new desired fingerprint.
-func Build(project string, current, desired DesiredState, observed ObservedState, completed map[ResourceKey]bool, currentGeneration, proposedGeneration uint64) Plan {
+// Build compares the accepted desired state with a newly compiled state while
+// using observed state only to determine pending work. Reconciliation is
+// idempotent, so no durable operation checkpoints are needed.
+func Build(project string, current, desired DesiredState, observed ObservedState, currentGeneration, proposedGeneration uint64) Plan {
 	currentResources := resourcesByKey(current.Resources())
 	desiredResources := resourcesByKey(desired.Resources())
 	keys := make(map[ResourceKey]bool, len(currentResources)+len(desiredResources))
@@ -110,15 +108,10 @@ func Build(project string, current, desired DesiredState, observed ObservedState
 			}
 			change.Pending = !resourceSatisfied(after, observation)
 		}
-		if !change.Pending && completed[key] {
-			// A completed checkpoint can only suppress work after the current
-			// observed fingerprint has been verified against the desired one.
-			change.Pending = false
-		}
 		resources = append(resources, change)
 	}
 
-	appendDependencyRestarts(&resources, current, desired, observed, completed)
+	appendDependencyRestarts(&resources, current, desired, observed)
 	sort.Slice(resources, func(i, j int) bool {
 		left := ResourceKey{Kind: resources[i].Kind, Name: resources[i].Name}
 		right := ResourceKey{Kind: resources[j].Kind, Name: resources[j].Name}
@@ -159,13 +152,28 @@ func resourceSatisfied(desired ResourceSpec, observed ResourceObservation) bool 
 }
 
 // ResourceSatisfied reports whether an observed resource already matches the
-// desired resource. Reconciliation uses the same predicate as planning when
-// deciding whether a checkpoint can be skipped.
+// desired resource. Reconciliation and planning share this idempotent
+// lifecycle predicate; readiness is checked separately by ResourceReady.
 func ResourceSatisfied(desired ResourceSpec, observed ResourceObservation) bool {
 	return resourceSatisfied(desired, observed)
 }
 
-func appendDependencyRestarts(resources *[]ResourceChange, current, desired DesiredState, observed ObservedState, completed map[ResourceKey]bool) {
+// ResourceReady reports whether a resource both matches its desired
+// definition and meets the readiness condition exposed to project status and
+// --wait. Health is intentionally stricter than lifecycle convergence for
+// services that declare a healthcheck.
+func ResourceReady(desired ResourceSpec, observed ResourceObservation) bool {
+	if !ResourceSatisfied(desired, observed) {
+		return false
+	}
+	if desired.Key.Kind != KindService || desired.Value == nil {
+		return true
+	}
+	service, ok := desired.Value.(config.EffectiveService)
+	return !ok || !service.Autostart || service.HealthCheck == nil || observed.Health == "healthy"
+}
+
+func appendDependencyRestarts(resources *[]ResourceChange, current, desired DesiredState, observed ObservedState) {
 	currentServices := make(map[string]config.EffectiveService, len(current.Services))
 	desiredServices := make(map[string]config.EffectiveService, len(desired.Services))
 	for _, service := range current.Services {
@@ -220,7 +228,7 @@ func appendDependencyRestarts(resources *[]ResourceChange, current, desired Desi
 			} else {
 				resource.Reason = dependencyReason
 			}
-			resource.Pending = !completed[key]
+			resource.Pending = true
 			resource.ProcessAffecting = true
 			break
 		}
@@ -230,7 +238,7 @@ func appendDependencyRestarts(resources *[]ResourceChange, current, desired Desi
 		after := desiredServices[dependentName]
 		*resources = append(*resources, ResourceChange{
 			Kind: KindService, Name: dependentName, Action: ActionRestarted,
-			Reason: "dependency_changed:" + strings.Join(dependencies, ","), Pending: !completed[key],
+			Reason: "dependency_changed:" + strings.Join(dependencies, ","), Pending: true,
 			ProcessAffecting: true, ObservedState: observation.State,
 			ObservedFingerprint: observation.Fingerprint, BeforeFingerprint: Fingerprint(before), AfterFingerprint: Fingerprint(after),
 		})

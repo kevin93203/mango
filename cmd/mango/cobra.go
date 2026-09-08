@@ -196,6 +196,7 @@ func (a *cliApp) projectCmd() *cobra.Command {
 		{"add NAME PATH", "Register a project", "add"}, {"remove NAME", "Remove a project", "remove"},
 		{"rename OLD NEW", "Rename a project", "rename"},
 		{"ls", "List registered projects", "ls"},
+		{"status PROJECT", "Show desired-state reconciliation status", "status"},
 	} {
 		spec := spec
 		validate := cobra.ArbitraryArgs
@@ -206,6 +207,8 @@ func (a *cliApp) projectCmd() *cobra.Command {
 			validate = cobra.ExactArgs(1)
 		case "ls":
 			validate = cobra.NoArgs
+		case "status":
+			validate = cobra.ExactArgs(1)
 		}
 		var run func([]string) error
 		switch spec.action {
@@ -217,20 +220,23 @@ func (a *cliApp) projectCmd() *cobra.Command {
 			run = func(args []string) error { return projectRenameCommand(a.layout, args[0], args[1]) }
 		case "ls":
 			run = func([]string) error { return projectListCommand() }
+		case "status":
+			run = func(args []string) error { return projectStatusCommand(args[0]) }
 		}
 		cmd.AddCommand(a.leafCmd(spec.use, spec.short, validate, run))
 	}
-	cmd.AddCommand(a.leafCmd("apply NAME", "Apply project configuration", cobra.ExactArgs(1), func(args []string) error {
-		return applyProjectCommand(args[0])
-	}))
+	var waitApply bool
+	apply := a.leafCmd("apply NAME", "Accept and reconcile project configuration", cobra.ExactArgs(1), func(args []string) error {
+		return applyProjectCommandWithOptions(args[0], waitApply)
+	})
+	apply.Flags().BoolVar(&waitApply, "wait", false, "wait until the accepted generation is ready")
+	cmd.AddCommand(apply)
 
 	cmd.AddCommand(a.leafCmd("plan PROJECT", "Preview the desired-state apply plan", cobra.ExactArgs(1), func(args []string) error {
 		return projectPlanCommand(args[0])
 	}))
-	cmd.AddCommand(a.leafCmd("operations PROJECT", "Show project apply operations and resource events", cobra.ExactArgs(1), func(args []string) error {
-		return projectOperationsCommand(args[0])
-	}))
-	cmd.AddCommand(a.leafCmd("rollback PROJECT [GENERATION]", "Restore a previous configuration generation", cobra.MinimumNArgs(1), func(args []string) error {
+	var waitRollback bool
+	rollback := a.leafCmd("rollback PROJECT [GENERATION]", "Accept a previous configuration generation as new desired state", cobra.RangeArgs(1, 2), func(args []string) error {
 		generation := uint64(0)
 		if len(args) == 2 {
 			value, err := strconv.ParseUint(args[1], 10, 64)
@@ -239,8 +245,10 @@ func (a *cliApp) projectCmd() *cobra.Command {
 			}
 			generation = value
 		}
-		return projectRollbackCommand(args[0], generation)
-	}))
+		return projectRollbackCommandWithOptions(args[0], generation, waitRollback)
+	})
+	rollback.Flags().BoolVar(&waitRollback, "wait", false, "wait until the accepted generation is ready")
+	cmd.AddCommand(rollback)
 	return cmd
 }
 

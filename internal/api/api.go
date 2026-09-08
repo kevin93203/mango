@@ -24,6 +24,55 @@ const (
 	CapabilityDegraded    = "degraded"
 )
 
+const (
+	ProjectPhaseReconciling = "reconciling"
+	ProjectPhaseReady       = "ready"
+	ProjectPhaseDegraded    = "degraded"
+	ProjectPhaseUnavailable = "unavailable"
+	ResourcePhasePending    = "pending"
+	ResourcePhaseReady      = "ready"
+	ResourcePhaseDegraded   = "degraded"
+	ResourcePhaseRemoved    = "removed"
+)
+
+// ApplyResult reports acceptance of a desired-state generation. Runtime
+// convergence is reported separately through ProjectStatus.
+type ApplyResult struct {
+	Project          string    `json:"project"`
+	Generation       uint64    `json:"generation"`
+	Status           string    `json:"status"`
+	AcceptedAt       time.Time `json:"accepted_at"`
+	SourceGeneration uint64    `json:"source_generation,omitempty"`
+}
+
+type ReconcileError struct {
+	Message    string    `json:"message"`
+	At         time.Time `json:"at"`
+	Generation uint64    `json:"generation"`
+}
+
+type ResourceStatus struct {
+	Kind                string `json:"kind"`
+	Name                string `json:"name"`
+	Phase               string `json:"phase"`
+	Pending             bool   `json:"pending"`
+	DesiredFingerprint  string `json:"desired_fingerprint,omitempty"`
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
+	ObservedState       string `json:"observed_state,omitempty"`
+	Healthy             *bool  `json:"healthy,omitempty"`
+	Error               string `json:"error,omitempty"`
+}
+
+type ProjectStatus struct {
+	Project    string           `json:"project"`
+	Generation uint64           `json:"generation"`
+	Phase      string           `json:"phase"`
+	Ready      bool             `json:"ready"`
+	AcceptedAt time.Time        `json:"accepted_at"`
+	LastError  *ReconcileError  `json:"last_error,omitempty"`
+	Resources  []ResourceStatus `json:"resources"`
+}
+
 // CapabilityInfo describes one host or implementation capability. The state
 // is intentionally explicit so callers can distinguish a supported feature
 // from a known limitation and from a degraded fallback.

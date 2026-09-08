@@ -17,7 +17,8 @@ orchestrator.
 ## Dependencies
 
 - Phase 01 unified execution and idempotency.
-- Phase 02 configuration generations and service reliability.
+- Phase 02 accepted desired snapshots, reconciliation status, and service
+  reliability.
 
 ## Public API / Configuration Changes
 

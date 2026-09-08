@@ -1,208 +1,258 @@
-# Phase 02: Desired State and Service Reliability
+# Phase 02: Accepted Desired State and Service Reliability
 
-Status: Completed. Acceptance, recovery, race, and vet checks pass.
+Status: Completed. Accepted-generation and background-reconciliation behavior
+is implemented and the repository quality gate passes.
 
 ## Objective
 
-Make configuration application predictable, reviewable, recoverable, and
-health-aware while preserving existing YAML v3 behavior.
+Make `project apply` a durable desired-state submission. Mango validates and
+compiles the YAML, stores an immutable desired snapshot, and immediately
+publishes that snapshot as the latest accepted generation. Runtime convergence
+then continues asynchronously and is observable through project status.
+
+The success boundary is deliberately small:
+
+```text
+read YAML
+→ validate + compile
+→ store immutable desired snapshot
+→ point registry at the new snapshot
+→ wake reconciliation
+→ runtime continuously approaches desired state
+```
+
+Only YAML validation/compilation, snapshot persistence, or registry
+persistence can make `apply` fail. A service executable that is missing, a
+process that cannot start, an unhealthy service, a failed schedule update, or
+a task/workflow runtime problem does not roll back the accepted registry
+pointer.
 
 ## Scope
 
-- Desired-state compilation and apply planning.
-- Desired-state plan previews, operation history, and rollback.
-- Configuration generations and partial-failure recovery.
-- Health actions and native probes.
-- Startup readiness, graceful shutdown, cooldown, and dependency propagation.
+- Desired-state compilation and deterministic plan previews.
+- Immutable configuration generations and accepted-state rollback.
+- One background reconciliation worker per project.
+- Latest-generation-wins cancellation and exponential retry backoff.
+- Project and resource readiness status, including service healthchecks.
+- Existing service restart, health action, crash-loop, and dependency logic.
+- Startup restore of the registry's latest accepted desired snapshot.
 
 ## Dependencies
 
-- Phase 01 execution IDs, operation records, and metadata persistence.
+- Phase 01 unified execution and persistence.
 - Phase 00 platform capability reporting.
 
-## Public API / Configuration Changes
+## Public API / CLI
 
-Add CLI commands:
+The public project commands are:
 
 ```text
-mango project plan PROJECT
-mango project operations PROJECT [--json]
-mango project rollback PROJECT [GENERATION]
+mango project plan PROJECT [--json]
+mango project status PROJECT [--json]
+mango project apply PROJECT [--wait] [--json]
+mango project rollback PROJECT [GENERATION] [--wait] [--json]
 ```
 
-`project plan` is the only public preview command. `project apply` performs
-the reconciliation.
+`project operations` is removed. Execution-history operations remain an
+internal representation of task/workflow runs and are not apply transaction
+metadata.
 
-Plan responses use version 2 of one shared schema:
+`config.apply` and `config.rollback` return immediately with an accepted
+result:
 
 ```json
 {
-  "plan_version": 2,
   "project": "demo",
-  "current_generation": 4,
-  "proposed_generation": 5,
+  "generation": 5,
+  "status": "accepted",
+  "accepted_at": "2026-09-09T10:00:00Z",
+  "source_generation": 4
+}
+```
+
+`project.status` returns the current accepted generation and in-memory
+resource observations. Its phase is `reconciling`, `ready`, `degraded`, or
+`unavailable`:
+
+```json
+{
+  "project": "demo",
+  "generation": 5,
+  "phase": "degraded",
+  "ready": false,
+  "accepted_at": "2026-09-09T10:00:00Z",
+  "last_error": {
+    "message": "start service demo/api: executable not found",
+    "at": "2026-09-09T10:00:01Z",
+    "generation": 5
+  },
   "resources": [
     {
       "kind": "service",
       "name": "api",
-      "action": "restarted",
-      "reason": "dependency_changed:db",
+      "phase": "degraded",
       "pending": true,
-      "process_affecting": true,
-      "before_fingerprint": "...",
-      "after_fingerprint": "..."
+      "observed_state": "failed",
+      "error": "executable not found"
     }
   ]
 }
 ```
 
-`kind` is one of `service`, `task`, `workflow`, or `schedule`; `action` is
-one of `added`, `changed`, `removed`, `restarted`, or `unchanged`. Resources
-are emitted in kind/name order. Fingerprints are deterministic hashes and do
-not expose environment values or other secrets. `pending` reports whether
-the current apply still needs work, so an already verified resource from a
-partial apply is not repeated. `proposed_generation` is advisory and has no
-side effects.
+Resource readiness rules are intentionally explicit:
 
-Add optional service health fields:
+- A service with a healthcheck is ready only when its lifecycle state is
+  desired and its health is `healthy`.
+- A service without a healthcheck is ready when its lifecycle state is
+  desired.
+- A task or workflow definition is ready when it is installed.
+- A schedule is ready when its desired definition is applied.
+
+`--wait` obtains the accepted generation and polls `project.status` until all
+desired resources are ready. It has no timeout. Ctrl-C cancels only the CLI
+wait; it does not cancel the accepted desired state or its daemon worker. If a
+newer generation appears, the old wait exits with a superseded-generation
+error while reconciliation continues for the newest generation.
+
+## Configuration
+
+Existing YAML v3 remains valid. Service health actions and native probes are
+supported:
 
 ```yaml
 healthcheck:
   on_unhealthy: report
 ```
 
-Allowed values are `report`, `restart`, and `stop`. The default remains
-`report`.
+Allowed health actions are `report`, `restart`, and `stop`; `report` remains
+the default. Probe forms include `http`, `https`, `tcp`, and `file`, in
+addition to the existing `CMD`, `CMD-SHELL`, and `NONE` forms.
 
-Add optional probe forms for `http`, `https`, `tcp`, and `file`, while keeping
-existing `CMD`, `CMD-SHELL`, and `NONE` forms valid.
+Mango validates schema, dependency semantics, and compilation-time values. It
+does not test whether a user's command can actually execute successfully.
+That is a runtime responsibility reported by reconciliation status.
 
-## Architecture Changes
+## Architecture
 
-Apply must follow this flow:
+### Apply
 
-```text
-load config
-→ validate
-→ compile desired state
-→ calculate plan
-→ persist operation and generation
-→ reconcile services
-→ record transitions and result
-```
+`applyMu` protects generation allocation, snapshot persistence, and the
+registry pointer update. It does not cover process starts, stops, healthchecks,
+scheduler execution, or task/workflow execution.
 
-The compiler and action calculator are shared by `project plan` and
-`project apply`. The current desired state comes from the last committed
-generation; observed state comes from daemon services, the workflow executor,
-and the scheduler. A generation-zero project may use the legacy bootstrap
-once, but later startup and planning fail closed when committed metadata is
-missing or unsupported.
+The new snapshot is written as `committed` in one atomic file write. The
+registry is then atomically written with `configuration_generation`,
+`desired_state_path`, and `last_applied` pointing to that accepted snapshot.
+Only after both writes succeed is the snapshot installed in daemon memory and
+the reconciler woken. If the registry write fails, the previous registry
+pointer remains authoritative; the newly written snapshot may be orphaned and
+is retained for inspection. Mango best-effort marks that orphan as
+`aborted`, so it cannot be selected as accepted rollback history.
 
-Every apply persists an operation with an ID, plan version, previous operation
-ID, phase, per-resource result/checkpoint, and ordered resource events. Resource
-events record start, success, and failure. A failed apply remains queryable via
-`mango project operations PROJECT`; the next ordinary `project apply` builds a
-new plan from the last committed generation, current YAML, and observed state.
-It skips only resources whose desired state is verified, never blindly trusting
-an old checkpoint.
+The registry field names remain compatible with existing JSON. Their meaning
+is now:
 
-Generation and registry updates use a two-phase commit. The operation and
-snapshot move through `pending` and `ready_to_commit`; the registry pointer
-and committed snapshot are finalized only after reconciliation and verification.
-On daemon startup, pending operations are finalized only when the registry
-already points at the new generation and every checkpoint is complete;
-otherwise the new generation is aborted and the previous committed generation
-is restored. Process state is never used to reconstruct missing metadata.
+- `configuration_generation` and `desired_state_path`: latest accepted
+  desired state, not last runtime-successful state.
+- `last_applied`: accepted desired-state time.
+- `last_reconcile_error`, its timestamp, and its generation: the last
+  project-level background reconciliation error. A fully converged project
+  clears these fields.
 
-The reconciler must distinguish desired state from observed state. A service
-that is intentionally stopped must not be restarted by a health or crash
-handler. A health-triggered restart must use the same backoff and crash-loop
-budget as an exit-triggered restart.
+Detailed resource status is kept in daemon memory; only the project-level
+last error is persisted.
 
-The last successfully applied configuration generation is the source of truth
-for daemon startup. On restart, the daemon must restore that generation and
-reconcile it with observed state. It must not re-read or apply the project YAML
-as part of startup; changes to the YAML take effect only through an explicit
-plan or apply operation.
+### Reconciliation
 
-Health state must be separate from lifecycle state and expose readiness,
-liveness/action, probe result, failing streak, and last transition.
+Each project has at most one worker. A new accepted generation wakes it and
+resets retry backoff. The worker always reloads the latest desired state before
+starting another pass. The old pass checks its generation at every resource
+boundary; once stale, it stops and rebuilds from the newest generation.
 
-## Implementation Tasks
+Resources are processed deterministically in service, task, workflow, and
+schedule order. Independent resource failures are recorded while processing
+continues. Runtime failures update `ProjectStatus`, persist the project-level
+last error on a best-effort basis, and retry in the background using
+`1s`, `2s`, `4s`, then a maximum of `60s`. A new generation resets the delay.
 
-- Add one compiled desired-state and observed-state model for services, tasks,
-  workflows, and schedules.
-- Produce deterministic plan v2 resources for added, changed, removed,
-  restarted, and unchanged resources, including dependency-induced restarts.
-- Assign a configuration generation to every successful apply.
-- Restore the last successful desired-state generation on daemon startup and
-  avoid treating the current project YAML as applied state without an explicit
-  plan or apply operation.
-- Persist apply operations, per-resource checkpoints, and operation-specific
-  events; expose them through `project operations`.
-- Add rollback to the last successful generation.
-- Add startup timeout and explicit graceful stop policy.
-- Add native HTTP, HTTPS, TCP, and file probes.
-- Add `on_unhealthy` action handling with cooldown and crash-loop protection.
-- Propagate dependency health and restart transitions deterministically.
-- Keep reconciliation events separate from execution events and preserve event
-  order across restarts.
-- Apply scheduler definitions atomically: validate all new entries before
-  replacing the old set.
+Lifecycle convergence remains less strict than readiness so that a service
+can start before its healthcheck passes and a dependent can wait for its
+dependency. `project.status` and `--wait` use the readiness predicate.
 
-## Data Migration
+Existing service restart, health action, crash-loop, and dependency behavior
+is retained. Their failures no longer cross the `apply` success boundary.
 
-- Add versioned configuration-generation and apply-operation metadata with
-  pending/ready/committed/failed/aborted states.
-- Keep registry format compatible with existing projects.
-- Preserve old runtime files until the new generation is confirmed applied.
-- Do not remove a previous generation until a later cleanup operation succeeds.
-- Legacy operation v1 metadata is disposable and is ignored without migration;
-  the next operation write replaces it with v2. Successful generation v1
-  snapshots remain read-compatible. Unsupported newer or incomplete
-  generation/rollback metadata fails with an actionable error instead of being
-  reconstructed from observed process state.
+### Plan
 
-## Test Plan
+`project plan` compares the accepted desired snapshot, the current YAML's
+compiled result, and observed runtime state. Plan v2 remains deterministic and
+contains service, task, workflow, and schedule resources. It has no operation
+checkpoint or completed-resource input, and it does not mutate runtime or
+metadata.
 
-- Verify plan v2 resources for add, change, remove, unchanged, task, workflow,
-  schedule, and dependency-induced restart cases.
-- Verify plan does not stop or start processes.
-- Verify plan resources exactly match the apply operation resources.
-- Verify daemon restart restores the last successfully applied generation even
-  when the project YAML has changed without a subsequent apply.
-- Verify partial apply checkpoints, ordered events, and normal-apply retry
-  behavior without repeating verified resources.
-- Verify pending/ready/committed/failed/aborted snapshot, registry, and
-  operation crash-recovery combinations.
-- Verify failed scheduler replacement keeps the old entries.
-- Verify rollback restores the previous desired generation.
-- Verify health actions, startup grace, recovery thresholds, and cooldown.
-- Verify unhealthy restarts consume the crash-loop budget.
-- Verify dependency start, stop, restart, and health propagation.
-- Verify native probes and command probes on all supported platforms.
+## Rollback
 
-## Acceptance Criteria
+Rollback reads an accepted historical snapshot and uses its desired/config
+payload as the source for a new generation. The new generation is always
+allocated, even when the source snapshot is already the current one. The
+registry points to it immediately and reconciliation runs asynchronously.
 
-- Operators can preview every process-affecting apply change.
-- Failed apply operations remain queryable and recoverable.
-- Existing v3 configurations behave as before by default.
-- Daemon restart restores the last successful applied generation and does not
-  silently apply uncommitted project YAML changes.
-- Unhealthy services can report, restart, or stop according to configuration.
-- Health-triggered restart cannot create an uncontrolled restart loop.
-- Dependency behavior is deterministic after daemon restart and apply.
-- The command tree exposes `project plan` as the only preview operation.
-- Unsupported metadata fails closed with an actionable diagnostic.
+With no generation argument, rollback selects the newest accepted generation
+strictly older than the current generation. A specified generation must be a
+readable accepted snapshot. All snapshots are retained as rollback history.
+Runtime failure never automatically moves the registry back to an older
+generation.
 
-## Rollout Strategy
+## Startup and migration
 
-- Ship plan before enabling automatic health actions.
-- Keep `on_unhealthy: report` as the default.
-- Enable rollback metadata for every apply before exposing the rollback command.
-- Roll out native probes independently from lifecycle actions.
+On daemon restart, Mango restores the snapshot named by the registry's latest
+accepted generation and starts reconciliation. It does not read changed YAML
+as applied state. A generation-zero project may use one legacy YAML bootstrap;
+runtime failure during that bootstrap still leaves the newly accepted pointer
+in place.
 
-## Out of Scope
+Committed v1/v2 snapshots remain readable. Old `pending`, `ready`, `failed`,
+and `aborted` snapshots are not accepted desired state. The old
+`apply-operations.json` file is neither read nor written and is not removed
+automatically. Operation transaction, checkpoint, event, and pending-recovery
+code is not part of this apply flow.
+
+## Implementation and test plan
+
+- Validate/compile failure leaves the registry unchanged and does not start a
+  reconciler.
+- Snapshot or registry write failure leaves the registry pointer unchanged;
+  an orphan snapshot may remain.
+- Missing executables, shim failures, process failures, unhealthy services,
+  task/workflow runtime failures, and schedule failures return accepted and
+  appear in status while retry continues.
+- Healthchecked services remain pending until healthy; services without a
+  healthcheck use lifecycle readiness.
+- Restart restores an accepted-but-not-ready generation.
+- Concurrent applies preserve only the newest registry pointer and newest
+  reconciliation intent.
+- Ctrl-C, daemon shutdown, and generation supersession do not roll back an
+  accepted state.
+- Rollback creates a new generation and never automatically restores the
+  source generation after runtime failure.
+- Legacy committed snapshots remain readable and old operation history has no
+  effect on apply or plan.
+- Add status, readiness, latest-wins, retry-backoff, and rollback tests; remove
+  apply-operation transaction tests.
+- Run `go test ./...`, `go test -race ./...`, and `go vet ./...`.
+
+## Acceptance criteria
+
+- `apply` fails only before desired state is accepted.
+- An accepted generation is immediately visible in the registry and status.
+- Runtime convergence is asynchronous, retryable, and observable.
+- `ready` is distinct from `accepted`; `degraded/reconciling` explain
+  incomplete convergence.
+- Startup and rollback use accepted snapshots rather than mutable YAML or
+  runtime-derived state.
+- Existing v3 projects and registry JSON remain readable.
+
+## Out of scope
 
 - Rolling deployments.
 - Zero-downtime cluster failover.
