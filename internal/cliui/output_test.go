@@ -6,19 +6,6 @@ import (
 	"testing"
 )
 
-func TestParseOptionsAnywhere(t *testing.T) {
-	options, remaining, err := ParseOptions([]string{"ls", "--color=never", "--json"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if options.Color != ColorNever || !options.JSON {
-		t.Fatalf("options = %+v", options)
-	}
-	if strings.Join(remaining, " ") != "ls" {
-		t.Fatalf("remaining = %v", remaining)
-	}
-}
-
 func TestRendererColorModes(t *testing.T) {
 	var output bytes.Buffer
 	renderer := New(&output, &output, Options{Color: ColorAlways, Width: 80})

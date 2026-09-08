@@ -238,6 +238,11 @@ the optional `timezone` value must be an IANA time zone.
 
 ## Command overview
 
+The Cobra command tree is the authoritative source for command syntax and
+flags. Use `mango --help` or `mango COMMAND --help` for the current interface;
+the examples below focus on common workflows rather than duplicating every
+generated help entry.
+
 The general form is:
 
 ```text

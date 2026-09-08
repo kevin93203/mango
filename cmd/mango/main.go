@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -29,6 +28,7 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
 	"github.com/kevin93203/mango/internal/tui"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 )
 
@@ -40,14 +40,6 @@ var (
 )
 
 func main() {
-	options, args, err := cliui.ParseOptions(os.Args[1:])
-	if err != nil {
-		cliOutput.Errorln("error: " + err.Error())
-		os.Exit(1)
-	}
-	cliOutput = cliui.New(os.Stdout, os.Stderr, options)
-	jsonOutput = options.JSON
-
 	layout, err := paths.Default()
 	if err != nil {
 		fatal(err)
@@ -56,91 +48,11 @@ func main() {
 		fatal(err)
 	}
 	ipc.SetEndpoint(layout.SocketPath)
-	if len(args) == 0 {
-		usage()
-		return
+	app := newCLIApp(layout, os.Stdout, os.Stderr)
+	if err := app.rootCommand().Execute(); err != nil {
+		app.output.Errorf("error: %v", err)
+		os.Exit(1)
 	}
-	var commandErr error
-	switch args[0] {
-	case "init":
-		commandErr = initCommand(args[1:])
-	case "daemon":
-		commandErr = daemonCommand(layout, args[1:])
-	case "project":
-		commandErr = projectCommand(layout, args[1:])
-	case "config":
-		commandErr = configCommand(args[1:])
-	case "ls":
-		commandErr = lsCommand()
-	case "status":
-		commandErr = statusCommand(args[1:])
-	case "start", "stop", "restart", "enable", "disable":
-		commandErr = processCommand(args[0], args[1:])
-	case "logs":
-		commandErr = logsCommand(args[1:])
-	case "monitor":
-		if err := rejectJSON("monitor"); err != nil {
-			commandErr = err
-		} else {
-			commandErr = tui.Run(cliOutput, monitorLogs)
-		}
-	case "schedule":
-		commandErr = scheduleCommand(args[1:])
-	case "workflow":
-		commandErr = workflowCommand(args[1:])
-	case "task":
-		commandErr = taskCommand(args[1:])
-	case "history":
-		commandErr = historyCommand(args[1:])
-	case "execution":
-		commandErr = executionCommand(args[1:])
-	case "startup":
-		commandErr = startupCommand(layout, args[1:])
-	case "doctor":
-		commandErr = doctorCommand(layout)
-	case "help", "-h", "--help":
-		usage()
-	default:
-		commandErr = fmt.Errorf("unknown command %q", args[0])
-	}
-	if commandErr != nil {
-		fatal(commandErr)
-	}
-}
-
-func usage() {
-	cliOutput.Println(strings.Join([]string{
-		"mango - cross-platform service manager",
-		"Global options: --color=auto|always|never, --json (where supported)",
-		"",
-		"Commands:",
-		"  init [PATH] [--force]",
-		"  daemon start|stop|restart|status|logs",
-		"  daemon logs [--tail N] [--follow]",
-		"  project add NAME PATH",
-		"  project remove NAME",
-		"  project rename OLD NEW",
-		"  project apply NAME",
-		"  project ls",
-		"  config validate PATH",
-		"  ls",
-		"  status PROJECT/SERVICE|ID",
-		"  start|stop|restart|enable|disable PROJECT|PROJECT/SERVICE|ID [TARGET ...]",
-		"  logs TARGET [TARGET ...] [--stream stdout|stderr|all] [--tail N] [--follow]",
-		"  logs clear TARGET",
-		"  monitor",
-		"  schedule ls|enable|disable|history",
-		"  workflow ls|run PROJECT/WORKFLOW",
-		"  task ls|run PROJECT/TASK",
-		"  history clear",
-		"  history [--tail N] [--trigger-type TYPE] [--trigger NAME] [--target-type TYPE] [--target PROJECT/NAME] [--attempts]",
-		"  execution ls [--status STATUS] [--trigger-type TYPE] [--trigger NAME] [--project PROJECT] [--target-type task|workflow] [--target PROJECT/NAME] [--limit N]",
-		"  execution get|cancel|retry RUN_ID",
-		"  execution watch RUN_ID [--timeout 45s]",
-		"  execution logs RUN_ID [--stream stdout|stderr|all] [--tail N]",
-		"  startup install|uninstall|status",
-		"  doctor",
-	}, "\n"))
 }
 
 func initCommand(args []string) error {
@@ -150,7 +62,7 @@ func initCommand(args []string) error {
 
 	flags := newFlagSet("init")
 	force := flags.Bool("force", false, "overwrite an existing configuration file")
-	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(flags.Args()) > 1 {
@@ -873,41 +785,11 @@ func containsArgument(args []string, target string) bool {
 	return false
 }
 
-func newFlagSet(name string) *flag.FlagSet {
-	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+func newFlagSet(name string) *pflag.FlagSet {
+	flags := pflag.NewFlagSet(name, pflag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.SetInterspersed(true)
 	return flags
-}
-
-// normalizeInterspersedFlagArgs lets history commands accept flags on either
-// side of their optional positional target. The standard flag package stops
-// parsing flags after the first positional argument.
-func normalizeInterspersedFlagArgs(args []string) []string {
-	flags := make([]string, 0, len(args))
-	positionals := make([]string, 0, 1)
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			flags = append(flags, arg)
-			if isValueFlag(arg) && !strings.Contains(arg, "=") && index+1 < len(args) {
-				index++
-				flags = append(flags, args[index])
-			}
-			continue
-		}
-		positionals = append(positionals, arg)
-	}
-	return append(flags, positionals...)
-}
-
-func isValueFlag(arg string) bool {
-	name := strings.SplitN(arg, "=", 2)[0]
-	switch name {
-	case "--tail", "-tail", "--stream", "--timeout", "--trigger-type", "--trigger", "--target-type", "--target", "--status", "--project", "--limit":
-		return true
-	default:
-		return false
-	}
 }
 
 func rejectJSON(command string) error {
@@ -1607,7 +1489,7 @@ func executionListCommandWithCaller(args []string, caller func(string, interface
 	targetType := flags.String("target-type", "", "filter by target type: task or workflow")
 	target := flags.String("target", "", "filter by PROJECT/NAME or target name")
 	limit := flags.Int("limit", 0, "maximum number of executions; 0 means all")
-	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(flags.Args()) != 0 {
@@ -1680,7 +1562,7 @@ const (
 func executionWatchCommand(args []string) error {
 	flags := newFlagSet("execution watch")
 	timeout := flags.Duration("timeout", executionWatchDefaultTimeout, "maximum watch wait, for example 45s or 2m")
-	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(flags.Args()) != 1 {
@@ -1714,7 +1596,7 @@ func executionLogsCommand(args []string) error {
 	flags := newFlagSet("execution logs")
 	stream := flags.String("stream", "all", "stdout, stderr, or all")
 	tail := flags.Int("tail", 0, "number of lines")
-	if err := flags.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(flags.Args()) != 1 {
@@ -1793,7 +1675,7 @@ func historyCommandWithCaller(args []string, caller func(string, interface{}) (i
 	targetType := fs.String("target-type", "", "filter by target type: task or workflow")
 	target := fs.String("target", "", "filter by PROJECT/TASK or PROJECT/WORKFLOW")
 	attempts := fs.Bool("attempts", false, "show attempt details")
-	if err := fs.Parse(normalizeInterspersedFlagArgs(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 {

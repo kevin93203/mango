@@ -2,7 +2,6 @@ package cliui
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,50 +60,6 @@ type Renderer struct {
 	outColor bool
 	errColor bool
 	lineEnd  string
-}
-
-func ParseOptions(args []string) (Options, []string, error) {
-	options := Options{Color: ColorAuto}
-	remaining := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--json":
-			options.JSON = true
-		case arg == "--color":
-			if i+1 >= len(args) {
-				return Options{}, nil, errors.New("--color requires auto, always, or never")
-			}
-			i++
-			mode, err := parseColorMode(args[i])
-			if err != nil {
-				return Options{}, nil, err
-			}
-			options.Color = mode
-		case strings.HasPrefix(arg, "--color="):
-			mode, err := parseColorMode(strings.TrimPrefix(arg, "--color="))
-			if err != nil {
-				return Options{}, nil, err
-			}
-			options.Color = mode
-		case arg == "--":
-			remaining = append(remaining, args[i+1:]...)
-			return options, remaining, nil
-		default:
-			remaining = append(remaining, arg)
-		}
-	}
-	return options, remaining, nil
-}
-
-func parseColorMode(value string) (ColorMode, error) {
-	mode := ColorMode(strings.ToLower(value))
-	switch mode {
-	case ColorAuto, ColorAlways, ColorNever:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("invalid --color value %q; expected auto, always, or never", value)
-	}
 }
 
 func New(out, errOut io.Writer, options Options) *Renderer {
