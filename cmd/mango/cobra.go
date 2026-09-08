@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -193,7 +194,7 @@ func (a *cliApp) projectCmd() *cobra.Command {
 	cmd := a.namespaceCmd("project", "Manage registered projects")
 	for _, spec := range []struct{ use, short, action string }{
 		{"add NAME PATH", "Register a project", "add"}, {"remove NAME", "Remove a project", "remove"},
-		{"rename OLD NEW", "Rename a project", "rename"}, {"apply NAME", "Apply project configuration", "apply"},
+		{"rename OLD NEW", "Rename a project", "rename"},
 		{"ls", "List registered projects", "ls"},
 	} {
 		spec := spec
@@ -201,7 +202,7 @@ func (a *cliApp) projectCmd() *cobra.Command {
 		switch spec.action {
 		case "add", "rename":
 			validate = cobra.ExactArgs(2)
-		case "remove", "apply":
+		case "remove":
 			validate = cobra.ExactArgs(1)
 		case "ls":
 			validate = cobra.NoArgs
@@ -214,13 +215,29 @@ func (a *cliApp) projectCmd() *cobra.Command {
 			run = func(args []string) error { return projectRemoveCommand(a.layout, args[0]) }
 		case "rename":
 			run = func(args []string) error { return projectRenameCommand(a.layout, args[0], args[1]) }
-		case "apply":
-			run = func(args []string) error { return applyProjectCommand(args[0]) }
 		case "ls":
 			run = func([]string) error { return projectListCommand() }
 		}
 		cmd.AddCommand(a.leafCmd(spec.use, spec.short, validate, run))
 	}
+	cmd.AddCommand(a.leafCmd("apply NAME", "Apply project configuration", cobra.ExactArgs(1), func(args []string) error {
+		return applyProjectCommand(args[0])
+	}))
+
+	cmd.AddCommand(a.leafCmd("plan PROJECT", "Preview the desired-state apply plan", cobra.ExactArgs(1), func(args []string) error {
+		return projectPlanCommand(args[0])
+	}))
+	cmd.AddCommand(a.leafCmd("rollback PROJECT [GENERATION]", "Restore a previous configuration generation", cobra.MinimumNArgs(1), func(args []string) error {
+		generation := uint64(0)
+		if len(args) == 2 {
+			value, err := strconv.ParseUint(args[1], 10, 64)
+			if err != nil || value == 0 {
+				return fmt.Errorf("generation must be a positive integer")
+			}
+			generation = value
+		}
+		return projectRollbackCommand(args[0], generation)
+	}))
 	return cmd
 }
 

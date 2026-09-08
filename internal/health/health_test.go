@@ -3,6 +3,11 @@ package health
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -76,6 +81,21 @@ func TestRunMarksUnhealthyAfterConsecutiveRetries(t *testing.T) {
 	cancel()
 }
 
+func TestRunExposesUnhealthyPolicyAndReadiness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots := make(chan Snapshot, 16)
+	executor := &sequenceExecutor{results: []error{errors.New("not ready")}}
+	go Run(ctx, Config{
+		Test: []string{"CMD", "false"}, OnUnhealthy: "restart", Interval: time.Millisecond,
+		StartInterval: time.Millisecond, Retries: 1,
+	}, executor, func(snapshot Snapshot) { snapshots <- snapshot })
+	unhealthy := waitForSnapshot(t, snapshots, func(snapshot Snapshot) bool { return snapshot.Status == Unhealthy })
+	if unhealthy.OnUnhealthy != "restart" || unhealthy.Action != "restart" || unhealthy.Readiness != "not_ready" || unhealthy.Liveness != "unhealthy" {
+		t.Fatalf("unhealthy policy/readiness = %+v", unhealthy)
+	}
+}
+
 func TestRunIgnoresFailuresDuringStartPeriod(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,5 +144,36 @@ func TestCommandExecutorSupportsCMDAndShellWithEnvironment(t *testing.T) {
 	}
 	if err := executor.Run(context.Background(), []string{"CMD-SHELL", script}); err != nil {
 		t.Fatalf("CMD-SHELL = %v", err)
+	}
+}
+
+func TestNativeExecutorSupportsHTTPFileAndTCP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	if err := (NativeExecutor{}).Run(context.Background(), []string{"HTTP", server.URL}); err != nil {
+		t.Fatalf("HTTP probe = %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = connection.Close()
+		}
+	}()
+	if err := (NativeExecutor{}).Run(context.Background(), []string{"TCP", listener.Addr().String()}); err != nil {
+		t.Fatalf("TCP probe = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "ready")
+	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (NativeExecutor{}).Run(context.Background(), []string{"FILE", path}); err != nil {
+		t.Fatalf("FILE probe = %v", err)
 	}
 }

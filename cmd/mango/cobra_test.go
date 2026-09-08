@@ -130,11 +130,38 @@ func TestCobraNamespaceWithoutSubcommandPrintsHelp(t *testing.T) {
 	}
 }
 
+func TestCobraProjectExposesPlanAsOnlyPreviewCommand(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+
+	plan, _, err := root.Find([]string{"project", "plan"})
+	if err != nil || plan == root || plan.Name() != "plan" {
+		t.Fatalf("project plan command missing: command=%v err=%v", plan, err)
+	}
+	project, _, err := root.Find([]string{"project"})
+	if err != nil || project == root {
+		t.Fatalf("project command missing: command=%v err=%v", project, err)
+	}
+	for _, command := range project.Commands() {
+		if command.Name() == "diff" {
+			t.Fatal("removed project diff command still exposed")
+		}
+	}
+	apply, _, err := root.Find([]string{"project", "apply"})
+	if err != nil || apply == root {
+		t.Fatalf("project apply command missing: command=%v err=%v", apply, err)
+	}
+	if apply.Flag("dry-run") != nil {
+		t.Fatal("removed project apply --dry-run flag still exposed")
+	}
+}
+
 func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 	cases := [][]string{
 		{"status"}, {"start"}, {"stop"}, {"restart"}, {"enable"}, {"disable"}, {"logs"},
 		{"logs", "clear"}, {"config", "validate"}, {"project", "add"}, {"project", "remove"},
 		{"project", "rename"}, {"project", "apply"}, {"task", "run"}, {"workflow", "run"},
+		{"project", "rollback"},
 		{"schedule", "enable"}, {"schedule", "disable"}, {"execution", "get"}, {"execution", "watch"},
 		{"execution", "cancel"}, {"execution", "retry"}, {"execution", "logs"},
 	}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadNestedHealthcheckAndDependsOn(t *testing.T) {
@@ -61,6 +62,38 @@ services:
 	}
 	if services[1].Environment["APP_ENV"] != "test" {
 		t.Fatalf("web environment = %+v", services[1].Environment)
+	}
+}
+
+func TestHealthcheckActionsAndNativeProbes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mango.yaml")
+	content := `version: 3
+services:
+  api:
+    command: api
+    startup_timeout: 2s
+    healthcheck:
+      on_unhealthy: restart
+      cooldown: 250ms
+      test: [HTTP, http://127.0.0.1:8080/health]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := file.ServicesEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 1 || services[0].StartupTimeout != 2*time.Second {
+		t.Fatalf("startup timeout = %+v", services)
+	}
+	if services[0].HealthCheck == nil || services[0].HealthCheck.OnUnhealthy != "restart" || services[0].HealthCheck.Cooldown != 250*time.Millisecond {
+		t.Fatalf("health action = %+v", services[0].HealthCheck)
 	}
 }
 

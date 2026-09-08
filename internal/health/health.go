@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -26,6 +31,8 @@ type Config struct {
 	Test          []string
 	Checks        []Check
 	Policy        string
+	OnUnhealthy   string
+	Cooldown      time.Duration
 	Interval      time.Duration
 	Timeout       time.Duration
 	Retries       int
@@ -43,9 +50,14 @@ type CheckResult struct {
 }
 
 type Snapshot struct {
-	Status string
-	Policy string
-	Checks []CheckResult
+	Status           string
+	Policy           string
+	OnUnhealthy      string
+	Readiness        string
+	Liveness         string
+	Action           string
+	LastTransitionAt time.Time
+	Checks           []CheckResult
 }
 
 type Executor interface {
@@ -55,6 +67,113 @@ type Executor interface {
 type CommandExecutor struct {
 	Dir string
 	Env []string
+}
+
+// NativeExecutor handles probes that do not require a shell or external
+// command. Command probes remain supported by CommandExecutor.
+type NativeExecutor struct {
+	Dir string
+}
+
+func (e NativeExecutor) Run(ctx context.Context, test []string) error {
+	if len(test) < 2 {
+		return errors.New("native healthcheck target is required")
+	}
+	scheme := strings.ToUpper(test[0])
+	target := nativeTarget(test)
+	switch scheme {
+	case "HTTP", "HTTPS":
+		if scheme == "HTTP" && !strings.HasPrefix(strings.ToLower(target), "http://") {
+			return errors.New("HTTP healthcheck target must use http://")
+		}
+		if scheme == "HTTPS" && !strings.HasPrefix(strings.ToLower(target), "https://") {
+			return errors.New("HTTPS healthcheck target must use https://")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return err
+		}
+		client := &http.Client{Timeout: 0}
+		response, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, response.Body)
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return fmt.Errorf("HTTP healthcheck returned status %d", response.StatusCode)
+		}
+		return nil
+	case "TCP":
+		connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", target)
+		if err != nil {
+			return err
+		}
+		return connection.Close()
+	case "FILE":
+		path := target
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(e.Dir, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return fmt.Errorf("healthcheck file target %q is a directory", path)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown native healthcheck type %q", test[0])
+	}
+}
+
+func nativeTarget(test []string) string {
+	if len(test) < 2 {
+		return ""
+	}
+	scheme := strings.ToUpper(test[0])
+	if scheme == "FILE" {
+		return strings.TrimSpace(test[1])
+	}
+	if (scheme == "HTTP" || scheme == "HTTPS") && strings.Contains(test[1], "://") {
+		return strings.TrimSpace(test[1])
+	}
+	if scheme == "HTTP" || scheme == "HTTPS" {
+		base := strings.TrimSpace(test[1])
+		if len(test) >= 3 {
+			base = net.JoinHostPort(base, strings.TrimSpace(test[2]))
+		}
+		path := ""
+		if len(test) >= 4 {
+			path = strings.TrimSpace(strings.Join(test[3:], ""))
+		}
+		if path == "" || path[0] != '/' {
+			path = "/" + path
+		}
+		return strings.ToLower(scheme) + "://" + base + path
+	}
+	if scheme == "TCP" && len(test) >= 3 && !strings.Contains(test[1], ":") {
+		return net.JoinHostPort(strings.TrimSpace(test[1]), strings.TrimSpace(test[2]))
+	}
+	return strings.TrimSpace(test[1])
+}
+
+// DefaultExecutor dispatches native probes and command probes while keeping
+// the existing Executor interface intact.
+type DefaultExecutor struct {
+	Dir string
+	Env []string
+}
+
+func (e DefaultExecutor) Run(ctx context.Context, test []string) error {
+	if len(test) > 0 {
+		switch strings.ToUpper(test[0]) {
+		case "HTTP", "HTTPS", "TCP", "FILE":
+			return NativeExecutor{Dir: e.Dir}.Run(ctx, test)
+		}
+	}
+	return CommandExecutor{Dir: e.Dir, Env: e.Env}.Run(ctx, test)
 }
 
 func (e CommandExecutor) Run(ctx context.Context, test []string) error {
@@ -106,6 +225,9 @@ func Run(ctx context.Context, cfg Config, executor Executor, report func(Snapsho
 	if cfg.Policy == "" {
 		cfg.Policy = "all"
 	}
+	if cfg.OnUnhealthy == "" {
+		cfg.OnUnhealthy = "report"
+	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 10 * time.Second
 	}
@@ -134,11 +256,31 @@ func Run(ctx context.Context, cfg Config, executor Executor, report func(Snapsho
 		results[i].Status = Starting
 	}
 	var mu sync.Mutex
+	lastStatus := ""
+	lastTransitionAt := time.Now()
 	reportSnapshot := func() {
 		mu.Lock()
 		copyResults := append([]CheckResult(nil), results...)
+		status := aggregate(cfg.Policy, copyResults)
+		if status != lastStatus {
+			lastStatus = status
+			lastTransitionAt = time.Now()
+		}
+		readiness := "not_ready"
+		liveness := "alive"
+		action := ""
+		if status == Healthy {
+			readiness = "ready"
+		}
+		if status == Unhealthy {
+			liveness = "unhealthy"
+			action = cfg.OnUnhealthy
+		}
+		transition := lastTransitionAt
 		mu.Unlock()
-		report(Snapshot{Status: aggregate(cfg.Policy, copyResults), Policy: cfg.Policy, Checks: copyResults})
+		report(Snapshot{Status: status, Policy: cfg.Policy, OnUnhealthy: cfg.OnUnhealthy,
+			Readiness: readiness, Liveness: liveness, Action: action,
+			LastTransitionAt: transition, Checks: copyResults})
 	}
 	reportSnapshot()
 	started := time.Now()

@@ -24,8 +24,6 @@ Add CLI commands:
 
 ```text
 mango project plan PROJECT
-mango project diff PROJECT
-mango project apply PROJECT --dry-run
 mango project rollback PROJECT [GENERATION]
 ```
 
@@ -99,7 +97,7 @@ liveness/action, probe result, failing streak, and last transition.
 ## Test Plan
 
 - Verify deterministic plan output for add, change, remove, and no-op cases.
-- Verify dry-run does not stop or start processes.
+- Verify plan does not stop or start processes.
 - Verify daemon restart restores the last successfully applied generation even
   when the project YAML has changed without a subsequent apply.
 - Verify partial apply results and retry behavior.
@@ -122,7 +120,7 @@ liveness/action, probe result, failing streak, and last transition.
 
 ## Rollout Strategy
 
-- Ship plan and dry-run before enabling automatic health actions.
+- Ship plan before enabling automatic health actions.
 - Keep `on_unhealthy: report` as the default.
 - Enable rollback metadata for every apply before exposing the rollback command.
 - Roll out native probes independently from lifecycle actions.

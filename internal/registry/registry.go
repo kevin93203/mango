@@ -10,12 +10,14 @@ import (
 )
 
 type Project struct {
-	Name          string         `json:"name"`
-	ConfigPath    string         `json:"config_path"`
-	Enabled       bool           `json:"enabled"`
-	ConfigVersion int            `json:"config_version"`
-	LastApplied   *time.Time     `json:"last_applied,omitempty"`
-	ProcessIDs    map[string]int `json:"process_ids,omitempty"`
+	Name                    string         `json:"name"`
+	ConfigPath              string         `json:"config_path"`
+	Enabled                 bool           `json:"enabled"`
+	ConfigVersion           int            `json:"config_version"`
+	LastApplied             *time.Time     `json:"last_applied,omitempty"`
+	ConfigurationGeneration uint64         `json:"configuration_generation,omitempty"`
+	DesiredStatePath        string         `json:"desired_state_path,omitempty"`
+	ProcessIDs              map[string]int `json:"process_ids,omitempty"`
 	// ShimInstances is advisory metadata. Runtime state and process identity
 	// remain authoritative in each shim instance directory.
 	ShimInstances map[string]ServiceInstance `json:"shim_instances,omitempty"`

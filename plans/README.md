@@ -16,7 +16,7 @@ Kubernetes orchestration, or multi-host high availability.
 | --- | --- | --- |
 | [00 Foundation and Platform](00-foundation-and-platform.md) | Completed | None |
 | [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Completed | 00 |
-| [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Not started | 01 |
+| [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Completed | 01 |
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Not started | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
@@ -39,6 +39,16 @@ Kubernetes orchestration, or multi-host high availability.
   history compatibility, post-exit logs, migration reopen/backup/failure, and
   daemon restart recovery are covered by tests. Existing YAML v3 projects and
   completed history remain readable.
+- **Phase 02 — Completed.** Added persisted desired-state generations with
+  startup restoration, deterministic plan previews, apply and rollback
+  operation metadata, partial-failure reporting, startup timeout and
+  graceful-stop handling, native HTTP/HTTPS/TCP/file probes, configurable
+  unhealthy actions with cooldown and crash-loop protection, and deterministic
+  dependency reconciliation. Existing YAML v3 projects remain compatible;
+  daemon restart now restores the last successful applied generation instead of
+  silently applying uncommitted YAML changes. Regression coverage includes
+  generation recovery, plan, rollback, native probes, health actions, and
+  dependency propagation.
 
 ## Dependency Flow
 

@@ -209,11 +209,12 @@ Common service settings include:
 - `supervisor`: `legacy` or `shim`; the default is `legacy` during rollout.
 - `autostart` when the daemon starts or a project is applied.
 - `restart`: `never`, `on-failure`, or `always`.
-- `stop_timeout`, restart limits, and crash-loop protection.
+- `startup_timeout`, `stop_timeout`, restart limits, and crash-loop protection.
 - `healthcheck` and `depends_on`.
 
 Health is reported separately from the service lifecycle. A failed health check
-does not automatically restart the service.
+does not automatically restart the service unless `healthcheck.on_unhealthy` is
+set to `restart` or `stop`.
 
 ### Tasks
 
@@ -272,15 +273,20 @@ Validate and register the generated configuration separately:
 ```sh
 mango config validate PATH
 mango project add NAME PATH
+mango project plan PROJECT
 mango project apply NAME
+mango project rollback PROJECT [GENERATION]
 mango project ls
 mango project rename OLD NEW
 mango project remove NAME
 ```
 
 `project add` stores the absolute YAML path in the registry. It does not copy
-or modify the configuration file. `project apply` reloads the file and
-reconciles the daemon with the new definition.
+or modify the configuration file. `project plan` explicitly reads the YAML and
+previews the changes. `project apply` explicitly reloads the file and
+reconciles the daemon with the new definition. A daemon restart
+restores the last successfully applied generation; editing the YAML alone does
+not change running or restored services.
 
 ### Services
 
@@ -386,6 +392,7 @@ defaults:
 | `working_dir` | string | `.` | Base working directory for services and tasks. Relative paths are resolved from the YAML file directory. |
 | `supervisor` | string | `legacy` | Service supervisor: `legacy` or `shim`. Shim services survive an unexpected `mangod` exit and can be reattached by a new daemon. |
 | `restart` | string | `on-failure` | Service restart policy: `never`, `on-failure`, or `always`. |
+| `startup_timeout` | duration | `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
 | `stop_timeout` | duration | `10s` | Graceful-stop timeout before Mango force-stops a service. |
 | `log_max_size` | size | `100MiB` | Maximum size of each service stdout/stderr log before rotation. |
 | `log_max_files` | integer | `10` | Number of rotated log files to retain. |
@@ -431,11 +438,12 @@ services:
 | `environment` | string map | inherited environment | Variables to add or override. Set `defaults.inherit_env: false` for a clean environment. |
 | `autostart` | boolean | `false` | Start when the daemon starts or the project is applied. |
 | `restart` | string | `defaults.restart` or `on-failure` | `never`, `on-failure`, or `always`. |
+| `startup_timeout` | duration | `defaults.startup_timeout` or `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
 | `stop_timeout` | duration | `defaults.stop_timeout` | Graceful-stop timeout. |
 | `max_restarts` | integer | `defaults.max_restarts` or `10` | Restart limit used with crash-loop protection. |
 | `restart_window` | duration | `defaults.restart_window` or `5m` | Restart failure counting window. |
 | `stable_after` | duration | `defaults.stable_after` or `1m` | Time required to clear the restart counter. |
-| `healthcheck` | mapping | disabled | Optional command-based health monitoring. |
+| `healthcheck` | mapping | disabled | Optional command or native-probe health monitoring. |
 | `depends_on` | mapping | none | Optional service dependencies. |
 
 Command resolution follows two rules:
@@ -479,8 +487,10 @@ healthcheck:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `test` | sequence of strings | — | One probe. The first item must be `CMD`, `CMD-SHELL`, or `NONE`. |
+| `test` | sequence of strings | — | One probe. The first item must be `CMD`, `CMD-SHELL`, `HTTP`, `HTTPS`, `TCP`, `FILE`, or `NONE`. |
 | `policy` | string | `all` | With multiple checks, `all` requires every check to pass; `any` requires one. |
+| `on_unhealthy` | string | `report` | `report` records the result; `restart` or `stop` performs the configured lifecycle action. |
+| `cooldown` | duration | `30s` | Minimum time between automatic health actions. |
 | `checks` | sequence of mappings | — | Multiple probes. Cannot be combined with `test`. |
 | `interval` | duration | `10s` | Normal interval between probe rounds. |
 | `timeout` | duration | `5s` | Maximum time allowed for one probe. |
@@ -494,13 +504,19 @@ Probe forms:
   arguments: `[CMD, curl, -f, URL]`.
 - `CMD-SHELL` joins the remaining items into a shell command. It uses `/bin/sh`
   on Unix-like systems and `cmd /C` on Windows.
+- `HTTP` and `HTTPS` perform a native GET and require a 2xx response: `[HTTP,
+  http://127.0.0.1:8080/health]`.
+- `TCP` opens a native TCP connection: `[TCP, 127.0.0.1:8080]`.
+- `FILE` succeeds when the target file exists: `[FILE, ready.flag]`.
 - `test: [NONE]` disables the health check. `NONE` is not allowed inside
   `checks`.
 
 Probes run on the host with the service's working directory and environment.
 Health is reported independently from lifecycle state; an unhealthy result
-does not by itself restart the service. A single `test` is shown as the
-`default` check; entries in `checks` are named `check-1`, `check-2`, and so on.
+does not by itself restart the service unless `on_unhealthy` requests it. Any
+automatic restart uses the service's normal backoff and crash-loop budget. A
+single `test` is shown as the `default` check; entries in `checks` are named
+`check-1`, `check-2`, and so on.
 
 ### `depends_on`
 
@@ -763,7 +779,9 @@ mango daemon stop
 mango project add NAME PATH
 mango project remove NAME
 mango project rename OLD NEW
+mango project plan PROJECT [--json]
 mango project apply NAME [--json]
+mango project rollback PROJECT [GENERATION] [--json]
 mango project ls [--json]
 ```
 
@@ -772,7 +790,9 @@ mango project ls [--json]
 | `add` | `NAME`, `PATH` | Validates and registers a `.yaml` file. The stored path is absolute. Duplicate names are rejected. |
 | `remove` | `NAME` | Removes the project from the registry. It does not delete the YAML file, application files, or logs. A running daemon unloads the project's services and execution definitions. |
 | `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
-| `apply` | `NAME` | Reloads and validates the YAML, then reconciles services, tasks, workflows, and schedules. Changed or removed services are stopped; autostart services are started. |
+| `plan` | `PROJECT` | Reads the current YAML and shows deterministic added, changed, removed, restarted, and unchanged service actions without changing runtime state. |
+| `apply` | `NAME` | Reloads and validates the YAML, persists a new generation, then reconciles services, tasks, workflows, and schedules. |
+| `rollback` | `PROJECT`, optional `GENERATION` | Restores the specified or previous successful desired-state generation. Missing generation metadata fails with an actionable error. |
 | `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last applied time. Requires the daemon. |
 
 Examples:
@@ -1295,7 +1315,10 @@ MANGO_HOME/
 ├── logs/
 └── state/
     ├── history.db
-    └── schedules.json       # persisted schedule enable/disable state
+    ├── schedules.json       # persisted schedule enable/disable state
+    ├── apply-operations.json
+    └── generations/
+        └── <project>/<generation>.json  # last and previous desired states
 ```
 
 The optional `daemon.yaml` supports execution-history retention and database

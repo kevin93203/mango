@@ -24,6 +24,7 @@ import (
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
@@ -575,6 +576,68 @@ func applyProjectCommandWithCaller(project string, caller func(string, interface
 		return err
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s applied", result["project"])))
+	return nil
+}
+
+func projectPlanCommand(project string) error {
+	response, err := call("config.plan", struct {
+		Project string `json:"project"`
+	}{Project: project})
+	if err != nil {
+		return err
+	}
+	var plan reconcile.Plan
+	if err := decodeData(response.Data, &plan); err != nil {
+		return err
+	}
+	return printProjectPlan(plan)
+}
+
+func projectRollbackCommand(project string, generation uint64) error {
+	response, err := call("config.rollback", struct {
+		Project    string `json:"project"`
+		Generation uint64 `json:"generation,omitempty"`
+	}{Project: project, Generation: generation})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	var result map[string]interface{}
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s rolled back to generation %v", project, result["generation"])))
+	return nil
+}
+
+func printProjectPlan(plan reconcile.Plan) error {
+	if jsonOutput {
+		return cliOutput.JSON(plan)
+	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, fmt.Sprintf("Project plan: %s", plan.Project)))
+	cliOutput.KeyValues([][]cliui.Cell{
+		{{Text: "current generation"}, {Text: fmt.Sprintf("%d", plan.CurrentGeneration)}},
+		{{Text: "proposed generation"}, {Text: fmt.Sprintf("%d", plan.ProposedGeneration)}},
+	})
+	rows := make([][]cliui.Cell, 0, len(plan.Changes))
+	for _, change := range plan.Changes {
+		style := cliui.StyleNone
+		if change.Action != "unchanged" {
+			style = cliui.StyleWarning
+		}
+		restart := "-"
+		if change.Restart {
+			restart = "yes"
+		}
+		rows = append(rows, []cliui.Cell{{Text: change.Service}, {Text: change.Action, Style: style}, {Text: restart}})
+	}
+	if len(rows) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No services in plan."))
+		return nil
+	}
+	cliOutput.Table([]string{"SERVICE", "ACTION", "RESTART"}, rows)
 	return nil
 }
 
@@ -2389,10 +2452,11 @@ func printProjectTable(projects []registry.Project) {
 			{Text: status, Style: style},
 			{Text: project.ConfigPath},
 			{Text: fmt.Sprintf("%d", project.ConfigVersion), Align: cliui.AlignRight},
+			{Text: fmt.Sprintf("%d", project.ConfigurationGeneration), Align: cliui.AlignRight},
 			{Text: lastApplied, Style: zeroStyle(lastApplied)},
 		})
 	}
-	cliOutput.Table([]string{"PROJECT", "STATUS", "CONFIG PATH", "VERSION", "LAST APPLIED"}, rows)
+	cliOutput.Table([]string{"PROJECT", "STATUS", "CONFIG PATH", "VERSION", "GENERATION", "LAST APPLIED"}, rows)
 }
 
 func printProcessDetail(item api.ServiceInfo) {

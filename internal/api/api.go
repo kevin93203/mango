@@ -93,13 +93,18 @@ type DependencyStatus struct {
 }
 
 type HealthInfo struct {
-	Status        string            `json:"Status"`
-	Policy        string            `json:"Policy,omitempty"`
-	Checks        []HealthCheckInfo `json:"Checks,omitempty"`
-	FailingStreak int               `json:"FailingStreak,omitempty"`
-	LastCheckedAt *time.Time        `json:"LastCheckedAt,omitempty"`
-	LastSuccessAt *time.Time        `json:"LastSuccessAt,omitempty"`
-	LastError     string            `json:"LastError,omitempty"`
+	Status           string            `json:"Status"`
+	Policy           string            `json:"Policy,omitempty"`
+	OnUnhealthy      string            `json:"OnUnhealthy,omitempty"`
+	Readiness        string            `json:"Readiness,omitempty"`
+	Liveness         string            `json:"Liveness,omitempty"`
+	Action           string            `json:"Action,omitempty"`
+	Checks           []HealthCheckInfo `json:"Checks,omitempty"`
+	FailingStreak    int               `json:"FailingStreak,omitempty"`
+	LastCheckedAt    *time.Time        `json:"LastCheckedAt,omitempty"`
+	LastSuccessAt    *time.Time        `json:"LastSuccessAt,omitempty"`
+	LastTransitionAt *time.Time        `json:"LastTransitionAt,omitempty"`
+	LastError        string            `json:"LastError,omitempty"`
 }
 
 type HealthCheckInfo struct {

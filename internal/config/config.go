@@ -31,13 +31,14 @@ type File struct {
 	Tasks     map[string]Task     `yaml:"tasks"`
 	Workflows map[string]Workflow `yaml:"workflows"`
 	Schedules []Schedule          `yaml:"schedules"`
-	Path      string              `yaml:"-"`
+	Path      string              `yaml:"-" json:"-"`
 }
 
 type Defaults struct {
 	WorkingDir      string `yaml:"working_dir"`
 	Supervisor      string `yaml:"supervisor"`
 	Restart         string `yaml:"restart"`
+	StartupTimeout  string `yaml:"startup_timeout"`
 	StopTimeout     string `yaml:"stop_timeout"`
 	LogMaxSize      string `yaml:"log_max_size"`
 	LogMaxFiles     int    `yaml:"log_max_files"`
@@ -49,20 +50,21 @@ type Defaults struct {
 }
 
 type Service struct {
-	Name          string                `yaml:"-"`
-	Command       string                `yaml:"command"`
-	Supervisor    string                `yaml:"supervisor"`
-	Args          []string              `yaml:"args"`
-	WorkingDir    string                `yaml:"working_dir"`
-	Environment   map[string]string     `yaml:"environment"`
-	Autostart     bool                  `yaml:"autostart"`
-	Restart       string                `yaml:"restart"`
-	StopTimeout   string                `yaml:"stop_timeout"`
-	MaxRestarts   *int                  `yaml:"max_restarts"`
-	RestartWindow string                `yaml:"restart_window"`
-	StableAfter   string                `yaml:"stable_after"`
-	HealthCheck   *HealthCheck          `yaml:"healthcheck"`
-	DependsOn     map[string]Dependency `yaml:"depends_on"`
+	Name           string                `yaml:"-"`
+	Command        string                `yaml:"command"`
+	Supervisor     string                `yaml:"supervisor"`
+	Args           []string              `yaml:"args"`
+	WorkingDir     string                `yaml:"working_dir"`
+	Environment    map[string]string     `yaml:"environment"`
+	Autostart      bool                  `yaml:"autostart"`
+	Restart        string                `yaml:"restart"`
+	StartupTimeout string                `yaml:"startup_timeout"`
+	StopTimeout    string                `yaml:"stop_timeout"`
+	MaxRestarts    *int                  `yaml:"max_restarts"`
+	RestartWindow  string                `yaml:"restart_window"`
+	StableAfter    string                `yaml:"stable_after"`
+	HealthCheck    *HealthCheck          `yaml:"healthcheck"`
+	DependsOn      map[string]Dependency `yaml:"depends_on"`
 }
 
 // Process is retained as an internal compatibility alias while the public
@@ -77,6 +79,8 @@ type Dependency struct {
 type HealthCheck struct {
 	Test          []string      `yaml:"test"`
 	Policy        string        `yaml:"policy"`
+	OnUnhealthy   string        `yaml:"on_unhealthy"`
+	Cooldown      string        `yaml:"cooldown"`
 	Checks        []HealthProbe `yaml:"checks"`
 	Interval      string        `yaml:"interval"`
 	Timeout       string        `yaml:"timeout"`
@@ -138,25 +142,26 @@ type WorkflowTask struct {
 }
 
 type EffectiveProcess struct {
-	Project       string
-	Name          string
-	Command       string
-	Supervisor    string
-	Args          []string
-	WorkingDir    string
-	Env           map[string]string // Deprecated alias for Environment.
-	Environment   map[string]string
-	Autostart     bool
-	Restart       string
-	StopTimeout   time.Duration
-	MaxRestarts   int
-	RestartWindow time.Duration
-	StableAfter   time.Duration
-	LogMaxSize    int64
-	LogMaxFiles   int
-	MetricsEvery  time.Duration
-	HealthCheck   *EffectiveHealthCheck
-	DependsOn     map[string]Dependency
+	Project        string
+	Name           string
+	Command        string
+	Supervisor     string
+	Args           []string
+	WorkingDir     string
+	Env            map[string]string // Deprecated alias for Environment.
+	Environment    map[string]string
+	Autostart      bool
+	Restart        string
+	StartupTimeout time.Duration
+	StopTimeout    time.Duration
+	MaxRestarts    int
+	RestartWindow  time.Duration
+	StableAfter    time.Duration
+	LogMaxSize     int64
+	LogMaxFiles    int
+	MetricsEvery   time.Duration
+	HealthCheck    *EffectiveHealthCheck
+	DependsOn      map[string]Dependency
 }
 
 type EffectiveService = EffectiveProcess
@@ -164,6 +169,8 @@ type EffectiveService = EffectiveProcess
 type EffectiveHealthCheck struct {
 	Test          []string
 	Policy        string
+	OnUnhealthy   string
+	Cooldown      time.Duration
 	Checks        []EffectiveHealthProbe
 	Interval      time.Duration
 	Timeout       time.Duration
@@ -290,6 +297,9 @@ func Validate(f File) error {
 		return errors.New("config must define at least one service, task, workflow, or schedule")
 	}
 	d := f.Defaults
+	if _, err := parseDuration(d.StartupTimeout, 30*time.Second); err != nil {
+		return fmt.Errorf("defaults.startup_timeout: %w", err)
+	}
 	if _, err := parseDuration(d.StopTimeout, 10*time.Second); err != nil {
 		return fmt.Errorf("defaults.stop_timeout: %w", err)
 	}
@@ -323,6 +333,9 @@ func Validate(f File) error {
 		}
 		if s.Restart != "" && !validRestart(s.Restart) {
 			return fmt.Errorf("service %q has invalid restart %q", name, s.Restart)
+		}
+		if _, err := parseDuration(s.StartupTimeout, 30*time.Second); err != nil {
+			return fmt.Errorf("service %q startup_timeout: %w", name, err)
 		}
 		if s.Supervisor != "" && !validSupervisor(s.Supervisor) {
 			return fmt.Errorf("service %q has invalid supervisor %q", name, s.Supervisor)
@@ -496,6 +509,7 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 	}
 	base := filepath.Dir(f.Path)
 	d := f.Defaults
+	startupTimeout, _ := parseDuration(d.StartupTimeout, 30*time.Second)
 	stopTimeout, _ := parseDuration(d.StopTimeout, 10*time.Second)
 	logSize, _ := parseBytes(d.LogMaxSize, 100<<20)
 	metricsEvery, _ := parseDuration(d.MetricsInterval, time.Second)
@@ -565,6 +579,10 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 			serviceSupervisor = p.Supervisor
 		}
 		st := stopTimeout
+		serviceStartupTimeout := startupTimeout
+		if p.StartupTimeout != "" {
+			serviceStartupTimeout, _ = parseDuration(p.StartupTimeout, serviceStartupTimeout)
+		}
 		if p.StopTimeout != "" {
 			st, _ = parseDuration(p.StopTimeout, st)
 		}
@@ -594,7 +612,7 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		result = append(result, EffectiveService{
 			Project: projectName, Name: name, Command: command, Supervisor: serviceSupervisor, Args: append([]string(nil), p.Args...),
 			WorkingDir: dir, Env: env, Environment: env, Autostart: p.Autostart, Restart: restartPolicy,
-			StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
+			StartupTimeout: serviceStartupTimeout, StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
 			HealthCheck: effectiveHealth, DependsOn: dependsOn,
 		})
@@ -755,6 +773,12 @@ func validateHealthCheck(service string, health *HealthCheck) error {
 	if health.Policy != "all" && health.Policy != "any" {
 		return fmt.Errorf("service %q healthcheck policy must be all or any", service)
 	}
+	if health.OnUnhealthy != "" && health.OnUnhealthy != "report" && health.OnUnhealthy != "restart" && health.OnUnhealthy != "stop" {
+		return fmt.Errorf("service %q healthcheck on_unhealthy must be report, restart, or stop", service)
+	}
+	if _, err := parseNonNegativeDuration(health.Cooldown, 30*time.Second); err != nil {
+		return fmt.Errorf("service %q healthcheck cooldown: %w", service, err)
+	}
 	if err := validateTest(service, "test", health.Test); err != nil {
 		return err
 	}
@@ -796,15 +820,15 @@ func validateTest(service, field string, test []string) error {
 		return nil
 	}
 	if len(test) < 2 {
-		return fmt.Errorf("service %q healthcheck %s must contain NONE, CMD, or CMD-SHELL and a command", service, field)
+		return fmt.Errorf("service %q healthcheck %s must contain NONE, CMD, CMD-SHELL, HTTP, HTTPS, TCP, or FILE and a target", service, field)
 	}
 	switch strings.ToUpper(test[0]) {
-	case "CMD", "CMD-SHELL":
+	case "CMD", "CMD-SHELL", "HTTP", "HTTPS", "TCP", "FILE":
 	default:
 		return fmt.Errorf("service %q healthcheck %s has invalid type %q", service, field, test[0])
 	}
 	if strings.TrimSpace(strings.Join(test[1:], " ")) == "" {
-		return fmt.Errorf("service %q healthcheck %s command is required", service, field)
+		return fmt.Errorf("service %q healthcheck %s target is required", service, field)
 	}
 	return nil
 }
@@ -840,8 +864,16 @@ func effectiveHealthCheck(health *HealthCheck) (*EffectiveHealthCheck, error) {
 	if policy == "" {
 		policy = "all"
 	}
+	onUnhealthy := health.OnUnhealthy
+	if onUnhealthy == "" {
+		onUnhealthy = "report"
+	}
+	cooldown, err := parseNonNegativeDuration(health.Cooldown, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
 	result := &EffectiveHealthCheck{
-		Test: append([]string(nil), health.Test...), Policy: policy,
+		Test: append([]string(nil), health.Test...), Policy: policy, OnUnhealthy: onUnhealthy, Cooldown: cooldown,
 		Checks: make([]EffectiveHealthProbe, 0, len(health.Checks)), Interval: interval, Timeout: timeout,
 		Retries: retries, StartPeriod: startPeriod, StartInterval: startInterval,
 	}
