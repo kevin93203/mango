@@ -39,16 +39,14 @@ Kubernetes orchestration, or multi-host high availability.
   history compatibility, post-exit logs, migration reopen/backup/failure, and
   daemon restart recovery are covered by tests. Existing YAML v3 projects and
   completed history remain readable.
-- **Phase 02 — Completed.** Added persisted desired-state generations with
-  startup restoration, deterministic plan previews, apply and rollback
-  operation metadata, partial-failure reporting, startup timeout and
-  graceful-stop handling, native HTTP/HTTPS/TCP/file probes, configurable
-  unhealthy actions with cooldown and crash-loop protection, and deterministic
-  dependency reconciliation. Existing YAML v3 projects remain compatible;
-  daemon restart now restores the last successful applied generation instead of
-  silently applying uncommitted YAML changes. Regression coverage includes
-  generation recovery, plan, rollback, native probes, health actions, and
-  dependency propagation.
+- **Phase 02 — Completed.** Added one desired/observed state model for plan and
+  apply, plan v2 resources across services/tasks/workflows/schedules,
+  per-resource checkpoints and operation-specific events, normal-apply partial
+  recovery, two-phase generation commit/startup recovery, atomic scheduler
+  replacement, and the read-only `project operations` query. Existing YAML v3
+  projects and the project registry remain readable; disposable operation v1
+  metadata is ignored, while unsupported newer or incomplete metadata fails
+  closed. Acceptance, recovery, race, and vet checks pass.
 
 ## Dependency Flow
 

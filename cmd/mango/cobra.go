@@ -227,6 +227,9 @@ func (a *cliApp) projectCmd() *cobra.Command {
 	cmd.AddCommand(a.leafCmd("plan PROJECT", "Preview the desired-state apply plan", cobra.ExactArgs(1), func(args []string) error {
 		return projectPlanCommand(args[0])
 	}))
+	cmd.AddCommand(a.leafCmd("operations PROJECT", "Show project apply operations and resource events", cobra.ExactArgs(1), func(args []string) error {
+		return projectOperationsCommand(args[0])
+	}))
 	cmd.AddCommand(a.leafCmd("rollback PROJECT [GENERATION]", "Restore a previous configuration generation", cobra.MinimumNArgs(1), func(args []string) error {
 		generation := uint64(0)
 		if len(args) == 2 {

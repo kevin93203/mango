@@ -154,6 +154,10 @@ func TestCobraProjectExposesPlanAsOnlyPreviewCommand(t *testing.T) {
 	if apply.Flag("dry-run") != nil {
 		t.Fatal("removed project apply --dry-run flag still exposed")
 	}
+	operations, _, err := root.Find([]string{"project", "operations"})
+	if err != nil || operations == root {
+		t.Fatalf("project operations command missing: command=%v err=%v", operations, err)
+	}
 }
 
 func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
@@ -161,7 +165,7 @@ func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 		{"status"}, {"start"}, {"stop"}, {"restart"}, {"enable"}, {"disable"}, {"logs"},
 		{"logs", "clear"}, {"config", "validate"}, {"project", "add"}, {"project", "remove"},
 		{"project", "rename"}, {"project", "apply"}, {"task", "run"}, {"workflow", "run"},
-		{"project", "rollback"},
+		{"project", "rollback"}, {"project", "operations"},
 		{"schedule", "enable"}, {"schedule", "disable"}, {"execution", "get"}, {"execution", "watch"},
 		{"execution", "cancel"}, {"execution", "retry"}, {"execution", "logs"},
 	}

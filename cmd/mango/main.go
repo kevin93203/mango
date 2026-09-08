@@ -21,6 +21,7 @@ import (
 	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/generation"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/paths"
@@ -593,6 +594,42 @@ func projectPlanCommand(project string) error {
 	return printProjectPlan(plan)
 }
 
+func projectOperationsCommand(project string) error {
+	response, err := call("config.operations", struct {
+		Project string `json:"project"`
+	}{Project: project})
+	if err != nil {
+		return err
+	}
+	var operations []generation.ApplyOperation
+	if err := decodeData(response.Data, &operations); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(operations)
+	}
+	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, fmt.Sprintf("Project operations: %s", project)))
+	rows := make([][]cliui.Cell, 0, len(operations))
+	for _, operation := range operations {
+		rows = append(rows, []cliui.Cell{
+			{Text: operation.ID}, {Text: operation.Type}, {Text: operation.Status},
+			{Text: operation.Phase}, {Text: fmt.Sprintf("%d", operation.Generation)},
+			{Text: operation.RequestedAt.Local().Format(time.RFC3339)},
+		})
+	}
+	if len(rows) == 0 {
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No operations found."))
+		return nil
+	}
+	cliOutput.Table([]string{"ID", "TYPE", "STATUS", "PHASE", "GENERATION", "REQUESTED"}, rows)
+	for _, operation := range operations {
+		for _, event := range operation.Events {
+			cliOutput.Printf("  #%d %s/%s %s %s\n", event.Sequence, event.Kind, event.Name, event.Status, event.Details)
+		}
+	}
+	return nil
+}
+
 func projectRollbackCommand(project string, generation uint64) error {
 	response, err := call("config.rollback", struct {
 		Project    string `json:"project"`
@@ -621,23 +658,27 @@ func printProjectPlan(plan reconcile.Plan) error {
 		{{Text: "current generation"}, {Text: fmt.Sprintf("%d", plan.CurrentGeneration)}},
 		{{Text: "proposed generation"}, {Text: fmt.Sprintf("%d", plan.ProposedGeneration)}},
 	})
-	rows := make([][]cliui.Cell, 0, len(plan.Changes))
-	for _, change := range plan.Changes {
+	rows := make([][]cliui.Cell, 0, len(plan.Resources))
+	for _, change := range plan.Resources {
 		style := cliui.StyleNone
 		if change.Action != "unchanged" {
 			style = cliui.StyleWarning
 		}
-		restart := "-"
-		if change.Restart {
-			restart = "yes"
+		pending := "no"
+		if change.Pending {
+			pending = "yes"
 		}
-		rows = append(rows, []cliui.Cell{{Text: change.Service}, {Text: change.Action, Style: style}, {Text: restart}})
+		processAffecting := "no"
+		if change.ProcessAffecting {
+			processAffecting = "yes"
+		}
+		rows = append(rows, []cliui.Cell{{Text: change.Kind}, {Text: change.Name}, {Text: change.Action, Style: style}, {Text: change.Reason}, {Text: pending}, {Text: processAffecting}})
 	}
 	if len(rows) == 0 {
-		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No services in plan."))
+		cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No resources in plan."))
 		return nil
 	}
-	cliOutput.Table([]string{"SERVICE", "ACTION", "RESTART"}, rows)
+	cliOutput.Table([]string{"KIND", "NAME", "ACTION", "REASON", "PENDING", "PROCESS"}, rows)
 	return nil
 }
 

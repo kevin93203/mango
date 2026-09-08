@@ -1,5 +1,7 @@
 # Phase 02: Desired State and Service Reliability
 
+Status: Completed. Acceptance, recovery, race, and vet checks pass.
+
 ## Objective
 
 Make configuration application predictable, reviewable, recoverable, and
@@ -8,7 +10,7 @@ health-aware while preserving existing YAML v3 behavior.
 ## Scope
 
 - Desired-state compilation and apply planning.
-- Dry-run, diff, operation history, and rollback.
+- Desired-state plan previews, operation history, and rollback.
 - Configuration generations and partial-failure recovery.
 - Health actions and native probes.
 - Startup readiness, graceful shutdown, cooldown, and dependency propagation.
@@ -24,8 +26,43 @@ Add CLI commands:
 
 ```text
 mango project plan PROJECT
+mango project operations PROJECT [--json]
 mango project rollback PROJECT [GENERATION]
 ```
+
+`project plan` is the only public preview command. `project apply` performs
+the reconciliation.
+
+Plan responses use version 2 of one shared schema:
+
+```json
+{
+  "plan_version": 2,
+  "project": "demo",
+  "current_generation": 4,
+  "proposed_generation": 5,
+  "resources": [
+    {
+      "kind": "service",
+      "name": "api",
+      "action": "restarted",
+      "reason": "dependency_changed:db",
+      "pending": true,
+      "process_affecting": true,
+      "before_fingerprint": "...",
+      "after_fingerprint": "..."
+    }
+  ]
+}
+```
+
+`kind` is one of `service`, `task`, `workflow`, or `schedule`; `action` is
+one of `added`, `changed`, `removed`, `restarted`, or `unchanged`. Resources
+are emitted in kind/name order. Fingerprints are deterministic hashes and do
+not expose environment values or other secrets. `pending` reports whether
+the current apply still needs work, so an already verified resource from a
+partial apply is not repeated. `proposed_generation` is advisory and has no
+side effects.
 
 Add optional service health fields:
 
@@ -54,6 +91,29 @@ load config
 → record transitions and result
 ```
 
+The compiler and action calculator are shared by `project plan` and
+`project apply`. The current desired state comes from the last committed
+generation; observed state comes from daemon services, the workflow executor,
+and the scheduler. A generation-zero project may use the legacy bootstrap
+once, but later startup and planning fail closed when committed metadata is
+missing or unsupported.
+
+Every apply persists an operation with an ID, plan version, previous operation
+ID, phase, per-resource result/checkpoint, and ordered resource events. Resource
+events record start, success, and failure. A failed apply remains queryable via
+`mango project operations PROJECT`; the next ordinary `project apply` builds a
+new plan from the last committed generation, current YAML, and observed state.
+It skips only resources whose desired state is verified, never blindly trusting
+an old checkpoint.
+
+Generation and registry updates use a two-phase commit. The operation and
+snapshot move through `pending` and `ready_to_commit`; the registry pointer
+and committed snapshot are finalized only after reconciliation and verification.
+On daemon startup, pending operations are finalized only when the registry
+already points at the new generation and every checkpoint is complete;
+otherwise the new generation is aborted and the previous committed generation
+is restored. Process state is never used to reconstruct missing metadata.
+
 The reconciler must distinguish desired state from observed state. A service
 that is intentionally stopped must not be restarted by a health or crash
 handler. A health-triggered restart must use the same backoff and crash-loop
@@ -70,37 +130,52 @@ liveness/action, probe result, failing streak, and last transition.
 
 ## Implementation Tasks
 
-- Add desired-state and observed-state snapshots.
-- Produce deterministic plans for added, changed, removed, restarted, and
-  unchanged services.
+- Add one compiled desired-state and observed-state model for services, tasks,
+  workflows, and schedules.
+- Produce deterministic plan v2 resources for added, changed, removed,
+  restarted, and unchanged resources, including dependency-induced restarts.
 - Assign a configuration generation to every successful apply.
 - Restore the last successful desired-state generation on daemon startup and
   avoid treating the current project YAML as applied state without an explicit
   plan or apply operation.
-- Persist apply operations and partial results.
+- Persist apply operations, per-resource checkpoints, and operation-specific
+  events; expose them through `project operations`.
 - Add rollback to the last successful generation.
 - Add startup timeout and explicit graceful stop policy.
 - Add native HTTP, HTTPS, TCP, and file probes.
 - Add `on_unhealthy` action handling with cooldown and crash-loop protection.
 - Propagate dependency health and restart transitions deterministically.
-- Expose plan and reconciliation events through the execution/event layer.
+- Keep reconciliation events separate from execution events and preserve event
+  order across restarts.
+- Apply scheduler definitions atomically: validate all new entries before
+  replacing the old set.
 
 ## Data Migration
 
-- Add configuration generation and apply-operation metadata.
+- Add versioned configuration-generation and apply-operation metadata with
+  pending/ready/committed/failed/aborted states.
 - Keep registry format compatible with existing projects.
 - Preserve old runtime files until the new generation is confirmed applied.
 - Do not remove a previous generation until a later cleanup operation succeeds.
-- If rollback metadata is missing, fail with an actionable error instead of
-  reconstructing a configuration from observed process state.
+- Legacy operation v1 metadata is disposable and is ignored without migration;
+  the next operation write replaces it with v2. Successful generation v1
+  snapshots remain read-compatible. Unsupported newer or incomplete
+  generation/rollback metadata fails with an actionable error instead of being
+  reconstructed from observed process state.
 
 ## Test Plan
 
-- Verify deterministic plan output for add, change, remove, and no-op cases.
+- Verify plan v2 resources for add, change, remove, unchanged, task, workflow,
+  schedule, and dependency-induced restart cases.
 - Verify plan does not stop or start processes.
+- Verify plan resources exactly match the apply operation resources.
 - Verify daemon restart restores the last successfully applied generation even
   when the project YAML has changed without a subsequent apply.
-- Verify partial apply results and retry behavior.
+- Verify partial apply checkpoints, ordered events, and normal-apply retry
+  behavior without repeating verified resources.
+- Verify pending/ready/committed/failed/aborted snapshot, registry, and
+  operation crash-recovery combinations.
+- Verify failed scheduler replacement keeps the old entries.
 - Verify rollback restores the previous desired generation.
 - Verify health actions, startup grace, recovery thresholds, and cooldown.
 - Verify unhealthy restarts consume the crash-loop budget.
@@ -117,6 +192,8 @@ liveness/action, probe result, failing streak, and last transition.
 - Unhealthy services can report, restart, or stop according to configuration.
 - Health-triggered restart cannot create an uncontrolled restart loop.
 - Dependency behavior is deterministic after daemon restart and apply.
+- The command tree exposes `project plan` as the only preview operation.
+- Unsupported metadata fails closed with an actionable diagnostic.
 
 ## Rollout Strategy
 

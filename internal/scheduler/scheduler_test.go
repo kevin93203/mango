@@ -52,6 +52,22 @@ func TestRunNowRecordsHistory(t *testing.T) {
 	}
 }
 
+func TestApplyKeepsPreviousEntriesWhenReplacementIsInvalid(t *testing.T) {
+	s := New(nil)
+	old := config.EffectiveSchedule{Project: "demo", Name: "old", Cron: "* * * * *", Timezone: time.UTC}
+	if err := s.Apply([]config.EffectiveSchedule{old}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := config.EffectiveSchedule{Project: "demo", Name: "new", Cron: "not-a-cron", Timezone: time.UTC}
+	if err := s.Apply([]config.EffectiveSchedule{invalid}); err == nil {
+		t.Fatal("invalid replacement unexpectedly succeeded")
+	}
+	items := s.List()
+	if len(items) != 1 || items[0].Project != "demo" || items[0].Name != "old" {
+		t.Fatalf("schedules after failed replacement = %+v, want old schedule", items)
+	}
+}
+
 func TestRunNowRetriesFailedExecution(t *testing.T) {
 	var attempts atomic.Int32
 	s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {

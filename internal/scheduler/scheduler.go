@@ -535,23 +535,37 @@ func (s *Scheduler) Stop() context.Context {
 func (s *Scheduler) Apply(schedules []config.EffectiveSchedule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, id := range s.entries {
-		s.cron.Remove(id)
-	}
-	s.entries = map[string]cron.EntryID{}
+	// Build all new cron entries before touching the active set. A malformed
+	// replacement must leave the currently working scheduler intact.
 	configured := make(map[string]config.EffectiveSchedule, len(schedules))
 	disabled := make(map[string]bool)
-	for _, schedule := range schedules {
+	ordered := append([]config.EffectiveSchedule(nil), schedules...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left := ordered[i].Project + "/" + ordered[i].Name
+		right := ordered[j].Project + "/" + ordered[j].Name
+		return left < right
+	})
+	staged := make(map[string]cron.EntryID, len(ordered))
+	for _, schedule := range ordered {
 		key := schedule.Project + "/" + schedule.Name
 		configured[key] = schedule
 		if s.disabled[key] {
 			disabled[key] = true
 			continue
 		}
-		if _, err := s.addEntryLocked(key, schedule); err != nil {
+		entry, err := s.addCronEntryLocked(key, schedule)
+		if err != nil {
+			for _, id := range staged {
+				s.cron.Remove(id)
+			}
 			return err
 		}
+		staged[key] = entry
 	}
+	for _, id := range s.entries {
+		s.cron.Remove(id)
+	}
+	s.entries = staged
 	s.schedules = configured
 	s.disabled = disabled
 	return nil
@@ -609,6 +623,15 @@ func (s *Scheduler) Enable(key string) error {
 }
 
 func (s *Scheduler) addEntryLocked(key string, schedule config.EffectiveSchedule) (cron.EntryID, error) {
+	entry, err := s.addCronEntryLocked(key, schedule)
+	if err != nil {
+		return 0, err
+	}
+	s.entries[key] = entry
+	return entry, nil
+}
+
+func (s *Scheduler) addCronEntryLocked(key string, schedule config.EffectiveSchedule) (cron.EntryID, error) {
 	loc := schedule.Timezone
 	if loc == nil {
 		loc = time.Local
@@ -620,7 +643,6 @@ func (s *Scheduler) addEntryLocked(key string, schedule config.EffectiveSchedule
 	if err != nil {
 		return 0, fmt.Errorf("schedule %s: %w", key, err)
 	}
-	s.entries[key] = entry
 	return entry, nil
 }
 
