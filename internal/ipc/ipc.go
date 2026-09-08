@@ -13,6 +13,11 @@ import (
 
 var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: mango daemon start")
 
+// ProtocolVersion is the daemon/shim local IPC contract version. Version 2
+// introduces active-default execution listing, terminal-only history methods,
+// and the explicit history purge/show operations.
+const ProtocolVersion = 2
+
 type EndpointState uint8
 
 const (
@@ -89,7 +94,7 @@ func NewRequest(method string, params interface{}) (Request, error) {
 	if err != nil {
 		return Request{}, err
 	}
-	return Request{Version: 1, ID: newRequestID(), Method: method, Params: data}, nil
+	return Request{Version: ProtocolVersion, ID: newRequestID(), Method: method, Params: data}, nil
 }
 
 func Serve(ctx context.Context, listener net.Listener, handler Handler) error {
@@ -127,15 +132,15 @@ func serveConn(ctx context.Context, conn net.Conn, handler Handler) {
 	encoder := json.NewEncoder(conn)
 	var request Request
 	if err := decoder.Decode(&request); err != nil {
-		_ = encoder.Encode(Response{Version: 1, OK: false, Error: &Error{Code: "BAD_REQUEST", Message: err.Error()}})
+		_ = encoder.Encode(Response{Version: ProtocolVersion, OK: false, Error: &Error{Code: "BAD_REQUEST", Message: err.Error()}})
 		return
 	}
 	if request.Version == 0 {
-		request.Version = 1
+		request.Version = ProtocolVersion
 	}
 	response := handler(ctx, request)
 	if response.Version == 0 {
-		response.Version = 1
+		response.Version = ProtocolVersion
 	}
 	response.ID = request.ID
 	_ = encoder.Encode(response)
@@ -150,7 +155,7 @@ func Call(ctx context.Context, request Request) (Response, error) {
 // endpoint so mangod never needs to share the daemon listener with a shim.
 func CallEndpoint(ctx context.Context, endpoint string, request Request) (Response, error) {
 	if request.Version == 0 {
-		request.Version = 1
+		request.Version = ProtocolVersion
 	}
 	if request.ID == "" {
 		request.ID = newRequestID()
@@ -172,6 +177,9 @@ func CallEndpoint(ctx context.Context, endpoint string, request Request) (Respon
 	var response Response
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
 		return Response{}, err
+	}
+	if response.Version != ProtocolVersion {
+		return Response{}, fmt.Errorf("unsupported daemon IPC version %d; client requires version %d", response.Version, ProtocolVersion)
 	}
 	if !response.OK {
 		if response.Error != nil {

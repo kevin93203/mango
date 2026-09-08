@@ -28,6 +28,7 @@ const (
 
 	TriggerModeAutomatic = "automatic"
 	TriggerModeManual    = "manual"
+	TriggerModeRetry     = "retry"
 	// TriggerAutomatic is retained as a readable alias for callers that used
 	// the original mode constant name during the trigger migration.
 	TriggerAutomatic = TriggerModeAutomatic

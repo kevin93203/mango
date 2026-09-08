@@ -93,7 +93,7 @@ func TestExecutionListTextOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"RUN_ID", "run-1", "demo/job", "success", "2026-01-02T03:04:05Z", "EXIT"} {
+	for _, want := range []string{"RUN_ID", "run-1", "demo/job", "success", "2026-01-02T03:04:05Z", "ELAPSED"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("execution list output = %q, want %q", text, want)
 		}

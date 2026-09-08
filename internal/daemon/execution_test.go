@@ -167,19 +167,21 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 		t.Fatalf("execution.retry failed: %+v", response.Error)
 	}
 	var retried struct {
-		RunID  string `json:"run_id"`
-		Status string `json:"status"`
+		RunID            string `json:"run_id"`
+		RetriedFromRunID string `json:"retried_from_run_id"`
+		Status           string `json:"status"`
 	}
 	if err := decodeTestData(response.Data, &retried); err != nil {
 		t.Fatal(err)
 	}
-	if retried.RunID != runID || retried.Status != scheduler.StatusQueued {
-		t.Fatalf("retry response = %+v", retried)
+	if retried.RunID == "" || retried.RunID == runID || retried.RetriedFromRunID != runID || retried.Status != scheduler.StatusQueued {
+		t.Fatalf("retry response = %+v, want a new queued execution linked to %s", retried, runID)
 	}
+	cancel.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, retried.RunID))
 	if response := d.Handle(context.Background(), cancel); !response.OK {
 		t.Fatalf("cancel retried execution failed: %+v", response.Error)
 	}
-	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, runID))
+	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, retried.RunID))
 	response = d.Handle(context.Background(), watch)
 	if !response.OK {
 		t.Fatalf("retried execution.watch failed: %+v", response.Error)
@@ -187,14 +189,71 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 	if err := decodeTestData(response.Data, &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.RunID != runID || info.Status != scheduler.StatusCancelled {
+	if info.RunID != retried.RunID || info.Status != scheduler.StatusCancelled {
 		t.Fatalf("retried execution = %+v", info)
 	}
 	execution, err := d.scheduler.GetExecution(context.Background(), runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(execution.Record.Tasks) < 2 {
-		t.Fatalf("retry task history = %d records, want at least 2 attempts under one logical run", len(execution.Record.Tasks))
+	if execution.Record.Status != scheduler.StatusCancelled {
+		t.Fatalf("source execution after retry = %+v", execution.Record)
+	}
+}
+
+func TestManualRetryCreatesNewExecutionWithSourceAndCurrentConfiguration(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	d.workflow.Apply(map[string]config.EffectiveTask{
+		"demo/job": {
+			Project: "demo", Name: "job", Command: os.Args[0],
+			Args: []string{"-test.run=TestExecutionHelper", "--"}, WorkingDir: t.TempDir(),
+			Env: map[string]string{"MANGO_EXECUTION_HELPER": "1"},
+		},
+	}, nil)
+	d.mu.Lock()
+	d.configurationGeneration = 42
+	d.mu.Unlock()
+	started := time.Now().UTC().Add(-time.Second)
+	d.scheduler.RecordExecution(scheduler.Record{
+		RunID: "source-run", Project: "demo", TargetType: "task", Target: "job", Name: "job",
+		Trigger: scheduler.ManualTrigger(), Status: scheduler.StatusFailed, Started: started, Finished: time.Now().UTC(), ExitCode: 1,
+	})
+	retry := requestForMethod(t, "execution.retry")
+	retry.Params = json.RawMessage(`{"run_id":"source-run"}`)
+	response := d.Handle(context.Background(), retry)
+	if !response.OK {
+		t.Fatalf("execution.retry failed: %+v", response.Error)
+	}
+	var info struct {
+		RunID                   string `json:"run_id"`
+		RetriedFromRunID        string `json:"retried_from_run_id"`
+		ConfigurationGeneration uint64 `json:"configuration_generation"`
+		Status                  string `json:"status"`
+		Trigger                 struct {
+			Type string `json:"type"`
+			Mode string `json:"mode"`
+		} `json:"trigger"`
+	}
+	if err := decodeTestData(response.Data, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.RunID == "" || info.RunID == "source-run" || info.RetriedFromRunID != "source-run" || info.ConfigurationGeneration != 42 || info.Status != scheduler.StatusQueued {
+		t.Fatalf("retry info = %+v", info)
+	}
+	if info.Trigger.Type != scheduler.TriggerManual || info.Trigger.Mode != "retry" {
+		t.Fatalf("retry trigger = %+v", info.Trigger)
+	}
+	watch := requestForMethod(t, "execution.watch")
+	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, info.RunID))
+	response = d.Handle(context.Background(), watch)
+	if !response.OK {
+		t.Fatalf("retried execution.watch failed: %+v", response.Error)
+	}
+	source, err := d.scheduler.GetExecution(context.Background(), "source-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Record.Status != scheduler.StatusFailed || source.Record.RunID != "source-run" {
+		t.Fatalf("source execution changed = %+v", source.Record)
 	}
 }

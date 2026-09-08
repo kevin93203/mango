@@ -21,11 +21,13 @@ All previous phases: 00, 01, 02, 03, and 04.
 
 - Keep YAML schema version 3 valid and executable.
 - Add new optional fields without changing existing defaults.
-- Keep IPC version 1 compatible for existing clients.
+- Phase 1 keeps its IPC contract stable; the Phase 2 major release upgrades
+  the local IPC protocol to version 2 as documented in
+  [06 Execution / History Major Release](06-execution-history-major-release.md).
 - Introduce HTTP under `/api/v1` only when HTTP is explicitly enabled.
-- Preserve existing CLI commands and output fields; add new fields or commands
-  instead of silently changing existing meanings.
-- Document deprecations before removing any field or behavior.
+- Preserve existing CLI commands during the Cobra-equivalence release. The
+  Phase 2 major release removes the explicitly documented history commands and
+  changes execution/history semantics in one coordinated cutover.
 
 ## Architecture Changes
 

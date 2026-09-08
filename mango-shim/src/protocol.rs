@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn request_accepts_unknown_fields_and_defaults_params() {
         let request: Request = serde_json::from_str(
-            r#"{"version":1,"request_id":"r1","method":"status","extra":true}"#,
+            r#"{"version":2,"request_id":"r1","method":"status","extra":true}"#,
         )
         .expect("request should decode");
         assert_eq!(request.request_id, "r1");
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn failure_contains_protocol_error_code() {
         let request: Request =
-            serde_json::from_str(r#"{"version":1,"request_id":"r2","method":"hello","params":{}}"#)
+            serde_json::from_str(r#"{"version":2,"request_id":"r2","method":"hello","params":{}}"#)
                 .expect("request should decode");
         let response = failure::<Value>(&request, "CONFIG_MISMATCH", "fingerprint differs");
         assert!(!response.ok);

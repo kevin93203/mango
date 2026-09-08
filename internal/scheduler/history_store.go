@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -12,12 +13,19 @@ import (
 // the interactive history browser. Name is the target name, or the task name
 // when TargetType is task.
 type HistoryQuery struct {
+	// Limit is the maximum number of terminal records to return. Results are
+	// always newest-first. Tail is retained only for source compatibility with
+	// pre-major embedders and is treated as Limit when Limit is zero.
+	Limit       int
 	Tail        int
+	Status      string
 	TriggerType string
 	Trigger     string
 	TargetType  string
 	Project     string
-	Name        string
+	Target      string
+	Name        string // legacy alias for Target
+	Attempts    bool
 }
 
 type ScheduleRef struct {
@@ -25,13 +33,20 @@ type ScheduleRef struct {
 	Name    string
 }
 
-// HistoryRepository is the persistence boundary for completed executions.
-// Implementations must keep Record atomic, including retention and counters.
-type HistoryRepository interface {
-	Record(context.Context, Record, int) error
+// HistoryReader is the narrow read boundary for terminal history and lifetime
+// summaries. It never owns active execution transitions.
+type HistoryReader interface {
 	Query(context.Context, HistoryQuery) ([]Record, error)
 	Counters(context.Context) (map[string]uint64, error)
 	LatestSchedules(context.Context, []ScheduleRef) (map[string]Record, error)
+}
+
+// HistoryRepository is the compatibility composite accepted by Scheduler.
+// New code should depend on ExecutionStore, HistoryReader, and HistoryPurger
+// separately.
+type HistoryRepository interface {
+	ExecutionStore
+	HistoryReader
 	Close() error
 }
 
@@ -57,6 +72,9 @@ func newMemoryHistoryRepository() HistoryRepository {
 func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if record.Status == "" {
+		record.Status = statusForCompletedRecord(record)
+	}
 	if record.RunID == "" {
 		record.RunID = NewRunID()
 	}
@@ -68,18 +86,30 @@ func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit
 			created = false
 			previousRecord = cloneRecord(r.records[index])
 			previousStatus = previousRecord.Status
-			updated := cloneRecord(record)
-			if !IsTerminalStatus(previousStatus) || !IsTerminalStatus(record.Status) {
-				if len(updated.Attempts) == 0 {
-					updated.Attempts = append([]Attempt(nil), previousRecord.Attempts...)
+			if IsTerminalStatus(previousStatus) {
+				if record.IdempotencyKey == "" {
+					record.IdempotencyKey = previousRecord.IdempotencyKey
 				}
-				if len(updated.Tasks) == 0 {
-					updated.Tasks = append([]TaskRecord(nil), previousRecord.Tasks...)
+				if record.ConfigurationGeneration == 0 {
+					record.ConfigurationGeneration = previousRecord.ConfigurationGeneration
 				}
+				if record.RetriedFromRunID == "" {
+					record.RetriedFromRunID = previousRecord.RetriedFromRunID
+				}
+				if !SameTerminalRecord(previousRecord, record) {
+					if IsActiveStatus(record.Status) {
+						return ErrExecutionTransition
+					}
+					return ErrTerminalExecutionImmutable
+				}
+				return nil
 			}
-			if IsTerminalStatus(record.Status) && !IsTerminalStatus(previousStatus) {
-				updated.Attempts = append(append([]Attempt(nil), previousRecord.Attempts...), updated.Attempts...)
-				updated.Tasks = append(append([]TaskRecord(nil), previousRecord.Tasks...), updated.Tasks...)
+			updated := cloneRecord(record)
+			if len(updated.Attempts) == 0 {
+				updated.Attempts = append([]Attempt(nil), previousRecord.Attempts...)
+			}
+			if len(updated.Tasks) == 0 {
+				updated.Tasks = append([]TaskRecord(nil), previousRecord.Tasks...)
 			}
 			r.records[index] = updated
 			record = updated
@@ -110,6 +140,13 @@ func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit
 	return nil
 }
 
+func statusForCompletedRecord(record Record) string {
+	if record.Error != "" || record.ExitCode != 0 {
+		return StatusFailed
+	}
+	return StatusSuccess
+}
+
 func (r *memoryHistoryRepository) Clear(_ context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -127,26 +164,71 @@ func (r *memoryHistoryRepository) Prune(_ context.Context, limit int) error {
 }
 
 func (r *memoryHistoryRepository) pruneLocked(limit int) {
-	if limit > 0 && len(r.records) > limit {
-		r.records = append([]Record(nil), r.records[len(r.records)-limit:]...)
+	if limit <= 0 {
+		return
 	}
+	terminal := make([]int, 0)
+	for index, record := range r.records {
+		if IsTerminalStatus(record.Status) {
+			terminal = append(terminal, index)
+		}
+	}
+	if len(terminal) <= limit {
+		return
+	}
+	remove := make(map[int]bool, len(terminal)-limit)
+	for _, index := range terminal[:len(terminal)-limit] {
+		remove[index] = true
+		delete(r.executions, r.records[index].RunID)
+	}
+	kept := make([]Record, 0, len(r.records)-len(remove))
+	for index, record := range r.records {
+		if !remove[index] {
+			kept = append(kept, record)
+		}
+	}
+	r.records = kept
 }
 
 func (r *memoryHistoryRepository) Query(_ context.Context, query HistoryQuery) ([]Record, error) {
+	limit := query.Limit
+	if limit == 0 {
+		limit = query.Tail
+	}
+	if limit < 0 {
+		return nil, errors.New("history limit must be non-negative")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := make([]Record, 0, len(r.records))
+	position := make(map[string]int, len(r.records))
+	for index, record := range r.records {
+		position[record.RunID] = index
+	}
 	for _, record := range r.records {
+		if !IsTerminalStatus(record.Status) {
+			continue
+		}
 		if !matchesHistoryQuery(record, query) {
 			continue
 		}
-		if query.TargetType == "task" && query.Name != "" && record.TargetType == "workflow" {
-			record.Tasks = matchingTasks(record.Tasks, query.Name)
+		name := query.Target
+		if name == "" {
+			name = query.Name
+		}
+		if query.TargetType == "task" && name != "" && record.TargetType == "workflow" {
+			record.Tasks = matchingTasks(record.Tasks, name)
 		}
 		result = append(result, cloneRecord(record))
 	}
-	if query.Tail > 0 && query.Tail < len(result) {
-		result = result[len(result)-query.Tail:]
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Started.Equal(result[j].Started) {
+			return position[result[i].RunID] > position[result[j].RunID]
+		}
+		return result[i].Started.After(result[j].Started)
+	})
+	if limit > 0 && limit < len(result) {
+		result = result[:limit]
 	}
 	return result, nil
 }
@@ -260,6 +342,27 @@ func (r *memoryHistoryRepository) UpdateExecution(ctx context.Context, record Re
 	return r.Record(ctx, record, 0)
 }
 
+func (r *memoryHistoryRepository) Purge(_ context.Context, before *time.Time, all bool) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !all && before == nil {
+		return 0, errors.New("history purge requires before or all")
+	}
+	removed := 0
+	kept := make([]Record, 0, len(r.records))
+	for _, record := range r.records {
+		purge := IsTerminalStatus(record.Status) && (all || record.Finished.Before(*before))
+		if purge {
+			delete(r.executions, record.RunID)
+			removed++
+			continue
+		}
+		kept = append(kept, record)
+	}
+	r.records = kept
+	return removed, nil
+}
+
 func (*memoryHistoryRepository) RecordExecutionEvent(context.Context, ExecutionEvent) error {
 	return nil
 }
@@ -277,6 +380,9 @@ func cloneExecution(execution Execution) Execution {
 }
 
 func matchesHistoryQuery(record Record, query HistoryQuery) bool {
+	if query.Status != "" && record.Status != query.Status {
+		return false
+	}
 	if query.TriggerType != "" && record.Trigger.Type != query.TriggerType {
 		return false
 	}
@@ -288,22 +394,34 @@ func matchesHistoryQuery(record Record, query HistoryQuery) bool {
 	}
 	switch query.TargetType {
 	case "workflow":
-		return record.TargetType == "workflow" && (query.Name == "" || record.Target == query.Name)
+		name := query.Target
+		if name == "" {
+			name = query.Name
+		}
+		return record.TargetType == "workflow" && (name == "" || record.Target == name)
 	case "task":
+		name := query.Target
+		if name == "" {
+			name = query.Name
+		}
 		if record.TargetType == "task" {
-			return query.Name == "" || record.Target == query.Name
+			return name == "" || record.Target == name
 		}
 		if record.TargetType != "workflow" {
 			return false
 		}
 		for _, task := range record.Tasks {
-			if query.Name == "" || task.Task == query.Name {
+			if name == "" || task.Task == name {
 				return true
 			}
 		}
 		return false
 	default:
-		if query.Name != "" && record.Target != query.Name && !recordContainsTask(record, query.Name) {
+		name := query.Target
+		if name == "" {
+			name = query.Name
+		}
+		if name != "" && record.Target != name && !recordContainsTask(record, name) {
 			return false
 		}
 		return true
@@ -312,6 +430,9 @@ func matchesHistoryQuery(record Record, query HistoryQuery) bool {
 
 func matchesExecutionQuery(execution Execution, query ExecutionQuery) bool {
 	record := execution.Record
+	if !query.All && query.Status == "" && !IsActiveStatus(record.Status) {
+		return false
+	}
 	if query.Status != "" && record.Status != query.Status {
 		return false
 	}
@@ -328,6 +449,35 @@ func matchesExecutionQuery(execution Execution, query ExecutionQuery) bool {
 		return false
 	}
 	return query.Target == "" || record.Target == query.Target
+}
+
+func IsActiveStatus(status string) bool {
+	return status == StatusQueued || status == StatusRunning
+}
+
+// SameTerminalRecord reports whether two terminal writes describe the same
+// canonical execution payload. Callers may omit child rows when repeating an
+// otherwise identical terminal write; supplied child rows must match.
+func SameTerminalRecord(left, right Record) bool {
+	if !IsTerminalStatus(left.Status) || !IsTerminalStatus(right.Status) || left.Status != right.Status {
+		return false
+	}
+	if len(right.Attempts) > 0 && !reflect.DeepEqual(left.Attempts, right.Attempts) {
+		return false
+	}
+	if len(right.Tasks) > 0 && !reflect.DeepEqual(left.Tasks, right.Tasks) {
+		return false
+	}
+	left.Attempts = nil
+	left.Tasks = nil
+	right.Attempts = nil
+	right.Tasks = nil
+	return left.RunID == right.RunID && left.Project == right.Project && left.Name == right.Name &&
+		left.TargetType == right.TargetType && left.Target == right.Target && left.Trigger == right.Trigger &&
+		left.Started.Equal(right.Started) && left.Finished.Equal(right.Finished) && left.ExitCode == right.ExitCode &&
+		left.Error == right.Error && left.Stderr == right.Stderr && left.StdoutPath == right.StdoutPath &&
+		left.StderrPath == right.StderrPath && left.IdempotencyKey == right.IdempotencyKey &&
+		left.ConfigurationGeneration == right.ConfigurationGeneration && left.RetriedFromRunID == right.RetriedFromRunID
 }
 
 func recordContainsTask(record Record, name string) bool {

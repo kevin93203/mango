@@ -20,6 +20,7 @@ Kubernetes orchestration, or multi-host high availability.
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Not started | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
+| [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |
 
 ## Dependency Flow
 
@@ -39,8 +40,9 @@ Kubernetes orchestration, or multi-host high availability.
 
 ## Shared Decisions
 
-- Existing YAML version 3 remains compatible. New behavior is additive and
-  preserves current defaults.
+- Existing YAML version 3 remains compatible. The Cobra-equivalence release
+  preserves the public CLI; the Phase 2 major release intentionally changes
+  execution/history defaults and removes the commands listed in plan 06.
 - Unix domain sockets and Windows named pipes remain the default local control
   transport.
 - HTTP is optional, loopback-only by default, and versioned under `/api/v1`.

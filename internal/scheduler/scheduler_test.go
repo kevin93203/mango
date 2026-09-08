@@ -676,7 +676,7 @@ func TestHistoryLimitKeepsLatestRecords(t *testing.T) {
 	s.RecordExecution(Record{Name: "two"})
 	s.RecordExecution(Record{Name: "three"})
 	history := s.History()
-	if len(history) != 2 || history[0].Name != "two" || history[1].Name != "three" {
+	if len(history) != 2 || history[0].Name != "three" || history[1].Name != "two" {
 		t.Fatalf("history = %+v", history)
 	}
 }
@@ -688,7 +688,7 @@ func TestHistoryTailReturnsLatestRecords(t *testing.T) {
 	s.RecordExecution(Record{Name: "three"})
 
 	history := s.HistoryTail(2)
-	if len(history) != 2 || history[0].Name != "two" || history[1].Name != "three" {
+	if len(history) != 2 || history[0].Name != "three" || history[1].Name != "two" {
 		t.Fatalf("history = %+v", history)
 	}
 	if history := s.HistoryTail(0); len(history) != 3 {

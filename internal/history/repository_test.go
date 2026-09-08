@@ -154,8 +154,8 @@ func TestRepositoryFiltersTasksAndRetainsCounters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 || all[0].RunID != "run-2" || all[1].RunID != "run-3" {
-		t.Fatalf("retained records = %+v, want run-2 and run-3", all)
+	if len(all) != 2 || all[0].RunID != "run-3" || all[1].RunID != "run-2" {
+		t.Fatalf("retained records = %+v, want newest-first run-3 and run-2", all)
 	}
 	filtered, err := repository.Query(context.Background(), scheduler.HistoryQuery{TargetType: "task", Project: "demo", Name: "lint"})
 	if err != nil {

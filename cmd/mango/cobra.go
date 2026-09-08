@@ -273,14 +273,6 @@ func (a *cliApp) scheduleCmd() *cobra.Command {
 		action := action
 		cmd.AddCommand(a.leafCmd(action+" TARGET [TARGET...]", action+" schedules", cobra.MinimumNArgs(1), func(args []string) error { return scheduleOperationCommand(action, args) }))
 	}
-	var tail int
-	var attempts bool
-	var triggerType, trigger, targetType, target string
-	history := a.simpleCmd("history", "Browse schedule history", func() error {
-		return historyListCommandWithCaller(historyOptions{Tail: tail, Attempts: attempts, TriggerType: triggerType, Trigger: trigger, TargetType: targetType, Target: target}, call, true)
-	})
-	addHistoryFlags(history, &tail, &attempts, &triggerType, &trigger, &targetType, &target)
-	cmd.AddCommand(history)
 	return cmd
 }
 
@@ -300,15 +292,31 @@ func (a *cliApp) taskCmd() *cobra.Command {
 
 func (a *cliApp) historyCmd() *cobra.Command {
 	cmd := a.namespaceCmd("history", "Browse execution history")
-	var tail int
+	var limit int
 	var attempts bool
-	var triggerType, trigger, targetType, target string
+	var status, triggerType, trigger, project, targetType, target string
 	list := a.simpleCmd("ls", "List execution history", func() error {
-		return historyListCommand(historyOptions{Tail: tail, Attempts: attempts, TriggerType: triggerType, Trigger: trigger, TargetType: targetType, Target: target})
+		return historyListV2Command(historyListV2Options{Limit: limit, Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Attempts: attempts})
 	})
-	addHistoryFlags(list, &tail, &attempts, &triggerType, &trigger, &targetType, &target)
+	list.Flags().IntVar(&limit, "limit", 100, "maximum number of terminal records; 0 means all")
+	list.Flags().StringVar(&status, "status", "", "filter by terminal status")
+	list.Flags().BoolVar(&attempts, "attempts", false, "include task and attempt details")
+	list.Flags().StringVar(&triggerType, "trigger-type", "", "filter by trigger type")
+	list.Flags().StringVar(&trigger, "trigger", "", "filter by trigger name")
+	list.Flags().StringVar(&project, "project", "", "filter by project")
+	list.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
+	list.Flags().StringVar(&target, "target", "", "filter by target")
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.simpleCmd("clear", "Clear execution history", historyClearCommand))
+	cmd.AddCommand(a.leafCmd("show RUN_ID", "Show terminal execution history", cobra.ExactArgs(1), func(args []string) error { return historyShowCommand(args[0]) }))
+	var before string
+	var all, yes bool
+	purge := a.simpleCmd("purge", "Purge terminal execution history", func() error {
+		return historyPurgeCommand(historyPurgeOptions{Before: before, All: all, Yes: yes})
+	})
+	purge.Flags().StringVar(&before, "before", "", "purge terminal runs finished before RFC3339 timestamp")
+	purge.Flags().BoolVar(&all, "all", false, "purge all terminal runs")
+	purge.Flags().BoolVar(&yes, "yes", false, "confirm the purge")
+	cmd.AddCommand(purge)
 	return cmd
 }
 
@@ -316,8 +324,9 @@ func (a *cliApp) executionCmd() *cobra.Command {
 	cmd := a.namespaceCmd("execution", "Inspect and control executions")
 	var status, triggerType, trigger, project, targetType, target string
 	var limit int
+	var all bool
 	ls := a.simpleCmd("ls", "List executions", func() error {
-		return executionListCommand(executionListCLIParams{Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Limit: limit})
+		return executionListCommand(executionListCLIParams{Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Limit: limit, All: all})
 	})
 	ls.Flags().StringVar(&status, "status", "", "filter by status")
 	ls.Flags().StringVar(&triggerType, "trigger-type", "", "filter by trigger type")
@@ -326,6 +335,7 @@ func (a *cliApp) executionCmd() *cobra.Command {
 	ls.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
 	ls.Flags().StringVar(&target, "target", "", "filter by target")
 	ls.Flags().IntVar(&limit, "limit", 0, "maximum number of executions; 0 means all")
+	ls.Flags().BoolVar(&all, "all", false, "include terminal executions")
 	cmd.AddCommand(ls)
 	for _, action := range []string{"get", "cancel", "retry"} {
 		action := action

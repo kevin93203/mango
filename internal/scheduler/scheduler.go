@@ -32,8 +32,12 @@ type Record struct {
 	StderrPath              string
 	IdempotencyKey          string
 	ConfigurationGeneration uint64
-	Attempts                []Attempt
-	Tasks                   []TaskRecord
+	// RetriedFromRunID links a manually-created execution to the terminal
+	// execution it was retried from. Automatic retries remain attempts on the
+	// same execution and do not set this field.
+	RetriedFromRunID string
+	Attempts         []Attempt
+	Tasks            []TaskRecord
 }
 
 // TaskRecord is the execution record for one direct task invocation or one
@@ -117,6 +121,8 @@ type ExecutionQuery struct {
 	TargetType  string
 	Target      string
 	Limit       int
+	// All disables the active-only default used by execution ls.
+	All bool
 }
 
 type ExecutionOperation struct {
@@ -131,24 +137,34 @@ type ExecutionOperation struct {
 
 var ErrExecutionNotFound = errors.New("execution not found")
 
+// ErrTerminalExecutionImmutable is returned when a terminal execution is
+// written with a different terminal payload. Terminal records are canonical
+// and may only receive an identical, idempotent write.
+var ErrTerminalExecutionImmutable = errors.New("terminal execution is immutable")
+
+// ErrExecutionTransition is returned when a write attempts an invalid
+// lifecycle transition, such as terminal -> queued/running.
+var ErrExecutionTransition = errors.New("invalid execution state transition")
+
 // ExecutionStore is the metadata persistence boundary for active and
-// completed logical runs. HistoryRepository implementations may also
-// implement this interface; the scheduler uses it opportunistically so old
-// embedders remain source-compatible.
+// completed logical runs. It owns lifecycle writes, execution reads, and
+// logical-run listing; terminal history queries remain on HistoryReader.
 type ExecutionStore interface {
+	Record(context.Context, Record, int) error
 	BeginExecution(context.Context, Record, string, uint64) (Execution, bool, error)
 	GetExecution(context.Context, string) (Execution, error)
 	ListActiveExecutions(context.Context) ([]Execution, error)
+	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
 	UpdateExecution(context.Context, Record) error
 	RecordExecutionEvent(context.Context, ExecutionEvent) error
 	RecordExecutionOperation(context.Context, ExecutionOperation) (ExecutionOperation, error)
 }
 
-// ExecutionLister is an optional extension for stores that support querying
-// all persisted executions. It is separate from ExecutionStore so existing
-// store implementations remain source-compatible.
-type ExecutionLister interface {
-	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
+// HistoryPurger is the narrow destructive history boundary. It removes only
+// terminal execution data; active execution metadata and lifetime counters are
+// outside its scope.
+type HistoryPurger interface {
+	Purge(context.Context, *time.Time, bool) (int, error)
 }
 
 const (
@@ -187,38 +203,47 @@ type ScheduleSnapshot struct {
 type Runner func(context.Context, config.EffectiveSchedule) ExecutionResult
 
 type Scheduler struct {
-	mu              sync.Mutex
-	cron            *cron.Cron
-	entries         map[string]cron.EntryID
-	schedules       map[string]config.EffectiveSchedule
-	disabled        map[string]bool
-	running         map[string]int
-	active          map[string]map[uint64]time.Time
-	activeCancels   map[string]context.CancelFunc
-	nextExecutionID uint64
-	historyRepo     HistoryRepository
-	historyLimit    int
-	executionWG     sync.WaitGroup
-	stopping        bool
-	started         bool
-	runner          Runner
-	ctx             context.Context
+	mu                 sync.Mutex
+	cron               *cron.Cron
+	entries            map[string]cron.EntryID
+	schedules          map[string]config.EffectiveSchedule
+	disabled           map[string]bool
+	running            map[string]int
+	active             map[string]map[uint64]time.Time
+	activeCancels      map[string]context.CancelFunc
+	nextExecutionID    uint64
+	executionStoreRepo ExecutionStore
+	historyReader      HistoryReader
+	historyPurger      HistoryPurger
+	historyPruner      historyPruner
+	historyClearer     historyClearer
+	historyLimit       int
+	executionWG        sync.WaitGroup
+	stopping           bool
+	started            bool
+	runner             Runner
+	ctx                context.Context
 }
 
 func New(runner Runner) *Scheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	repo := newMemoryHistoryRepository()
 	return &Scheduler{
-		cron:          cron.New(cron.WithParser(parser)),
-		entries:       map[string]cron.EntryID{},
-		schedules:     map[string]config.EffectiveSchedule{},
-		disabled:      map[string]bool{},
-		running:       map[string]int{},
-		active:        map[string]map[uint64]time.Time{},
-		activeCancels: map[string]context.CancelFunc{},
-		historyLimit:  defaultHistoryLimit,
-		historyRepo:   newMemoryHistoryRepository(),
-		runner:        runner,
-		ctx:           context.Background(),
+		cron:               cron.New(cron.WithParser(parser)),
+		entries:            map[string]cron.EntryID{},
+		schedules:          map[string]config.EffectiveSchedule{},
+		disabled:           map[string]bool{},
+		running:            map[string]int{},
+		active:             map[string]map[uint64]time.Time{},
+		activeCancels:      map[string]context.CancelFunc{},
+		historyLimit:       defaultHistoryLimit,
+		executionStoreRepo: repo,
+		historyReader:      repo,
+		historyPurger:      repo.(HistoryPurger),
+		historyPruner:      repo.(historyPruner),
+		historyClearer:     repo.(historyClearer),
+		runner:             runner,
+		ctx:                context.Background(),
 	}
 }
 
@@ -237,7 +262,11 @@ func (s *Scheduler) SetHistoryRepository(repo HistoryRepository) error {
 		}
 	}
 	s.mu.Lock()
-	s.historyRepo = repo
+	s.executionStoreRepo = repo
+	s.historyReader = repo
+	s.historyPurger, _ = repo.(HistoryPurger)
+	s.historyPruner, _ = repo.(historyPruner)
+	s.historyClearer, _ = repo.(historyClearer)
 	s.mu.Unlock()
 	return nil
 }
@@ -248,9 +277,9 @@ func (s *Scheduler) SetHistoryLimit(limit int) error {
 	}
 	s.mu.Lock()
 	s.historyLimit = limit
-	repo := s.historyRepo
+	pruner := s.historyPruner
 	s.mu.Unlock()
-	if pruner, ok := repo.(historyPruner); ok {
+	if pruner != nil {
 		return pruner.Prune(context.Background(), limit)
 	}
 	return nil
@@ -261,24 +290,24 @@ func (s *Scheduler) SetHistoryLimit(limit int) error {
 // are not copied into scheduler memory.
 func (s *Scheduler) RefreshHistorySummary(ctx context.Context) error {
 	s.mu.Lock()
-	repo := s.historyRepo
+	reader := s.historyReader
 	refs := make([]ScheduleRef, 0, len(s.schedules))
 	for _, schedule := range s.schedules {
 		refs = append(refs, ScheduleRef{Project: schedule.Project, Name: schedule.Name})
 	}
 	s.mu.Unlock()
-	_, err := repo.LatestSchedules(ctx, refs)
+	_, err := reader.LatestSchedules(ctx, refs)
 	return err
 }
 
 func (s *Scheduler) QueryHistory(ctx context.Context, query HistoryQuery) ([]Record, error) {
-	if query.Tail < 0 {
-		return nil, fmt.Errorf("history tail must be non-negative")
+	if query.Limit < 0 || query.Tail < 0 {
+		return nil, fmt.Errorf("history limit must be non-negative")
 	}
 	s.mu.Lock()
-	repo := s.historyRepo
+	reader := s.historyReader
 	s.mu.Unlock()
-	return repo.Query(ctx, query)
+	return reader.Query(ctx, query)
 }
 
 // RunCount returns the lifetime number of logical executions for a target.
@@ -312,9 +341,21 @@ func (s *Scheduler) RunCounts() map[string]uint64 {
 // scheduler state.
 func (s *Scheduler) HistoryCounters(ctx context.Context) (map[string]uint64, error) {
 	s.mu.Lock()
-	repo := s.historyRepo
+	reader := s.historyReader
 	s.mu.Unlock()
-	return repo.Counters(ctx)
+	return reader.Counters(ctx)
+}
+
+// PurgeHistory removes terminal execution metadata through the dedicated
+// history purger. Active execution rows, counters, and logs are unaffected.
+func (s *Scheduler) PurgeHistory(ctx context.Context, before *time.Time, all bool) (int, error) {
+	s.mu.Lock()
+	purger := s.historyPurger
+	s.mu.Unlock()
+	if purger == nil {
+		return 0, errors.New("history repository does not support purging")
+	}
+	return purger.Purge(ctx, before, all)
 }
 
 // RunCountFromCounters returns a target count from a batch loaded by
@@ -327,10 +368,9 @@ func RunCountFromCounters(counters map[string]uint64, targetType, project, targe
 // scheduler's runtime state.
 func (s *Scheduler) ClearHistory(ctx context.Context) error {
 	s.mu.Lock()
-	repo := s.historyRepo
+	clearer := s.historyClearer
 	s.mu.Unlock()
-	clearer, ok := repo.(historyClearer)
-	if !ok {
+	if clearer == nil {
 		return errors.New("history repository does not support clearing")
 	}
 	return clearer.Clear(ctx)
@@ -341,10 +381,10 @@ func (s *Scheduler) record(record Record) {
 		record.RunID = NewRunID()
 	}
 	s.mu.Lock()
-	repo := s.historyRepo
+	store := s.executionStoreRepo
 	limit := s.historyLimit
 	s.mu.Unlock()
-	if err := repo.Record(context.Background(), record, limit); err != nil {
+	if err := store.Record(context.Background(), record, limit); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: write execution history: %v\n", err)
 	}
 }
@@ -362,8 +402,7 @@ func (s *Scheduler) RecordExecution(record Record) {
 func (s *Scheduler) executionStore() ExecutionStore {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	store, _ := s.historyRepo.(ExecutionStore)
-	return store
+	return s.executionStoreRepo
 }
 
 func (s *Scheduler) BeginExecution(ctx context.Context, record Record, idempotencyKey string, configurationGeneration uint64) (Execution, bool, error) {
@@ -393,11 +432,7 @@ func (s *Scheduler) ListExecutions(ctx context.Context, query ExecutionQuery) ([
 	if store == nil {
 		return []Execution{}, nil
 	}
-	lister, ok := store.(ExecutionLister)
-	if !ok {
-		return []Execution{}, nil
-	}
-	return lister.ListExecutions(ctx, query)
+	return store.ListExecutions(ctx, query)
 }
 
 func (s *Scheduler) ListActiveExecutions(ctx context.Context) ([]Execution, error) {
@@ -820,7 +855,7 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 	disabled := make(map[string]bool, len(s.disabled))
 	active := make(map[string][]time.Time, len(s.active))
 	started := s.started
-	repo := s.historyRepo
+	reader := s.historyReader
 	refs := make([]ScheduleRef, 0, len(s.schedules))
 	for key, schedule := range s.schedules {
 		schedules[key] = schedule
@@ -839,11 +874,11 @@ func (s *Scheduler) ListSnapshots(ctx context.Context) ([]ScheduleSnapshot, erro
 	}
 	s.mu.Unlock()
 
-	counters, err := repo.Counters(ctx)
+	counters, err := reader.Counters(ctx)
 	if err != nil {
 		return nil, err
 	}
-	latest, err := repo.LatestSchedules(ctx, refs)
+	latest, err := reader.LatestSchedules(ctx, refs)
 	if err != nil {
 		return nil, err
 	}

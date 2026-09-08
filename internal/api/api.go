@@ -201,6 +201,7 @@ type ExecutionInfo struct {
 	Trigger                 *TriggerInfo `json:"trigger,omitempty"`
 	IdempotencyKey          string       `json:"idempotency_key,omitempty"`
 	ConfigurationGeneration uint64       `json:"configuration_generation,omitempty"`
+	RetriedFromRunID        string       `json:"retried_from_run_id,omitempty"`
 	CreatedAt               *time.Time   `json:"created_at,omitempty"`
 	StartedAt               *time.Time   `json:"started_at,omitempty"`
 	FinishedAt              *time.Time   `json:"finished_at,omitempty"`
@@ -208,6 +209,83 @@ type ExecutionInfo struct {
 	Error                   string       `json:"error,omitempty"`
 	StdoutPath              string       `json:"stdout_path,omitempty"`
 	StderrPath              string       `json:"stderr_path,omitempty"`
+}
+
+// HistoryInfo is the stable terminal-execution representation returned by
+// history.ls. It deliberately exposes operational columns and safe execution
+// metadata instead of scheduler's internal structs.
+type HistoryInfo struct {
+	RunID            string               `json:"run_id"`
+	Project          string               `json:"project"`
+	Name             string               `json:"name"`
+	TargetType       string               `json:"target_type"`
+	Target           string               `json:"target"`
+	Status           string               `json:"status"`
+	Trigger          *TriggerInfo         `json:"trigger,omitempty"`
+	RetriedFromRunID string               `json:"retried_from_run_id,omitempty"`
+	StartedAt        *time.Time           `json:"started_at,omitempty"`
+	FinishedAt       *time.Time           `json:"finished_at,omitempty"`
+	ExitCode         int                  `json:"exit_code"`
+	Error            string               `json:"error,omitempty"`
+	StdoutPath       string               `json:"stdout_path,omitempty"`
+	StderrPath       string               `json:"stderr_path,omitempty"`
+	Tasks            []HistoryTaskInfo    `json:"tasks,omitempty"`
+	Attempts         []HistoryAttemptInfo `json:"attempts,omitempty"`
+}
+
+type HistoryTaskInfo struct {
+	RunID          string               `json:"run_id"`
+	ParentRunID    string               `json:"parent_run_id,omitempty"`
+	Node           string               `json:"node,omitempty"`
+	Task           string               `json:"task"`
+	Command        string               `json:"command,omitempty"`
+	Args           []string             `json:"args,omitempty"`
+	WorkingDir     string               `json:"working_dir,omitempty"`
+	EnvKeys        []string             `json:"env_keys,omitempty"`
+	ArgsRedacted   bool                 `json:"args_redacted,omitempty"`
+	Status         string               `json:"status"`
+	StartedAt      *time.Time           `json:"started_at,omitempty"`
+	FinishedAt     *time.Time           `json:"finished_at,omitempty"`
+	ElapsedSeconds float64              `json:"elapsed_seconds,omitempty"`
+	ExitCode       int                  `json:"exit_code"`
+	Error          string               `json:"error,omitempty"`
+	Stderr         string               `json:"stderr,omitempty"`
+	StdoutPath     string               `json:"stdout_path,omitempty"`
+	StderrPath     string               `json:"stderr_path,omitempty"`
+	Attempts       []HistoryAttemptInfo `json:"attempts,omitempty"`
+}
+
+type HistoryAttemptInfo struct {
+	Number         int        `json:"number"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	ElapsedSeconds float64    `json:"elapsed_seconds,omitempty"`
+	ExitCode       int        `json:"exit_code"`
+	Error          string     `json:"error,omitempty"`
+	Stderr         string     `json:"stderr,omitempty"`
+}
+
+// HistoryDetail is returned by history.get/show. It includes the complete
+// workflow node/task and attempt records for the terminal run.
+type HistoryDetail struct {
+	HistoryInfo
+	Events     []ExecutionEventInfo     `json:"events,omitempty"`
+	Operations []ExecutionOperationInfo `json:"operations,omitempty"`
+}
+
+type ExecutionEventInfo struct {
+	Type      string     `json:"type"`
+	Status    string     `json:"status,omitempty"`
+	Details   string     `json:"details,omitempty"`
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+}
+
+type ExecutionOperationInfo struct {
+	Type        string     `json:"type"`
+	Status      string     `json:"status,omitempty"`
+	Error       string     `json:"error,omitempty"`
+	RequestedAt *time.Time `json:"requested_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 type ExecutionLogEntry struct {

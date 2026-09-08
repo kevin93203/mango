@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,67 +56,22 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	if err != nil || counters["task|demo|job"] != 1 {
 		t.Fatalf("counters = %+v, err=%v", counters, err)
 	}
-	listed, err := store.(scheduler.ExecutionLister).ListExecutions(context.Background(), scheduler.ExecutionQuery{
+	listed, err := store.(scheduler.ExecutionStore).ListExecutions(context.Background(), scheduler.ExecutionQuery{
 		Status: scheduler.StatusSuccess, Project: "demo", TargetType: "task", Target: "job", Limit: 10,
 	})
 	if err != nil || len(listed) != 1 || listed[0].Record.RunID != "durable-run" {
 		t.Fatalf("listed executions = %+v, err=%v", listed, err)
 	}
 
-	firstAttempt := scheduler.Attempt{Number: 1, Started: started, Finished: started.Add(100 * time.Millisecond), ExitCode: 0}
-	firstTask := scheduler.TaskRecord{RunID: "child-1", ParentRunID: "durable-run", Node: "job", Task: "job", Status: scheduler.StatusSuccess, Started: started, Finished: started.Add(100 * time.Millisecond), Attempts: []scheduler.Attempt{firstAttempt}}
-	first := loaded.Record
-	first.Attempts = []scheduler.Attempt{firstAttempt}
-	first.Tasks = []scheduler.TaskRecord{firstTask}
-	if err := repository.Record(context.Background(), first, 0); err != nil {
-		t.Fatal(err)
+	mutated := loaded.Record
+	mutated.Attempts = []scheduler.Attempt{{Number: 1, Started: started, Finished: started.Add(100 * time.Millisecond)}}
+	if err := repository.Record(context.Background(), mutated, 0); !errors.Is(err, scheduler.ErrTerminalExecutionImmutable) {
+		t.Fatalf("terminal child mutation = %v, want immutable error", err)
 	}
-	retryQueued := first
-	retryQueued.Status = scheduler.StatusQueued
-	retryQueued.Finished = time.Time{}
-	retryQueued.Attempts = nil
-	retryQueued.Tasks = nil
-	if err := store.UpdateExecution(context.Background(), retryQueued); err != nil {
-		t.Fatal(err)
-	}
-	retryRunning := retryQueued
-	retryRunning.Status = scheduler.StatusRunning
-	if err := store.UpdateExecution(context.Background(), retryRunning); err != nil {
-		t.Fatal(err)
-	}
-	secondAttempt := firstAttempt
-	secondAttempt.Number = 1
-	secondAttempt.ExitCode = 1
-	secondAttempt.Error = "retry failed"
-	secondTask := firstTask
-	secondTask.RunID = "child-2"
-	secondTask.Status = scheduler.StatusFailed
-	secondTask.ExitCode = 1
-	secondTask.Error = "retry failed"
-	secondTask.Attempts = []scheduler.Attempt{secondAttempt}
-	retried := retryRunning
-	retried.Status = scheduler.StatusFailed
-	retried.Finished = started.Add(2 * time.Second)
-	retried.ExitCode = 1
-	retried.Error = "retry failed"
-	retried.Attempts = []scheduler.Attempt{secondAttempt}
-	retried.Tasks = []scheduler.TaskRecord{secondTask}
-	if err := repository.Record(context.Background(), retried, 0); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err = store.GetExecution(context.Background(), "durable-run")
-	if err != nil || len(loaded.Record.Attempts) != 2 || len(loaded.Record.Tasks) != 2 {
-		t.Fatalf("retry history = attempts %d tasks %d err=%v, want both logical attempts", len(loaded.Record.Attempts), len(loaded.Record.Tasks), err)
-	}
-	counters, err = repository.Counters(context.Background())
-	if err != nil || counters["task|demo|job"] != 2 {
-		t.Fatalf("retry counters = %+v, err=%v", counters, err)
-	}
-	listed, err = store.(scheduler.ExecutionLister).ListExecutions(context.Background(), scheduler.ExecutionQuery{
-		Status: scheduler.StatusFailed, Limit: 1,
-	})
-	if err != nil || len(listed) != 1 || listed[0].Record.RunID != "durable-run" || listed[0].Record.Status != scheduler.StatusFailed {
-		t.Fatalf("failed executions = %+v, err=%v", listed, err)
+	active := loaded.Record
+	active.Status = scheduler.StatusQueued
+	if err := store.UpdateExecution(context.Background(), active); !errors.Is(err, scheduler.ErrExecutionTransition) {
+		t.Fatalf("terminal to active transition = %v, want transition error", err)
 	}
 
 	for _, model := range []interface{}{&schemaVersionModel{}, &eventModel{}, &operationModel{}} {

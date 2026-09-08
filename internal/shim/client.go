@@ -23,7 +23,7 @@ import (
 	"github.com/kevin93203/mango/internal/paths"
 )
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 var (
 	ErrUnavailable = errors.New("mango-shim is unavailable")

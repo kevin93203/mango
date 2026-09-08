@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +54,7 @@ type runModel struct {
 	StderrPath              string `gorm:"type:text"`
 	IdempotencyKey          string `gorm:"index;size:255"`
 	ConfigurationGeneration uint64
+	RetriedFromRunID        *string   `gorm:"index:idx_history_runs_retried_from_run_id;size:255"`
 	CreatedAt               time.Time `gorm:"index"`
 	UpdatedAt               time.Time
 }
@@ -139,7 +139,7 @@ type operationModel struct {
 
 func (operationModel) TableName() string { return "execution_operations" }
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 func Open(config Config) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
@@ -277,6 +277,21 @@ func applyMigration(db *gorm.DB, version int) error {
 			}
 		}
 		return nil
+	case 3:
+		if !migrator.HasTable(&runModel{}) {
+			return errors.New("history_runs table is missing")
+		}
+		if !migrator.HasColumn(&runModel{}, "RetriedFromRunID") {
+			if err := migrator.AddColumn(&runModel{}, "RetriedFromRunID"); err != nil {
+				return fmt.Errorf("add history_runs.retried_from_run_id: %w", err)
+			}
+		}
+		if !migrator.HasIndex(&runModel{}, "idx_history_runs_retried_from_run_id") {
+			if err := migrator.CreateIndex(&runModel{}, "idx_history_runs_retried_from_run_id"); err != nil {
+				return fmt.Errorf("index history_runs.retried_from_run_id: %w", err)
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown history migration %d", version)
 	}
@@ -313,6 +328,9 @@ func backupBeforeMigration(path string) error {
 }
 
 func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit int) error {
+	if record.Status == "" {
+		record.Status = statusForCompletedRecord(record)
+	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
 
@@ -339,6 +357,13 @@ func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit 
 		}
 		return r.prune(tx, limit)
 	})
+}
+
+func statusForCompletedRecord(record scheduler.Record) string {
+	if record.Error != "" || record.ExitCode != 0 {
+		return scheduler.StatusFailed
+	}
+	return scheduler.StatusSuccess
 }
 
 func (r *Repository) saveRecord(tx *gorm.DB, record scheduler.Record) (runModel, bool, string, error) {
@@ -368,13 +393,44 @@ func (r *Repository) saveRecord(tx *gorm.DB, record scheduler.Record) (runModel,
 		return run, false, previousStatus, err
 	} else {
 		previousStatus = existing.Status
-		replaceChildren := isTerminalStatus(existing.Status) && isTerminalStatus(record.Status)
+		if isTerminalStatus(existing.Status) {
+			previous, err := recordFromModel(existing)
+			if err != nil {
+				return run, false, previousStatus, err
+			}
+			if scheduler.IsActiveStatus(record.Status) {
+				return run, false, previousStatus, scheduler.ErrExecutionTransition
+			}
+			if record.IdempotencyKey == "" {
+				record.IdempotencyKey = previous.IdempotencyKey
+			}
+			if record.ConfigurationGeneration == 0 {
+				record.ConfigurationGeneration = previous.ConfigurationGeneration
+			}
+			if record.RetriedFromRunID == "" {
+				record.RetriedFromRunID = previous.RetriedFromRunID
+			}
+			if detailed, loadErr := r.loadRecordsFromDB(context.Background(), tx, []runModel{existing}, scheduler.HistoryQuery{}); loadErr != nil {
+				return run, false, previousStatus, loadErr
+			} else if len(detailed) == 1 {
+				previous = detailed[0]
+			}
+			if !scheduler.SameTerminalRecord(previous, record) {
+				return run, false, previousStatus, scheduler.ErrTerminalExecutionImmutable
+			}
+			// Identical terminal writes are idempotent. In particular, do not
+			// duplicate task/attempt/event rows or touch retention state.
+			return existing, false, previousStatus, nil
+		}
 		run.ID = existing.ID
 		if run.IdempotencyKey == "" {
 			run.IdempotencyKey = existing.IdempotencyKey
 		}
 		if run.ConfigurationGeneration == 0 {
 			run.ConfigurationGeneration = existing.ConfigurationGeneration
+		}
+		if run.RetriedFromRunID == nil {
+			run.RetriedFromRunID = existing.RetriedFromRunID
 		}
 		if run.CreatedAt.IsZero() {
 			run.CreatedAt = existing.CreatedAt
@@ -387,15 +443,14 @@ func (r *Repository) saveRecord(tx *gorm.DB, record scheduler.Record) (runModel,
 			"exit_code": run.ExitCode, "error": run.Error, "stderr": run.Stderr,
 			"stdout_path": run.StdoutPath, "stderr_path": run.StderrPath,
 			"idempotency_key": run.IdempotencyKey, "configuration_generation": run.ConfigurationGeneration,
-			"created_at": run.CreatedAt, "updated_at": run.UpdatedAt,
+			"retried_from_run_id": run.RetriedFromRunID,
+			"created_at":          run.CreatedAt, "updated_at": run.UpdatedAt,
 		}).Error; err != nil {
 			return run, false, previousStatus, err
 		}
-		// Keep child rows while a logical run is active, and also when a
-		// terminal run is moved back to queued/running for an administrative
-		// retry. A terminal-to-terminal write is a replacement of the latest
-		// snapshot and can safely rebuild the child rows.
-		if replaceChildren {
+		// Replacing child rows is allowed only while the execution is active.
+		// A terminal snapshot is the first and final child snapshot.
+		if len(record.Tasks) > 0 || len(record.Attempts) > 0 {
 			var taskIDs []int64
 			if err := tx.Model(&taskModel{}).Where("run_row_id = ?", run.ID).Pluck("id", &taskIDs).Error; err != nil {
 				return run, false, previousStatus, err
@@ -505,6 +560,7 @@ func recordFromModel(run runModel) (scheduler.Record, error) {
 		Status:  run.Status, Started: run.Started, Finished: run.Finished, ExitCode: run.ExitCode,
 		Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath,
 		IdempotencyKey: run.IdempotencyKey, ConfigurationGeneration: run.ConfigurationGeneration,
+		RetriedFromRunID: stringValue(run.RetriedFromRunID),
 	}, nil
 }
 
@@ -587,6 +643,8 @@ func (r *Repository) ListExecutions(ctx context.Context, query scheduler.Executi
 	db := r.db.WithContext(ctx).Model(&runModel{})
 	if query.Status != "" {
 		db = db.Where("status = ?", query.Status)
+	} else if !query.All {
+		db = db.Where("status IN ?", []string{scheduler.StatusQueued, scheduler.StatusRunning})
 	}
 	if query.TriggerType != "" {
 		db = db.Where("trigger_type = ?", query.TriggerType)
@@ -750,6 +808,65 @@ func (r *Repository) Clear(ctx context.Context) error {
 	})
 }
 
+// Purge removes terminal executions and their metadata while leaving active
+// runs, lifetime counters, and log files untouched. A nil before is valid
+// only when all is true.
+func (r *Repository) Purge(ctx context.Context, before *time.Time, all bool) (int, error) {
+	if !all && before == nil {
+		return 0, errors.New("history purge requires before or all")
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	removed := 0
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		statuses := []string{scheduler.StatusSuccess, scheduler.StatusFailed, scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted}
+		query := tx.Model(&runModel{}).Where("status IN ?", statuses)
+		if !all {
+			query = query.Where("finished < ?", *before)
+		}
+		var runs []runModel
+		if err := query.Find(&runs).Error; err != nil {
+			return err
+		}
+		if len(runs) == 0 {
+			return nil
+		}
+		ids := make([]int64, 0, len(runs))
+		runIDs := make([]string, 0, len(runs))
+		for _, run := range runs {
+			ids = append(ids, run.ID)
+			runIDs = append(runIDs, run.RunID)
+		}
+		var taskIDs []int64
+		if err := tx.Model(&taskModel{}).Where("run_row_id IN ?", ids).Pluck("id", &taskIDs).Error; err != nil {
+			return err
+		}
+		if len(taskIDs) > 0 {
+			if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&attemptModel{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("run_row_id IN ?", ids).Delete(&attemptModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&operationModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_row_id IN ?", ids).Delete(&taskModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", ids).Delete(&runModel{}).Error; err != nil {
+			return err
+		}
+		removed = len(ids)
+		return nil
+	})
+	return removed, err
+}
+
 func counterIncrementExpression(db *gorm.DB) clause.Expr {
 	table := db.Statement.Quote((counterModel{}).TableName())
 	column := db.Statement.Quote("value")
@@ -765,10 +882,19 @@ func (r *Repository) Prune(ctx context.Context, limit int) error {
 }
 
 func (r *Repository) Query(ctx context.Context, query scheduler.HistoryQuery) ([]scheduler.Record, error) {
-	if query.Tail < 0 {
-		return nil, errors.New("history tail must be non-negative")
+	limit := query.Limit
+	if limit == 0 {
+		limit = query.Tail
 	}
-	db := r.db.WithContext(ctx).Model(&runModel{})
+	if limit < 0 {
+		return nil, errors.New("history limit must be non-negative")
+	}
+	db := r.db.WithContext(ctx).Model(&runModel{}).Where("status IN ?", []string{
+		scheduler.StatusSuccess, scheduler.StatusFailed, scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted,
+	})
+	if query.Status != "" {
+		db = db.Where("status = ?", query.Status)
+	}
 	if query.TriggerType != "" {
 		db = db.Where("trigger_type = ?", query.TriggerType)
 	}
@@ -780,10 +906,14 @@ func (r *Repository) Query(ctx context.Context, query scheduler.HistoryQuery) ([
 	}
 
 	var taskRunIDs []int64
-	if query.TargetType == "task" || (query.TargetType == "" && query.Name != "") {
+	name := query.Target
+	if name == "" {
+		name = query.Name
+	}
+	if query.TargetType == "task" || (query.TargetType == "" && name != "") {
 		taskDB := r.db.WithContext(ctx).Model(&taskModel{}).Select("run_row_id")
-		if query.Name != "" {
-			taskDB = taskDB.Where("task = ?", query.Name)
+		if name != "" {
+			taskDB = taskDB.Where("task = ?", name)
 		}
 		if query.Project != "" {
 			taskDB = taskDB.Joins("JOIN history_runs ON history_runs.id = history_tasks.run_row_id").Where("history_runs.project = ?", query.Project)
@@ -796,37 +926,28 @@ func (r *Repository) Query(ctx context.Context, query scheduler.HistoryQuery) ([
 	switch query.TargetType {
 	case "workflow":
 		db = db.Where("target_type = ?", "workflow")
-		if query.Name != "" {
-			db = db.Where("target = ?", query.Name)
+		if name != "" {
+			db = db.Where("target = ?", name)
 		}
 	case "task":
-		if query.Name == "" {
+		if name == "" {
 			db = db.Where("target_type = ? OR id IN ?", "task", taskRunIDs)
 		} else {
-			db = db.Where("(target_type = ? AND target = ?) OR id IN ?", "task", query.Name, taskRunIDs)
+			db = db.Where("(target_type = ? AND target = ?) OR id IN ?", "task", name, taskRunIDs)
 		}
 	case "":
-		if query.Name != "" {
-			db = db.Where("target = ? OR id IN ?", query.Name, taskRunIDs)
+		if name != "" {
+			db = db.Where("target = ? OR id IN ?", name, taskRunIDs)
 		}
 	}
 
-	order := "started ASC, id ASC"
-	if query.Tail > 0 {
-		order = "started DESC, id DESC"
-		db = db.Limit(query.Tail)
+	order := "started DESC, id DESC"
+	if limit > 0 {
+		db = db.Limit(limit)
 	}
 	var runs []runModel
 	if err := db.Order(order).Find(&runs).Error; err != nil {
 		return nil, err
-	}
-	if query.Tail > 0 {
-		sort.Slice(runs, func(i, j int) bool {
-			if runs[i].Started.Equal(runs[j].Started) {
-				return runs[i].ID < runs[j].ID
-			}
-			return runs[i].Started.Before(runs[j].Started)
-		})
 	}
 	return r.loadRecords(ctx, runs, query)
 }
@@ -891,8 +1012,9 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 	if limit <= 0 {
 		return nil
 	}
+	statuses := []string{scheduler.StatusSuccess, scheduler.StatusFailed, scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted}
 	var boundary runModel
-	err := tx.Model(&runModel{}).Order("started DESC, id DESC").Offset(limit).First(&boundary).Error
+	err := tx.Model(&runModel{}).Where("status IN ?", statuses).Order("finished DESC, id DESC").Offset(limit).First(&boundary).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
@@ -900,8 +1022,8 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 		return err
 	}
 	var ids []int64
-	if err := tx.Model(&runModel{}).
-		Where("started < ? OR (started = ? AND id <= ?)", boundary.Started, boundary.Started, boundary.ID).
+	if err := tx.Model(&runModel{}).Where("status IN ?", statuses).
+		Where("finished < ? OR (finished = ? AND id <= ?)", boundary.Finished, boundary.Finished, boundary.ID).
 		Pluck("id", &ids).Error; err != nil {
 		return err
 	}
@@ -920,25 +1042,42 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 	if err := tx.Where("run_row_id IN ?", ids).Delete(&taskModel{}).Error; err != nil {
 		return err
 	}
+	var runIDs []string
+	if err := tx.Model(&runModel{}).Where("id IN ?", ids).Pluck("run_id", &runIDs).Error; err != nil {
+		return err
+	}
+	if len(runIDs) > 0 {
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&operationModel{}).Error; err != nil {
+			return err
+		}
+	}
 	return tx.Where("id IN ?", ids).Delete(&runModel{}).Error
 }
 
 func (r *Repository) loadRecords(ctx context.Context, runs []runModel, query scheduler.HistoryQuery) ([]scheduler.Record, error) {
+	return r.loadRecordsFromDB(ctx, r.db, runs, query)
+}
+
+func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []runModel, query scheduler.HistoryQuery) ([]scheduler.Record, error) {
 	if len(runs) == 0 {
 		return []scheduler.Record{}, nil
 	}
+	db = db.WithContext(ctx)
 	runIDs := make([]int64, 0, len(runs))
 	for _, run := range runs {
 		runIDs = append(runIDs, run.ID)
 	}
 	var tasks []taskModel
-	taskDB := r.db.WithContext(ctx).Where("run_row_id IN ?", runIDs)
+	taskDB := db.Where("run_row_id IN ?", runIDs)
 	if err := taskDB.Order("started ASC, id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 
 	var attempts []attemptModel
-	if err := r.db.WithContext(ctx).Where("run_row_id IN ?", runIDs).Order("started ASC, id ASC").Find(&attempts).Error; err != nil {
+	if err := db.Where("run_row_id IN ?", runIDs).Order("started ASC, id ASC").Find(&attempts).Error; err != nil {
 		return nil, err
 	}
 	attemptsByTask := make(map[int64][]scheduler.Attempt)
@@ -958,10 +1097,15 @@ func (r *Repository) loadRecords(ctx context.Context, runs []runModel, query sch
 			Status:  run.Status, Started: run.Started, Finished: run.Finished, ExitCode: run.ExitCode,
 			Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath,
 			IdempotencyKey: run.IdempotencyKey, ConfigurationGeneration: run.ConfigurationGeneration,
-			Attempts: cloneAttempts(attemptsByTask[0]),
+			RetriedFromRunID: stringValue(run.RetriedFromRunID),
+			Attempts:         cloneAttempts(attemptsByTask[0]),
 		}
 		for _, task := range tasksByRun[run.ID] {
-			if query.TargetType == "task" && query.Name != "" && run.TargetType == "workflow" && task.Task != query.Name {
+			name := query.Target
+			if name == "" {
+				name = query.Name
+			}
+			if query.TargetType == "task" && name != "" && run.TargetType == "workflow" && task.Task != name {
 				continue
 			}
 			record.Tasks = append(record.Tasks, scheduler.TaskRecord{
@@ -986,7 +1130,22 @@ func runModelFromRecord(record scheduler.Record) runModel {
 		Status: record.Status, Started: record.Started, Finished: record.Finished, ExitCode: record.ExitCode,
 		Error: record.Error, Stderr: record.Stderr, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
 		IdempotencyKey: record.IdempotencyKey, ConfigurationGeneration: record.ConfigurationGeneration,
+		RetriedFromRunID: stringPointer(record.RetriedFromRunID),
 	}
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func taskModelFromRecord(runID int64, task scheduler.TaskRecord) taskModel {

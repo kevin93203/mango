@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -473,11 +474,15 @@ func TestV3SchedulesTriggerTasksAndWorkflows(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
-	content := `version: 3
+	taskSpec := "    command: echo"
+	if runtime.GOOS == "windows" {
+		taskSpec = "    command: cmd\n    args: [\"/C\", \"echo\"]"
+	}
+	content := fmt.Sprintf(`version: 3
 
 tasks:
   extract:
-    command: echo
+%s
 
 workflows:
   pipeline:
@@ -494,7 +499,8 @@ schedules:
     cron: "* * * * *"
     target_type: workflow
     target: pipeline
-`
+
+`, taskSpec)
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -760,15 +766,18 @@ func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	}
 	d.scheduler.Wait()
 
-	request, err := ipc.NewRequest("schedule.history", nil)
+	request, err := ipc.NewRequest("history.ls", struct {
+		Limit    int  `json:"limit"`
+		Attempts bool `json:"attempts"`
+	}{Limit: 1, Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := d.Handle(context.Background(), request)
 	if !response.OK {
-		t.Fatalf("schedule.history failed: %+v", response.Error)
+		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.Record
+	var records []api.HistoryInfo
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
@@ -780,68 +789,13 @@ func TestScheduleHistoryIncludesAttempts(t *testing.T) {
 	}
 }
 
-func TestHistoryClearIPCRemovesListStatistics(t *testing.T) {
+func TestRemovedHistoryEndpoints(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
-	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	if err := d.scheduler.Apply([]config.EffectiveSchedule{{
-		Project: "demo", Name: "job", Cron: "* * * * *", Timezone: time.UTC,
-		TargetType: "task", Target: "job",
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	d.scheduler.RecordExecution(scheduler.Record{
-		RunID: "run-1", Project: "demo", Name: "job", TargetType: "task", Target: "job",
-		Trigger: scheduler.ScheduleTrigger("job"), Status: scheduler.StatusSuccess,
-		Started: started, Finished: started.Add(time.Second),
-	})
-
-	request, err := ipc.NewRequest("schedule.ls", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := d.Handle(context.Background(), request)
-	if !response.OK {
-		t.Fatalf("schedule.ls before clear failed: %+v", response.Error)
-	}
-	var schedules []api.ScheduleInfo
-	if err := decodeTestData(response.Data, &schedules); err != nil {
-		t.Fatal(err)
-	}
-	if len(schedules) != 1 || schedules[0].Runs != 1 || schedules[0].LastRun == nil {
-		t.Fatalf("schedule list before clear = %+v, want persisted statistics", schedules)
-	}
-
-	request, err = ipc.NewRequest("history.clear", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response = d.Handle(context.Background(), request)
-	if !response.OK {
-		t.Fatalf("history.clear failed: %+v", response.Error)
-	}
-
-	response = d.Handle(context.Background(), requestForMethod(t, "schedule.ls"))
-	if !response.OK {
-		t.Fatalf("schedule.ls after clear failed: %+v", response.Error)
-	}
-	if err := decodeTestData(response.Data, &schedules); err != nil {
-		t.Fatal(err)
-	}
-	if len(schedules) != 1 || schedules[0].Runs != 0 || schedules[0].Status != scheduler.StatusIdle || schedules[0].LastRun != nil || schedules[0].DurationSeconds != nil {
-		t.Fatalf("schedule list after clear = %+v, want empty history statistics", schedules)
-	}
-
-	request = requestForMethod(t, "history.ls")
-	response = d.Handle(context.Background(), request)
-	if !response.OK {
-		t.Fatalf("history.ls after clear failed: %+v", response.Error)
-	}
-	var records []scheduler.Record
-	if err := decodeTestData(response.Data, &records); err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("history after clear = %+v, want empty", records)
+	for _, method := range []string{"history.clear", "schedule.history"} {
+		response := d.Handle(context.Background(), requestForMethod(t, method))
+		if response.OK || response.Error == nil || response.Error.Code != "METHOD_NOT_FOUND" {
+			t.Fatalf("%s response = %+v, want METHOD_NOT_FOUND", method, response)
+		}
 	}
 }
 
@@ -908,32 +862,6 @@ func TestTaskAndWorkflowListsReadCountersFromRepository(t *testing.T) {
 		t.Fatalf("workflow list before clear = %+v, want persisted statistics", workflows)
 	}
 
-	response = d.Handle(context.Background(), requestForMethod(t, "history.clear"))
-	if !response.OK {
-		t.Fatalf("history.clear failed: %+v", response.Error)
-	}
-
-	response = d.Handle(context.Background(), requestForMethod(t, "task.ls"))
-	if !response.OK {
-		t.Fatalf("task.ls after clear failed: %+v", response.Error)
-	}
-	if err := decodeTestData(response.Data, &tasks); err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks) != 1 || tasks[0].Runs != 0 || tasks[0].Status != workflow.StatusIdle || tasks[0].LastRun != nil || tasks[0].DurationSeconds != nil {
-		t.Fatalf("task list after clear = %+v, want empty history statistics", tasks)
-	}
-
-	response = d.Handle(context.Background(), requestForMethod(t, "workflow.ls"))
-	if !response.OK {
-		t.Fatalf("workflow.ls after clear failed: %+v", response.Error)
-	}
-	if err := decodeTestData(response.Data, &workflows); err != nil {
-		t.Fatal(err)
-	}
-	if len(workflows) != 1 || workflows[0].Runs != 0 || workflows[0].Status != workflow.StatusIdle || workflows[0].LastRun != nil || workflows[0].DurationSeconds != nil {
-		t.Fatalf("workflow list after clear = %+v, want empty history statistics", workflows)
-	}
 }
 
 func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
@@ -955,9 +883,10 @@ func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	})
 
 	request, err := ipc.NewRequest("history.ls", struct {
-		Tail       int    `json:"tail"`
+		Limit      int    `json:"limit"`
 		TargetType string `json:"target_type"`
-	}{Tail: 1, TargetType: "workflow"})
+		Attempts   bool   `json:"attempts"`
+	}{Limit: 1, TargetType: "workflow", Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,7 +894,7 @@ func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.Record
+	var records []api.HistoryInfo
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
@@ -976,8 +905,9 @@ func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	request, err = ipc.NewRequest("history.ls", struct {
 		TargetType string `json:"target_type"`
 		Target     string `json:"target"`
-		Tail       int    `json:"tail"`
-	}{TargetType: "workflow", Target: "demo/old", Tail: 10})
+		Limit      int    `json:"limit"`
+		Attempts   bool   `json:"attempts"`
+	}{TargetType: "workflow", Target: "demo/old", Limit: 10, Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,14 +923,14 @@ func TestHistoryListFiltersWorkflowRunsAndPreservesTasks(t *testing.T) {
 	}
 
 	request, err = ipc.NewRequest("history.ls", struct {
-		Tail int `json:"tail"`
-	}{Tail: -1})
+		Limit int `json:"limit"`
+	}{Limit: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
-		t.Fatalf("negative tail response = %+v, want BAD_PARAMS", response)
+		t.Fatalf("negative history limit response = %+v, want BAD_PARAMS", response)
 	}
 }
 
@@ -1029,9 +959,10 @@ func TestHistoryListTaskFilterIncludesDirectAndWorkflowRuns(t *testing.T) {
 	})
 
 	request, err := ipc.NewRequest("history.ls", struct {
-		Tail       int    `json:"tail"`
+		Limit      int    `json:"limit"`
 		TargetType string `json:"target_type"`
-	}{Tail: 2, TargetType: "task"})
+		Attempts   bool   `json:"attempts"`
+	}{Limit: 2, TargetType: "task", Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1039,25 +970,26 @@ func TestHistoryListTaskFilterIncludesDirectAndWorkflowRuns(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.Record
+	var records []api.HistoryInfo
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || records[0].TargetType != "workflow" || records[1].TargetType != "task" {
-		t.Fatalf("records = %+v, want workflow and newest direct runs", records)
+	if len(records) != 2 || records[0].TargetType != "task" || records[1].TargetType != "workflow" {
+		t.Fatalf("records = %+v, want newest direct run followed by workflow run", records)
 	}
-	if records[0].Target != "pipeline" || len(records[0].Tasks) != 1 || records[0].Tasks[0].Task != "compile" || len(records[0].Tasks[0].Attempts) != 1 {
-		t.Fatalf("workflow task record = %+v, want task and attempt details", records[0])
+	if records[1].Target != "pipeline" || len(records[1].Tasks) != 1 || records[1].Tasks[0].Task != "compile" || len(records[1].Tasks[0].Attempts) != 1 {
+		t.Fatalf("workflow task record = %+v, want task and attempt details", records[1])
 	}
-	if records[0].Tasks[0].Command != "compiler" || records[0].Tasks[0].WorkingDir != "/workspace" || len(records[0].Tasks[0].EnvKeys) != 1 {
-		t.Fatalf("workflow task metadata = %+v, want projected execution metadata", records[0].Tasks)
+	if records[1].Tasks[0].Command != "compiler" || records[1].Tasks[0].WorkingDir != "/workspace" || len(records[1].Tasks[0].EnvKeys) != 1 {
+		t.Fatalf("workflow task metadata = %+v, want projected execution metadata", records[1].Tasks)
 	}
 
 	request, err = ipc.NewRequest("history.ls", struct {
 		TargetType string `json:"target_type"`
 		Target     string `json:"target"`
-		Tail       int    `json:"tail"`
-	}{TargetType: "task", Target: "demo/compile", Tail: 10})
+		Limit      int    `json:"limit"`
+		Attempts   bool   `json:"attempts"`
+	}{TargetType: "task", Target: "demo/compile", Limit: 10, Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,14 +1008,14 @@ func TestHistoryListTaskFilterIncludesDirectAndWorkflowRuns(t *testing.T) {
 	}
 
 	request, err = ipc.NewRequest("history.ls", struct {
-		Tail int `json:"tail"`
-	}{Tail: -1})
+		Limit int `json:"limit"`
+	}{Limit: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
-		t.Fatalf("negative history tail response = %+v, want BAD_PARAMS", response)
+		t.Fatalf("negative history limit response = %+v, want BAD_PARAMS", response)
 	}
 }
 
@@ -1100,7 +1032,8 @@ func TestHistoryTaskTargetFiltersWorkflowNodes(t *testing.T) {
 	request, err := ipc.NewRequest("history.ls", struct {
 		TargetType string `json:"target_type"`
 		Target     string `json:"target"`
-	}{TargetType: "task", Target: "demo/compile"})
+		Attempts   bool   `json:"attempts"`
+	}{TargetType: "task", Target: "demo/compile", Attempts: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1108,7 +1041,7 @@ func TestHistoryTaskTargetFiltersWorkflowNodes(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.Record
+	var records []api.HistoryInfo
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
@@ -1137,8 +1070,8 @@ func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
 	request, err := ipc.NewRequest("history.ls", struct {
 		TriggerType string `json:"trigger_type"`
 		Trigger     string `json:"trigger"`
-		Tail        int    `json:"tail"`
-	}{TriggerType: scheduler.TriggerSchedule, Trigger: "nightly", Tail: 10})
+		Limit       int    `json:"limit"`
+	}{TriggerType: scheduler.TriggerSchedule, Trigger: "nightly", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1146,7 +1079,7 @@ func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("filtered history.ls failed: %+v", response.Error)
 	}
-	var records []scheduler.Record
+	var records []api.HistoryInfo
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
@@ -1154,27 +1087,19 @@ func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
 		t.Fatalf("filtered records = %+v, want named schedule run", records)
 	}
 
-	request, err = ipc.NewRequest("schedule.history", struct {
-		Tail int `json:"tail"`
-	}{Tail: 10})
+	request, err = ipc.NewRequest("schedule.history", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response = d.Handle(context.Background(), request)
-	if !response.OK {
-		t.Fatalf("schedule.history failed: %+v", response.Error)
-	}
-	if err := decodeTestData(response.Data, &records); err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 1 || records[0].Trigger.Type != scheduler.TriggerSchedule {
-		t.Fatalf("schedule history = %+v, want schedule trigger only", records)
+	if response.OK || response.Error == nil || response.Error.Code != "METHOD_NOT_FOUND" {
+		t.Fatalf("schedule.history response = %+v, want METHOD_NOT_FOUND", response)
 	}
 
 	request, err = ipc.NewRequest("history.ls", struct {
 		TriggerType string `json:"trigger_type"`
-		Tail        int    `json:"tail"`
-	}{TriggerType: scheduler.TriggerWebhook, Tail: 10})
+		Limit       int    `json:"limit"`
+	}{TriggerType: scheduler.TriggerWebhook, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1185,7 +1110,7 @@ func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
 	if err := decodeTestData(response.Data, &records); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Trigger.EventID != "evt-1" {
+	if len(records) != 1 || records[0].Trigger == nil || records[0].Trigger.EventID != "evt-1" {
 		t.Fatalf("webhook history = %+v, want event id", records)
 	}
 }
@@ -1647,31 +1572,39 @@ func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
 	readyPath := filepath.Join(root, "ready")
-	content := `version: 3
+	serviceCommand := "sh"
+	serviceArgs := `["-c", "sleep 2"]`
+	healthTest := `[CMD, test, -f, ready]`
+	if runtime.GOOS == "windows" {
+		serviceCommand = "cmd"
+		serviceArgs = `["/C", "ping -n 3 127.0.0.1 >NUL"]`
+		healthTest = `[CMD-SHELL, "if exist ready (exit 0) else (exit 1)"]`
+	}
+	content := fmt.Sprintf(`version: 3
 
 defaults:
   working_dir: .
 
 services:
   db:
-    command: sh
-    args: ["-c", "sleep 2"]
+    command: %s
+    args: %s
     autostart: true
     restart: never
     healthcheck:
-      test: [CMD, test, -f, ready]
+      test: %s
       interval: 5ms
       timeout: 100ms
       retries: 1
   web:
-    command: sh
-    args: ["-c", "sleep 2"]
+    command: %s
+    args: %s
     autostart: true
     restart: never
     depends_on:
       db:
         condition: service_healthy
-`
+`, serviceCommand, serviceArgs, healthTest, serviceCommand, serviceArgs)
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1734,25 +1667,37 @@ func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
+	serviceCommand := "sh"
+	serviceArgs := func(argument string) string { return fmt.Sprintf(`["-c", "sleep %s"]`, argument) }
+	if runtime.GOOS == "windows" {
+		serviceCommand = "cmd"
+		serviceArgs = func(argument string) string {
+			count := "4"
+			if argument == "4" {
+				count = "5"
+			}
+			return fmt.Sprintf(`["/C", "ping -n %s 127.0.0.1 >NUL"]`, count)
+		}
+	}
 	writeDependentConfig := func(argument string) {
 		content := fmt.Sprintf(`version: 3
 
 services:
   db:
-    command: sh
-    args: ["-c", "sleep %s"]
+    command: %s
+    args: %s
     autostart: true
     restart: never
   web:
-    command: sh
-    args: ["-c", "sleep 3"]
+    command: %s
+    args: %s
     autostart: true
     restart: never
     depends_on:
       db:
         condition: service_started
         restart: true
-`, argument)
+`, serviceCommand, serviceArgs(argument), serviceCommand, serviceArgs("3"))
 		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}

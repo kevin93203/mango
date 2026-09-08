@@ -128,13 +128,15 @@ type logRequest struct {
 }
 
 type historyRequest struct {
-	Tail        int    `json:"tail"`
+	Limit       int    `json:"limit"`
+	Status      string `json:"status"`
 	TriggerType string `json:"trigger_type"`
 	Trigger     string `json:"trigger"`
 	TargetType  string `json:"target_type"`
 	Target      string `json:"target"`
 	Project     string `json:"project"`
 	Name        string `json:"name"`
+	Attempts    bool   `json:"attempts"`
 }
 
 type executionTargetRequest struct {
@@ -162,6 +164,7 @@ type executionListRequest struct {
 	TargetType  string `json:"target_type"`
 	Target      string `json:"target"`
 	Limit       int    `json:"limit"`
+	All         bool   `json:"all"`
 }
 
 type serviceBulkRequest struct {
@@ -2610,7 +2613,7 @@ func executionTaskLogName(invocation workflow.Invocation, taskName string) strin
 }
 
 func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
-	if request.Version != 1 {
+	if request.Version != ipc.ProtocolVersion {
 		return failure(request, "UNSUPPORTED_VERSION", fmt.Errorf("unsupported API version %d", request.Version))
 	}
 	if err := d.ensureScheduleStateLoaded(); err != nil {
@@ -2630,7 +2633,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			status = "degraded"
 		}
 		return success(request, map[string]interface{}{
-			"status": status, "pid": os.Getpid(), "version": 1, "config_errors": configErrors,
+			"status": status, "pid": os.Getpid(), "version": ipc.ProtocolVersion, "config_errors": configErrors,
 			"history_database": database,
 		})
 	case "daemon.stop":
@@ -2814,25 +2817,6 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 			})
 		}
 		return success(request, result)
-	case "history.clear":
-		if err := d.scheduler.ClearHistory(d.executionContext()); err != nil {
-			return failure(request, "HISTORY_CLEAR_FAILED", err)
-		}
-		return success(request, map[string]string{"status": "cleared"})
-	case "schedule.history":
-		var p historyRequest
-		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		if p.TriggerType != "" && p.TriggerType != scheduler.TriggerSchedule {
-			return failure(request, "BAD_PARAMS", errors.New("schedule history only supports trigger_type=schedule"))
-		}
-		p.TriggerType = scheduler.TriggerSchedule
-		history, err := d.queryHistory(p)
-		if err != nil {
-			return failure(request, "BAD_PARAMS", err)
-		}
-		return success(request, history)
 	case "history.ls":
 		var p historyRequest
 		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
@@ -2842,7 +2826,56 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		return success(request, history)
+		result := make([]api.HistoryInfo, 0, len(history))
+		for _, record := range history {
+			result = append(result, historyInfo(record, p.Attempts))
+		}
+		return success(request, result)
+	case "history.get":
+		var p executionRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.RunID == "" {
+			if err == nil {
+				err = errors.New("run_id is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "HISTORY_NOT_FOUND", err)
+		}
+		if !isTerminalExecution(execution.Record.Status) {
+			return failure(request, "HISTORY_NOT_FOUND", fmt.Errorf("execution %s is not terminal", p.RunID))
+		}
+		return success(request, historyDetail(execution.Record))
+	case "history.purge":
+		var p struct {
+			Before string `json:"before"`
+			All    bool   `json:"all"`
+			Yes    bool   `json:"yes"`
+		}
+		if err := unmarshalOptionalParams(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if p.Yes == false {
+			return failure(request, "BAD_PARAMS", errors.New("history purge requires yes=true"))
+		}
+		if (p.Before == "") == !p.All {
+			return failure(request, "BAD_PARAMS", errors.New("history purge requires exactly one of before or all"))
+		}
+		var before *time.Time
+		if p.Before != "" {
+			value, err := time.Parse(time.RFC3339Nano, p.Before)
+			if err != nil {
+				return failure(request, "BAD_PARAMS", fmt.Errorf("before must be RFC3339: %w", err))
+			}
+			value = value.UTC()
+			before = &value
+		}
+		removed, err := d.scheduler.PurgeHistory(d.executionContext(), before, p.All)
+		if err != nil {
+			return failure(request, "HISTORY_PURGE_FAILED", err)
+		}
+		return success(request, map[string]interface{}{"purged": removed})
 	case "workflow.ls":
 		var p struct{ Project string }
 		_ = json.Unmarshal(request.Params, &p)
@@ -2917,6 +2950,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		if p.Limit < 0 {
 			return failure(request, "BAD_PARAMS", errors.New("execution list limit must be non-negative"))
 		}
+		if p.All && p.Status != "" {
+			return failure(request, "BAD_PARAMS", errors.New("execution list --all and --status are mutually exclusive"))
+		}
 		if p.Status != "" && !validExecutionStatus(p.Status) {
 			return failure(request, "BAD_PARAMS", fmt.Errorf("unknown execution status %q", p.Status))
 		}
@@ -2932,7 +2968,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		}
 		executions, err := d.scheduler.ListExecutions(d.executionContext(), scheduler.ExecutionQuery{
 			Status: p.Status, TriggerType: p.TriggerType, Trigger: p.Trigger, Project: project,
-			TargetType: p.TargetType, Target: target, Limit: p.Limit,
+			TargetType: p.TargetType, Target: target, Limit: p.Limit, All: p.All,
 		})
 		if err != nil {
 			return failure(request, "EXECUTION_LIST_FAILED", err)
@@ -3141,7 +3177,8 @@ func executionInfo(execution scheduler.Execution) api.ExecutionInfo {
 		TargetType: record.TargetType, Target: record.Target, Status: record.Status,
 		Trigger: triggerInfo(record.Trigger), IdempotencyKey: execution.IdempotencyKey,
 		ConfigurationGeneration: execution.ConfigurationGeneration, ExitCode: record.ExitCode,
-		Error: record.Error, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
+		RetriedFromRunID: record.RetriedFromRunID,
+		Error:            record.Error, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
 	}
 	if info.IdempotencyKey == "" {
 		info.IdempotencyKey = record.IdempotencyKey
@@ -3162,6 +3199,72 @@ func executionInfo(execution scheduler.Execution) api.ExecutionInfo {
 		info.FinishedAt = &value
 	}
 	return info
+}
+
+func historyInfo(record scheduler.Record, includeDetails bool) api.HistoryInfo {
+	info := api.HistoryInfo{
+		RunID: record.RunID, Project: record.Project, Name: record.Name,
+		TargetType: record.TargetType, Target: record.Target, Status: record.Status,
+		Trigger: triggerInfo(record.Trigger), RetriedFromRunID: record.RetriedFromRunID,
+		ExitCode: record.ExitCode, Error: record.Error, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
+	}
+	if !record.Started.IsZero() {
+		value := record.Started
+		info.StartedAt = &value
+	}
+	if !record.Finished.IsZero() {
+		value := record.Finished
+		info.FinishedAt = &value
+	}
+	if !includeDetails {
+		return info
+	}
+	info.Attempts = historyAttempts(record.Attempts)
+	info.Tasks = make([]api.HistoryTaskInfo, 0, len(record.Tasks))
+	for _, task := range record.Tasks {
+		item := api.HistoryTaskInfo{
+			RunID: task.RunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
+			Command: task.Command, Args: append([]string(nil), task.Args...), WorkingDir: task.WorkingDir,
+			EnvKeys: append([]string(nil), task.EnvKeys...), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
+			ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
+			StdoutPath: task.StdoutPath, StderrPath: task.StderrPath, Attempts: historyAttempts(task.Attempts),
+		}
+		if !task.Started.IsZero() {
+			value := task.Started
+			item.StartedAt = &value
+		}
+		if !task.Finished.IsZero() {
+			value := task.Finished
+			item.FinishedAt = &value
+		}
+		item.ElapsedSeconds = task.DurationSeconds
+		info.Tasks = append(info.Tasks, item)
+	}
+	return info
+}
+
+func historyDetail(record scheduler.Record) api.HistoryDetail {
+	return api.HistoryDetail{HistoryInfo: historyInfo(record, true)}
+}
+
+func historyAttempts(attempts []scheduler.Attempt) []api.HistoryAttemptInfo {
+	if len(attempts) == 0 {
+		return nil
+	}
+	result := make([]api.HistoryAttemptInfo, 0, len(attempts))
+	for _, attempt := range attempts {
+		item := api.HistoryAttemptInfo{Number: attempt.Number, ElapsedSeconds: attempt.DurationSeconds, ExitCode: attempt.ExitCode, Error: attempt.Error, Stderr: attempt.Stderr}
+		if !attempt.Started.IsZero() {
+			value := attempt.Started
+			item.StartedAt = &value
+		}
+		if !attempt.Finished.IsZero() {
+			value := attempt.Finished
+			item.FinishedAt = &value
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func validExecutionStatus(status string) bool {
@@ -3339,47 +3442,66 @@ func (d *Daemon) retryExecution(runID string) (scheduler.Execution, error) {
 	if execution.Record.TargetType != "task" && execution.Record.TargetType != "workflow" {
 		return scheduler.Execution{}, fmt.Errorf("execution %s cannot be retried", runID)
 	}
+	if execution.Record.TargetType == "workflow" && !d.workflow.HasWorkflow(execution.Record.Project+"/"+execution.Record.Target) {
+		return scheduler.Execution{}, fmt.Errorf("retry target %s/%s no longer exists", execution.Record.Project, execution.Record.Target)
+	}
+	if execution.Record.TargetType == "task" && !d.workflow.HasTask(execution.Record.Project+"/"+execution.Record.Target) {
+		return scheduler.Execution{}, fmt.Errorf("retry target %s/%s no longer exists", execution.Record.Project, execution.Record.Target)
+	}
 	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: runID, Type: "retry", Status: "requested", RequestedAt: time.Now().UTC()}); err != nil {
 		return scheduler.Execution{}, err
 	}
+	configurationGeneration := d.currentConfigurationGeneration()
+	newRunID := scheduler.NewRunID()
+	now := time.Now().UTC()
 	record := execution.Record
+	record.RunID = newRunID
+	record.RetriedFromRunID = runID
+	record.Trigger = scheduler.ManualTrigger()
+	record.Trigger.Mode = scheduler.TriggerModeRetry
 	record.Status = scheduler.StatusQueued
-	record.Started = time.Now().UTC()
+	record.Started = now
 	record.Finished = time.Time{}
 	record.ExitCode = 0
 	record.Error = ""
 	record.Stderr = ""
-	// Child rows and attempts already persisted for this logical run are
-	// retained by the history store. The next terminal write appends the new
-	// attempt instead of replacing the previous retry history.
+	record.IdempotencyKey = ""
+	record.ConfigurationGeneration = configurationGeneration
 	record.Tasks = nil
 	record.Attempts = nil
-	queuedExecution := execution
-	queuedExecution.Record = record
-	queuedExecution.UpdatedAt = time.Now().UTC()
+	queuedExecution, created, err := d.scheduler.BeginExecution(context.Background(), record, "", configurationGeneration)
+	if err != nil {
+		return scheduler.Execution{}, err
+	}
+	if !created {
+		return scheduler.Execution{}, fmt.Errorf("retry generated duplicate execution %s", queuedExecution.Record.RunID)
+	}
+	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: newRunID, Type: "retry", Status: "requested", RequestedAt: now}); err != nil {
+		return scheduler.Execution{}, err
+	}
 	if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
 		return scheduler.Execution{}, err
 	}
 	runCtx, cancel := context.WithCancel(d.executionContext())
-	d.registerExecutionCancel(runID, cancel)
+	d.registerExecutionCancel(newRunID, cancel)
 	runningRecord := record
 	runningRecord.Status = scheduler.StatusRunning
 	if err := d.scheduler.UpdateExecution(context.Background(), runningRecord); err != nil {
 		cancel()
 		d.mu.Lock()
-		delete(d.executionCancels, runID)
+		delete(d.executionCancels, newRunID)
 		d.mu.Unlock()
 		return scheduler.Execution{}, err
 	}
 	if record.TargetType == "workflow" {
-		err = d.workflow.RunNowWorkflowWithID(runCtx, record.Project, record.Target, record.Trigger, runID)
+		err = d.workflow.RunNowWorkflowWithID(runCtx, record.Project, record.Target, record.Trigger, newRunID)
 	} else {
-		err = d.workflow.RunNowTaskWithID(runCtx, record.Project, record.Target, record.Trigger, runID)
+		err = d.workflow.RunNowTaskWithID(runCtx, record.Project, record.Target, record.Trigger, newRunID)
 	}
 	if err != nil {
 		cancel()
 		d.mu.Lock()
-		delete(d.executionCancels, runID)
+		delete(d.executionCancels, newRunID)
 		d.mu.Unlock()
 		record.Status = scheduler.StatusFailed
 		record.Finished = time.Now().UTC()
@@ -3423,7 +3545,7 @@ func (d *Daemon) taskInfoWithHistory(snapshot workflow.TaskSnapshot, counters ma
 	var latestTrigger scheduler.TriggerRef
 	hasLatest := false
 	if records, err := d.queryHistory(historyRequest{
-		Tail: 1, TargetType: "task", Project: snapshot.Task.Project, Name: snapshot.Task.Name,
+		Limit: 1, TargetType: "task", Project: snapshot.Task.Project, Name: snapshot.Task.Name,
 	}); err == nil && len(records) > 0 {
 		record := records[len(records)-1]
 		if record.TargetType == "task" {
@@ -3482,7 +3604,7 @@ func (d *Daemon) getWorkflowInfo(project, name string, counters map[string]uint6
 				info.DurationSeconds = nil
 			}
 			var latest *scheduler.Record
-			if records, err := d.queryHistory(historyRequest{Tail: 1, TargetType: "workflow", Project: project, Name: name}); err == nil && len(records) > 0 {
+			if records, err := d.queryHistory(historyRequest{Limit: 1, TargetType: "workflow", Project: project, Name: name}); err == nil && len(records) > 0 {
 				latestRecord := records[len(records)-1]
 				latest = &latestRecord
 			}
@@ -3568,23 +3690,33 @@ func (d *Daemon) nextRunForTarget(schedules []scheduler.ScheduleSnapshot, target
 }
 
 func (d *Daemon) queryHistory(request historyRequest) ([]scheduler.Record, error) {
-	if request.Tail < 0 {
-		return nil, errors.New("history tail must be non-negative")
+	if request.Limit < 0 {
+		return nil, errors.New("history limit must be non-negative")
+	}
+	if request.Status != "" && !isTerminalExecution(request.Status) {
+		return nil, fmt.Errorf("history status must be terminal, got %q", request.Status)
 	}
 	if request.TargetType != "" && request.TargetType != "task" && request.TargetType != "workflow" {
 		return nil, fmt.Errorf("unknown target type %q", request.TargetType)
 	}
 	project, name := request.Project, request.Name
 	if request.Target != "" {
-		var err error
-		project, name, err = splitKey(request.Target)
-		if err != nil {
-			return nil, fmt.Errorf("target: %w", err)
+		if strings.Contains(request.Target, "/") {
+			targetProject, targetName, splitErr := splitKey(request.Target)
+			if splitErr != nil {
+				return nil, fmt.Errorf("target: %w", splitErr)
+			}
+			if project != "" && project != targetProject {
+				return nil, errors.New("target project does not match project filter")
+			}
+			project, name = targetProject, targetName
+		} else {
+			name = request.Target
 		}
 	}
 	return d.scheduler.QueryHistory(d.executionContext(), scheduler.HistoryQuery{
-		Tail: request.Tail, TriggerType: request.TriggerType, Trigger: request.Trigger,
-		TargetType: request.TargetType, Project: project, Name: name,
+		Limit: request.Limit, Status: request.Status, TriggerType: request.TriggerType, Trigger: request.Trigger,
+		TargetType: request.TargetType, Project: project, Target: name, Attempts: request.Attempts,
 	})
 }
 
@@ -3673,11 +3805,11 @@ func scheduleTimeIn(value *time.Time, location *time.Location) *time.Time {
 }
 
 func success(request ipc.Request, data interface{}) ipc.Response {
-	return ipc.Response{Version: 1, ID: request.ID, OK: true, Data: data}
+	return ipc.Response{Version: ipc.ProtocolVersion, ID: request.ID, OK: true, Data: data}
 }
 
 func failure(request ipc.Request, code string, err error) ipc.Response {
-	return ipc.Response{Version: 1, ID: request.ID, OK: false, Error: &ipc.Error{Code: code, Message: err.Error()}}
+	return ipc.Response{Version: ipc.ProtocolVersion, ID: request.ID, OK: false, Error: &ipc.Error{Code: code, Message: err.Error()}}
 }
 
 func splitExecutionTarget(key, project, name string) (string, string, error) {

@@ -324,18 +324,17 @@ mango workflow run PROJECT/WORKFLOW
 mango schedule ls
 mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
-mango schedule history
 
-mango history
-mango history clear
+mango history ls
+mango history show RUN_ID
+mango history purge (--before RFC3339 | --all) --yes
 ```
 
 `task` and `workflow` are execution targets. `schedule`, `webhook`, and
 `manual` are trigger sources; this release models webhook triggers but does not
 start a webhook server. Use `task run` or `workflow run` for a manual run.
-`history` is the shared execution-history browser and `schedule history` is the
-same view filtered to schedule triggers. Use `--json` for machine-readable
-history and status data.
+`history` is the terminal-only execution-history browser. Use `--json` for
+machine-readable history and status data.
 
 ## Complete YAML reference
 
@@ -678,7 +677,7 @@ Both forms are accepted:
 ```sh
 mango --color=never ls
 mango status demo/api-single --json
-mango --json history --tail 20
+mango --json history ls --limit 20
 ```
 
 Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
@@ -981,7 +980,7 @@ It does not support `--json`.
 ```text
 mango task ls [--json]
 mango task run PROJECT/TASK [--json]
-mango execution ls [--status STATUS] [--trigger-type TYPE] [--trigger NAME]
+mango execution ls [--status STATUS | --all] [--trigger-type TYPE] [--trigger NAME]
                        [--project PROJECT] [--target-type task|workflow]
                        [--target PROJECT/NAME] [--limit N] [--json]
 mango execution get|cancel|retry RUN_ID [--json]
@@ -993,7 +992,7 @@ mango execution logs RUN_ID [--stream stdout|stderr|all] [--tail N] [--json]
 | --- | --- |
 | `task ls` | Lists task name, lifetime logical runs, status, last run, next run, and duration. |
 | `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
-| `execution ls` | Lists logical executions, newest first; it includes queued, running, and completed runs. |
+| `execution ls` | Lists queued/running executions by default; `--status` selects one status and `--all` includes every status. |
 `task ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
 Without `--json`, `task run` prints the accepted state and durable run ID, for
 example `Task demo/backup queued (run_id=...)`.
@@ -1036,13 +1035,13 @@ mango workflow ls
 mango workflow run demo/release
 ```
 
-Use `mango history --target-type workflow --target demo/release` to inspect
+Use `mango history ls --target-type workflow --target demo/release` to inspect
 workflow runs and their task nodes.
 
 Every task and workflow run returns a durable `run_id`. Use `execution watch`
 or `execution get` to observe its final status, `execution cancel` to terminate
-the managed process tree, `execution retry` to start another attempt under the
-same logical run, and `execution logs` to read output after the process exits.
+the managed process tree, `execution retry` to create a new logical execution,
+and `execution logs` to read output after the process exits.
 `execution watch` waits up to 30 seconds by default; use `--timeout 2m` for a
 longer wait (up to 5 minutes).
 
@@ -1051,14 +1050,18 @@ longer wait (up to 5 minutes).
 ```sh
 mango execution ls
 mango execution ls --status running
+mango execution ls --status failed
+mango execution ls --all
 mango execution ls --trigger-type schedule --trigger nightly
 mango execution ls --project demo --target-type task
 mango execution ls --target demo/execution-demo-task --limit 10
 mango execution ls --json
 ```
 
-The human-readable table shows `RUN_ID`, target type and target, status,
-start/finish timestamps, and exit code. `--target` accepts either
+By default `execution ls` lists only `queued` and `running` executions. Use
+`--status STATUS` for one status or `--all` for every status; `--all` and
+`--status` are mutually exclusive. The human-readable table shows only
+`RUN_ID`, target, status, started, and elapsed. `--target` accepts either
 `PROJECT/NAME` or a name used together with `--project`; `--limit 0` returns
 all matching executions. `--trigger-type` accepts `schedule`, `webhook`, or
 `manual`; `--trigger` filters the trigger name.
@@ -1069,9 +1072,6 @@ all matching executions. `--trigger-type` accepts `schedule`, `webhook`, or
 mango schedule ls [--json]
 mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
-mango schedule history [--tail N] [--trigger NAME]
-                       [--target-type task|workflow] [--target PROJECT/NAME]
-                       [--attempts] [--json]
 ```
 
 | Command / flag | Description |
@@ -1079,10 +1079,6 @@ mango schedule history [--tail N] [--trigger NAME]
 | `schedule ls` | Lists schedule, trigger type, target, cron expression, time zone, lifetime runs, status, last run, next run, and duration. |
 | `schedule enable TARGET ...` | Enables future cron triggers for one or more schedules. A `PROJECT` target enables every schedule in that project. |
 | `schedule disable TARGET ...` | Disables future cron triggers for one or more schedules. A `PROJECT` target disables every schedule in that project. Existing task/workflow runs are not interrupted. |
-| `schedule history` | Lists the shared history view filtered to `trigger.type=schedule`. |
-| `--tail N` | Maximum history records; default `100`; `0` returns all retained records. Must be non-negative. |
-| `--trigger NAME` / `--target-type` / `--target` | Applies the shared trigger or execution-target filters; schedule history always keeps the schedule trigger-type filter. |
-| `--attempts` | Shows one row per recorded attempt with timing, result, error, and stderr. |
 
 Examples:
 
@@ -1091,8 +1087,6 @@ mango schedule ls
 mango schedule disable demo/nightly-release
 mango schedule enable demo/nightly-release
 mango schedule disable demo
-mango schedule history --tail 20
-mango schedule history --attempts --json
 ```
 
 Schedule enable/disable state is stored in `MANGO_HOME/state/schedules.json`
@@ -1104,19 +1098,24 @@ for schedules removed from the configuration. Disabled schedules remain in
 ### `mango history`
 
 ```text
-mango history clear [--json]
-mango history [--tail N] [--trigger-type schedule|webhook|manual]
-              [--trigger NAME] [--target-type task|workflow]
-              [--target PROJECT/NAME] [--attempts] [--json]
+mango history ls [--limit N] [--status STATUS] [--trigger-type TYPE]
+                 [--trigger NAME] [--project PROJECT]
+                 [--target-type task|workflow] [--target PROJECT/NAME]
+                 [--attempts] [--json]
+mango history show RUN_ID [--json]
+mango history purge (--before RFC3339 | --all) --yes [--json]
 ```
 
-`history clear` permanently removes all completed execution records and
-lifetime counters. It leaves the history database schema in place; executions
-that are still running continue normally and are recorded when they finish.
+History is terminal-only and is read from the canonical execution store.
+`history ls` is newest-first and `--limit 0` returns all retained terminal
+runs. `history show` accepts terminal runs and returns workflow nodes, task
+records, and attempts. `history purge` removes only terminal runs and their
+tasks, attempts, events, and operations; it never removes active metadata,
+lifetime counters, or log files. Purged run IDs return not found.
 
-History JSON returns complete nested run records, including `RunID`, the
-structured `Trigger`, task/node records, and retry attempts. Text output shows
-one row per logical run by default; `--attempts` expands attempt rows. In an
+History JSON uses stable snake_case `HistoryInfo` fields. Text output shows
+only `RUN_ID`, target, status, started, and elapsed; `--attempts` includes task
+and attempt detail in JSON. In an
 interactive terminal, the shared browser navigates `run → task → attempts` or
 `run → workflow → tasks → attempts`; each history table shows 15 rows per page.
 Runs are ordered newest-first, while tasks and attempts are ordered oldest-first.
@@ -1317,7 +1316,7 @@ history:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `schedule_history_limit` | non-negative integer | `0` | Maximum number of execution records to retain. `0` keeps all records. |
+| `schedule_history_limit` | non-negative integer | `0` | Maximum number of terminal execution records to retain; active executions are never pruned. `0` keeps all records. |
 
 Supported database drivers are `sqlite`, `postgres`, and `mysql`. PostgreSQL
 and MySQL require a DSN, preferably supplied through an environment variable:
