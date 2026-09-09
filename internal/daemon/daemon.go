@@ -1624,6 +1624,16 @@ func (d *Daemon) adoptShimServices(projectName string) {
 	}
 	d.mu.RUnlock()
 	for _, managed := range targets {
+		// Reconciliation can run repeatedly while a healthcheck is still
+		// starting. An already-attached shim is being watched already; using
+		// AttachExisting again would replace the client, bump the generation,
+		// and restart the health monitor before it can complete its first probe.
+		d.mu.RLock()
+		attached := managed.shim != nil
+		d.mu.RUnlock()
+		if attached {
+			continue
+		}
 		bootstrap, err := d.shimBootstrap(projectName, managed.spec, false)
 		if err != nil {
 			continue
@@ -1643,7 +1653,7 @@ func (d *Daemon) adoptShimServices(projectName string) {
 		}
 		d.mu.Lock()
 		current := d.projects[projectName]
-		if current == nil || current.processes[managed.spec.Name] != managed {
+		if current == nil || current.processes[managed.spec.Name] != managed || managed.shim != nil {
 			d.mu.Unlock()
 			continue
 		}

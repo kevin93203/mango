@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/health"
 	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
@@ -1785,6 +1787,73 @@ services:
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("web did not start after dependency became healthy: %+v", items)
+}
+
+func TestShimHealthTransitionsToHealthy(t *testing.T) {
+	shimBinary := filepath.Join("..", "..", "bin", "mango-shim.exe")
+	if runtime.GOOS != "windows" {
+		shimBinary = filepath.Join("..", "..", "bin", "mango-shim")
+	}
+	shimBinary, err := filepath.Abs(shimBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(shimBinary); err != nil {
+		t.Skipf("built mango-shim binary is unavailable: %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(shimBinary)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "demo.yaml")
+	readyPath := filepath.Join(root, "ready")
+	if err := os.WriteFile(readyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := testfixture.Build(t)
+	content := fmt.Sprintf(`version: 3
+
+defaults:
+  working_dir: %s
+  supervisor: shim
+
+services:
+  api:
+    command: %s
+    args: [--mode, sleep, --duration, 60s]
+    autostart: true
+    restart: never
+    healthcheck:
+      test: [CMD, %s, --mode, file-exists, --path, %s]
+      interval: 500ms
+      timeout: 100ms
+      retries: 1
+`, yamlSingleQuote(root), yamlSingleQuote(fixture), yamlSingleQuote(fixture), yamlSingleQuote(readyPath))
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.removeProject("demo")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		items := d.ListProcesses("demo")
+		if len(items) == 1 && items[0].Health != nil && items[0].Health.Status == health.Healthy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	items := d.ListProcesses("demo")
+	t.Fatalf("shim health did not become healthy: %+v", items)
 }
 
 func TestRestartDependentsFollowsRestartFlagAndDependencyDepth(t *testing.T) {
