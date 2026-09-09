@@ -21,6 +21,7 @@ func TestExampleFilesMatchRepositorySources(t *testing.T) {
 		"examples/api/main.go",
 		"examples/one-task/main.go",
 		"examples/tasks/emit.go",
+		"examples/tasks/artifact/main.go",
 	}
 	for _, path := range paths {
 		want, err := os.ReadFile(path)

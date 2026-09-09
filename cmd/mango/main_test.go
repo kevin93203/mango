@@ -150,6 +150,7 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 		"examples/api/main.go",
 		"examples/one-task/main.go",
 		"examples/tasks/emit.go",
+		"examples/tasks/artifact/main.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, relative)); err != nil {
 			t.Fatalf("generated example %s is missing: %v", relative, err)

@@ -21,6 +21,7 @@ replace that prefix with your project name if needed.
 
 ```sh
 mango task run demo/demo-direct
+mango task run demo/demo-artifact
 mango workflow run demo/demo-linear
 mango workflow run demo/demo-parallel
 mango workflow run demo/demo-failure
@@ -37,6 +38,11 @@ mango history --target-type task --target demo/demo-slow-timeout --attempts
 The failure workflow records retries for `demo-retry-failure`; its dependent
 node is skipped while the independent branch continues. The timeout workflow
 forces `demo-slow-timeout` to stop after two seconds and records exit code 124.
+
+`demo-artifact` runs `examples/tasks/artifact/main.go`, writes
+`examples/artifacts/demo-artifact.txt`, and declares that file in `outputs`.
+Use `mango history show RUN_ID --json` to inspect its existence, size, and
+SHA-256 metadata.
 
 All task helpers used by the sample are Go programs and run on Windows 10/11,
 macOS, and Linux. The HTTP service healthchecks require `curl` to be available

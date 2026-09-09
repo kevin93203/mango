@@ -243,6 +243,20 @@ tasks:
     timeout: 30s
     concurrency: allow
 
+  demo-artifact:
+    command: go
+    args:
+      - run
+      - ./examples/tasks/artifact/main.go
+      - --name
+      - demo-artifact
+      - --output
+      - examples/artifacts/demo-artifact.txt
+    timeout: 30s
+    concurrency: forbid
+    outputs:
+      - examples/artifacts/demo-artifact.txt
+
   execution-demo-task:
     command: go
     args:

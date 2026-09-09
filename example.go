@@ -12,7 +12,7 @@ import (
 //go:embed mango.example.yaml
 var exampleConfig string
 
-//go:embed examples/api/main.go examples/one-task/main.go examples/tasks/emit.go
+//go:embed examples/api/main.go examples/one-task/main.go examples/tasks/emit.go examples/tasks/artifact/main.go
 var exampleFiles embed.FS
 
 // ExampleConfig returns the complete sample YAML configuration.
