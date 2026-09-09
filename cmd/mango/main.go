@@ -2499,6 +2499,7 @@ func printServiceTable(items []api.ServiceInfo) {
 		rows = append(rows, []cliui.Cell{
 			{Text: id, Style: idStyle, Align: cliui.AlignRight},
 			{Text: serviceName},
+			{Text: displayString(item.Supervisor), Style: cliui.StyleMuted},
 			{Text: processName},
 			{Text: displayString(item.State), Style: cliui.StateStyle(item.State)},
 			{Text: displayString(item.Health), Style: cliui.StateStyle(item.Health)},
@@ -2511,7 +2512,7 @@ func printServiceTable(items []api.ServiceInfo) {
 			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
-	cliOutput.Table([]string{"ID", "SERVICE", "PROCESS", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	cliOutput.Table([]string{"ID", "SERVICE", "SUPERVISOR", "PROCESS", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func printProcessTable(items []api.ServiceInfo) { printServiceTable(items) }
@@ -2631,6 +2632,7 @@ func printProcessDetail(item api.ServiceInfo) {
 	}
 	rows := [][]cliui.Cell{
 		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
+		{{Text: "supervisor"}, {Text: displayString(item.Supervisor)}},
 		{{Text: "state"}, {Text: displayString(item.State), Style: cliui.StateStyle(item.State)}},
 		{{Text: "health"}, {Text: healthStatus(item.Health), Style: cliui.StateStyle(healthStatus(item.Health))}},
 		{{Text: "os state"}, {Text: displayString(item.OSState), Style: cliui.StyleMuted}},

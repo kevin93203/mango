@@ -93,6 +93,7 @@ type ServiceInfo struct {
 	ID            int
 	Project       string
 	Name          string
+	Supervisor    string
 	ProcessName   string
 	State         string
 	PID           int
@@ -219,6 +220,7 @@ type ServiceListRow struct {
 	ID            int
 	Project       string
 	Service       string
+	Supervisor    string
 	Process       string
 	Name          string
 	Depth         int
@@ -435,6 +437,7 @@ func FlattenServiceList(items []ServiceInfo) []ServiceListRow {
 			ID:            item.ID,
 			Project:       item.Project,
 			Service:       item.Project + "/" + item.Name,
+			Supervisor:    item.Supervisor,
 			Process:       item.ProcessName,
 			Name:          item.Name,
 			Depth:         0,

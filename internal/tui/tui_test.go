@@ -13,7 +13,7 @@ func TestPrintTableShowsChildRowsWithoutSelectingThem(t *testing.T) {
 	var output bytes.Buffer
 	renderer := cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	printTable(renderer, []api.ServiceInfo{{
-		ID: 0, Project: "demo", Name: "api", ProcessName: "api.exe", State: api.StateRunning, PID: 100,
+		ID: 0, Project: "demo", Name: "api", Supervisor: "shim", ProcessName: "api.exe", State: api.StateRunning, PID: 100,
 		Children: []api.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}}, 0)
 
@@ -29,8 +29,8 @@ func TestPrintTableShowsChildRowsWithoutSelectingThem(t *testing.T) {
 			continue
 		}
 		columns := strings.Split(line, " | ")
-		if len(columns) < 4 || strings.TrimSpace(columns[2]) != "-" || strings.TrimSpace(columns[3]) != "└─ worker" {
-			t.Fatalf("child row = %q, want SERVICE '-' and PROCESS '└─ worker'", line)
+		if len(columns) < 5 || strings.TrimSpace(columns[2]) != "-" || strings.TrimSpace(columns[3]) != "-" || strings.TrimSpace(columns[4]) != "└─ worker" {
+			t.Fatalf("child row = %q, want SERVICE/SUPERVISOR '-' and PROCESS '└─ worker'", line)
 		}
 		return
 	}

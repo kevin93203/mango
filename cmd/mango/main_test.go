@@ -849,7 +849,7 @@ func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 120})
 
 	printServiceTable([]api.ServiceInfo{{
-		ID: 0, Project: "demo", Name: "api", ProcessName: "api.exe", State: api.StateRunning, PID: 100,
+		ID: 0, Project: "demo", Name: "api", Supervisor: "shim", ProcessName: "api.exe", State: api.StateRunning, PID: 100,
 		Children: []api.ChildProcessInfo{{PID: 200, Depth: 1, Name: "worker", OSState: "sleeping"}},
 	}})
 
@@ -862,16 +862,16 @@ func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 			childLine = line
 		}
 	}
-	if parentLine == "" || childLine == "" || !strings.Contains(output.String(), "SERVICE") || !strings.Contains(output.String(), "PROCESS") {
+	if parentLine == "" || childLine == "" || !strings.Contains(output.String(), "SERVICE") || !strings.Contains(output.String(), "SUPERVISOR") || !strings.Contains(output.String(), "PROCESS") || !strings.Contains(parentLine, "shim") {
 		t.Fatalf("table = %q, want SERVICE and PROCESS columns", output.String())
 	}
 	parentColumns := strings.Split(parentLine, " | ")
-	if len(parentColumns) < 3 || strings.TrimSpace(parentColumns[1]) != "demo/api" || strings.TrimSpace(parentColumns[2]) != "api.exe" {
-		t.Fatalf("parent row = %q, want demo/api and api.exe", parentLine)
+	if len(parentColumns) < 4 || strings.TrimSpace(parentColumns[1]) != "demo/api" || strings.TrimSpace(parentColumns[2]) != "shim" || strings.TrimSpace(parentColumns[3]) != "api.exe" {
+		t.Fatalf("parent row = %q, want demo/api, shim, and api.exe", parentLine)
 	}
 	childColumns := strings.Split(childLine, " | ")
-	if len(childColumns) < 3 || strings.TrimSpace(childColumns[1]) != "-" || strings.TrimSpace(childColumns[2]) != "└─ worker" {
-		t.Fatalf("child row = %q, want SERVICE '-' and PROCESS '└─ worker'", childLine)
+	if len(childColumns) < 4 || strings.TrimSpace(childColumns[1]) != "-" || strings.TrimSpace(childColumns[2]) != "-" || strings.TrimSpace(childColumns[3]) != "└─ worker" {
+		t.Fatalf("child row = %q, want SERVICE/SUPERVISOR '-' and PROCESS '└─ worker'", childLine)
 	}
 }
 

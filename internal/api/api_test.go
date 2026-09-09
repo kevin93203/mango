@@ -2,13 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestFlattenServiceListPreservesHierarchy(t *testing.T) {
 	items := []ServiceInfo{{
-		ID: 0, Project: "demo", Name: "api", ProcessName: "api.exe", PID: 100,
+		ID: 0, Project: "demo", Name: "api", Supervisor: "shim", ProcessName: "api.exe", PID: 100,
 		Children: []ChildProcessInfo{{
 			PID: 200, Depth: 1, Name: "worker",
 			Children: []ChildProcessInfo{{PID: 300, Depth: 2, Name: "helper"}},
@@ -19,7 +20,7 @@ func TestFlattenServiceListPreservesHierarchy(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("rows = %d, want 3", len(rows))
 	}
-	if !rows[0].Managed || rows[0].ParentIndex != 0 || rows[0].Depth != 0 || rows[0].Service != "demo/api" || rows[0].Process != "api.exe" {
+	if !rows[0].Managed || rows[0].ParentIndex != 0 || rows[0].Depth != 0 || rows[0].Service != "demo/api" || rows[0].Supervisor != "shim" || rows[0].Process != "api.exe" {
 		t.Fatalf("parent row = %+v", rows[0])
 	}
 	if rows[1].Managed || rows[1].PID != 200 || rows[1].ParentIndex != 0 || rows[1].Depth != 1 || rows[1].Service != "" || rows[1].Process != "worker" {
@@ -32,12 +33,15 @@ func TestFlattenServiceListPreservesHierarchy(t *testing.T) {
 
 func TestServiceInfoJSONKeepsHealthAndChildren(t *testing.T) {
 	items := []ServiceInfo{{
-		Project: "demo", Name: "api", ProcessName: "api.exe", Health: &HealthInfo{Status: "healthy"},
+		Project: "demo", Name: "api", Supervisor: "shim", ProcessName: "api.exe", Health: &HealthInfo{Status: "healthy"},
 		Children: []ChildProcessInfo{{PID: 200, OSState: "sleep"}},
 	}}
 	encoded, err := json.Marshal(items)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"Supervisor":"shim"`) {
+		t.Fatalf("JSON = %s, want Supervisor field", encoded)
 	}
 	var decoded []ServiceInfo
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
@@ -48,6 +52,9 @@ func TestServiceInfoJSONKeepsHealthAndChildren(t *testing.T) {
 	}
 	if decoded[0].ProcessName != "api.exe" {
 		t.Fatalf("process name = %q, want api.exe", decoded[0].ProcessName)
+	}
+	if decoded[0].Supervisor != "shim" {
+		t.Fatalf("supervisor = %q, want shim", decoded[0].Supervisor)
 	}
 	if len(decoded[0].Children) != 1 || decoded[0].Children[0].PID != 200 {
 		t.Fatalf("children = %+v", decoded[0].Children)

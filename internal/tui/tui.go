@@ -180,6 +180,7 @@ func showDetail(output *cliui.Renderer, item api.ServiceInfo, input <-chan byte)
 	output.Println(output.Text(cliui.StyleHeader, item.Project+"/"+item.Name))
 	output.KeyValues([][]cliui.Cell{
 		{{Text: "id"}, {Text: fmt.Sprintf("%d", item.ID), Align: cliui.AlignRight}},
+		{{Text: "supervisor"}, {Text: displayString(item.Supervisor)}},
 		{{Text: "state"}, {Text: displayString(item.State), Style: cliui.StateStyle(item.State)}},
 		{{Text: "health"}, {Text: healthStatus(item.Health), Style: cliui.StateStyle(healthStatus(item.Health))}},
 		{{Text: "os state"}, {Text: displayString(item.OSState), Style: cliui.StyleMuted}},
@@ -246,6 +247,7 @@ func printTable(output *cliui.Renderer, items []api.ServiceInfo, selected int) {
 			{Text: marker, Style: cliui.StyleHeader},
 			{Text: id, Style: idStyle, Align: cliui.AlignRight},
 			{Text: serviceName},
+			{Text: displayString(item.Supervisor), Style: cliui.StyleMuted},
 			{Text: processName},
 			{Text: displayString(item.State), Style: cliui.StateStyle(item.State)},
 			{Text: displayString(item.Health), Style: cliui.StateStyle(item.Health)},
@@ -258,7 +260,7 @@ func printTable(output *cliui.Renderer, items []api.ServiceInfo, selected int) {
 			{Text: restartCount, Style: zeroStyle(restartCount), Align: cliui.AlignRight},
 		})
 	}
-	output.Table([]string{"", "ID", "SERVICE", "PROCESS", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
+	output.Table([]string{"", "ID", "SERVICE", "SUPERVISOR", "PROCESS", "STATE", "HEALTH", "OS STATE", "PID", "PORTS", "CPU%", "RSS", "MEM%", "RESTART"}, rows)
 }
 
 func displayString(value string) string {

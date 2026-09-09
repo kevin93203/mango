@@ -2658,7 +2658,7 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		managed := item.managed
 		d.mu.RLock()
 		info := ProcessInfo{
-			ID: managed.id, Project: item.project, Name: managed.spec.Name, State: managed.state, Disabled: managed.disabled,
+			ID: managed.id, Project: item.project, Name: managed.spec.Name, Supervisor: managed.spec.Supervisor, State: managed.state, Disabled: managed.disabled,
 			StartedAt: managed.startedAt, RestartCount: managed.restarts, LastExitCode: managed.lastExit,
 			LastError: managed.lastError, StdoutPath: managed.stdoutPath, StderrPath: managed.stderrPath,
 		}
@@ -2817,6 +2817,7 @@ func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
 			ID:            item.ID,
 			Project:       item.Project,
 			Service:       item.Project + "/" + item.Name,
+			Supervisor:    item.Supervisor,
 			Process:       item.ProcessName,
 			Name:          item.Name,
 			Depth:         0,

@@ -855,6 +855,7 @@ Lists every managed service. The text table contains:
 | --- | --- |
 | `ID` | Runtime service ID. IDs are reassigned from zero when the daemon starts. |
 | `SERVICE` | Stable `PROJECT/SERVICE` key. |
+| `SUPERVISOR` | Process supervisor: `legacy` or `shim`. |
 | `PROCESS` | Root executable name; child processes are shown as indented rows. |
 | `STATE` | Mango lifecycle state. |
 | `HEALTH` | Health-check result, or `-` when no check is configured. |
