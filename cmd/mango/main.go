@@ -213,6 +213,10 @@ type daemonLogsOptions struct {
 }
 
 func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
+	return daemonLogsCommandWithContext(cliCommandContext, layout, options)
+}
+
+func daemonLogsCommandWithContext(ctx context.Context, layout paths.Layout, options daemonLogsOptions) error {
 	if err := rejectJSON("daemon logs"); err != nil {
 		return err
 	}
@@ -220,7 +224,7 @@ func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
 		return errors.New("daemon logs tail must be non-negative")
 	}
 	if options.Follow {
-		return followDaemonLogs(layout.DaemonLog, options.Tail)
+		return followDaemonLogsWithContext(ctx, layout.DaemonLog, options.Tail)
 	}
 
 	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, options.Tail)
@@ -280,16 +284,27 @@ func splitDaemonLogLines(data string) []string {
 type daemonLogReader func(path string, offset int64, maxBytes int) (string, int64, error)
 
 func followDaemonLogs(path string, tail int) error {
+	return followDaemonLogsWithContext(cliCommandContext, path, tail)
+}
+
+func followDaemonLogsWithContext(ctx context.Context, path string, tail int) error {
 	writer := newDaemonLogWriter()
-	return followDaemonLogsWithReader(path, tail, logging.ReadSince, writer.write, func() {
-		time.Sleep(time.Second)
-	})
+	return followDaemonLogsWithReaderContext(ctx, path, tail, logging.ReadSince, writer.write, waitForDaemonLogFollowInterval)
 }
 
 func followDaemonLogsWithReader(path string, tail int, read daemonLogReader, emit func(string), wait func()) error {
+	return followDaemonLogsWithReaderContext(context.Background(), path, tail, read, emit, func(context.Context) {
+		wait()
+	})
+}
+
+func followDaemonLogsWithReaderContext(ctx context.Context, path string, tail int, read daemonLogReader, emit func(string), wait func(context.Context)) error {
 	lines, offset, err := readDaemonLogSnapshot(path, tail)
 	if err != nil {
 		return fmt.Errorf("read daemon log: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	for _, line := range lines {
 		emit(line)
@@ -297,14 +312,30 @@ func followDaemonLogsWithReader(path string, tail int, read daemonLogReader, emi
 
 	var buffer logLineBuffer
 	for {
+		if ctx.Err() != nil {
+			buffer.flush(emit)
+			return nil
+		}
 		data, nextOffset, err := read(path, offset, 64<<10)
 		if err != nil {
 			buffer.flush(emit)
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("read daemon log: %w", err)
 		}
 		offset = nextOffset
 		buffer.write(data, emit)
-		wait()
+		wait(ctx)
+	}
+}
+
+func waitForDaemonLogFollowInterval(ctx context.Context) {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
@@ -919,7 +950,11 @@ func rejectJSON(command string) error {
 }
 
 func logsCommand(targets []string, options logsOptions) error {
-	return logsCommandWithCaller(targets, options, logsCall)
+	return logsCommandWithContext(cliCommandContext, targets, options)
+}
+
+func logsCommandWithContext(ctx context.Context, targets []string, options logsOptions) error {
+	return logsCommandWithCallerAndContext(ctx, targets, options, logsCall)
 }
 
 func monitorLogs(output *cliui.Renderer, key string, input <-chan byte) error {
@@ -970,27 +1005,41 @@ type logEvent struct {
 }
 
 func logsCommandWithCaller(targets []string, options logsOptions, caller logsCaller) error {
+	return logsCommandWithCallerAndContext(cliCommandContext, targets, options, caller)
+}
+
+func logsCommandWithCallerAndContext(ctx context.Context, targets []string, options logsOptions, caller logsCaller) error {
 	if err := rejectJSON("logs"); err != nil {
 		return err
 	}
 	if len(targets) == 0 {
 		return errors.New("logs requires PROJECT/SERVICE, PROJECT/task/TASK, PROJECT/workflow/WORKFLOW/NODE, or ID")
 	}
-	resolved, err := resolveLogTargets(targets, caller)
+	resolved, err := resolveLogTargetsWithContext(ctx, targets, caller)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
-	if options.follow {
-		return followLogsTargets(resolved, options.stream, options.tail, caller)
+	if ctx.Err() != nil {
+		return nil
 	}
-	return readLogsTargets(resolved, options.stream, options.tail, caller)
+	if options.follow {
+		return followLogsTargetsWithContext(ctx, resolved, options.stream, options.tail, caller, newLogWriter())
+	}
+	return readLogsTargetsWithContext(ctx, resolved, options.stream, options.tail, caller)
 }
 
 func resolveLogTargets(targets []string, caller logsCaller) ([]resolvedLogTarget, error) {
+	return resolveLogTargetsWithContext(context.Background(), targets, caller)
+}
+
+func resolveLogTargetsWithContext(ctx context.Context, targets []string, caller logsCaller) ([]resolvedLogTarget, error) {
 	resolved := make([]resolvedLogTarget, len(targets))
 	errs := make([]error, len(targets))
 	for i, target := range targets {
-		response, err := caller(context.Background(), "logs.resolve", struct{ Key string }{target})
+		response, err := caller(ctx, "logs.resolve", struct{ Key string }{target})
 		if err != nil {
 			errs[i] = fmt.Errorf("logs target %q: %w", target, err)
 			continue
@@ -1035,9 +1084,13 @@ func logStreams(targets []resolvedLogTarget, stream string) []*logStream {
 }
 
 func readLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
+	return readLogsTargetsWithContext(context.Background(), targets, stream, tail, caller)
+}
+
+func readLogsTargetsWithContext(ctx context.Context, targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
 	streams := logStreams(targets, stream)
 	events, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
-		return caller(context.Background(), "logs.read", struct {
+		return caller(ctx, "logs.read", struct {
 			Key    string
 			Stream string
 			Tail   int
@@ -1131,11 +1184,11 @@ func clearLogsCommand(target string) error {
 }
 
 func followLogs(key, stream string, tail int) error {
-	resolved, err := resolveLogTargets([]string{key}, logsCall)
+	resolved, err := resolveLogTargetsWithContext(cliCommandContext, []string{key}, logsCall)
 	if err != nil {
 		return err
 	}
-	return followLogsTargets(resolved, stream, tail, logsCall)
+	return followLogsTargetsWithContext(cliCommandContext, resolved, stream, tail, logsCall, newLogWriter())
 }
 
 func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {

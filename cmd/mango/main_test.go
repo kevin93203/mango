@@ -648,6 +648,47 @@ func TestFollowDaemonLogsWithReaderBuffersChunksAndFlushesOnError(t *testing.T) 
 	}
 }
 
+func TestFollowDaemonLogsWithReaderContextStopsDuringWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	if err := os.WriteFile(path, []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waitStarted := make(chan struct{})
+	readCalls := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- followDaemonLogsWithReaderContext(ctx, path, 15, func(_ string, offset int64, _ int) (string, int64, error) {
+			readCalls++
+			return "", offset, nil
+		}, func(string) {}, func(ctx context.Context) {
+			close(waitStarted)
+			<-ctx.Done()
+		})
+	}()
+
+	select {
+	case <-waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("follow did not enter its cancellable wait")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("follow error = %v, want clean cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("follow did not stop after cancellation")
+	}
+	if readCalls != 1 {
+		t.Fatalf("read calls = %d, want one read before cancellation", readCalls)
+	}
+}
+
 func TestDaemonLogWriterColorsOnlyPrefix(t *testing.T) {
 	var colored bytes.Buffer
 	previousOutput := cliOutput

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -149,6 +150,24 @@ func (a *cliApp) actionCmd(use, short string, run func() error) *cobra.Command {
 	}
 }
 
+func (a *cliApp) actionCmdWithContext(use, short string, run func(context.Context) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  usageOnError(cobra.NoArgs),
+		RunE:  func(cmd *cobra.Command, _ []string) error { return run(cmd.Context()) },
+	}
+}
+
+func (a *cliApp) leafCmdWithContext(use, short string, validate cobra.PositionalArgs, run func(context.Context, []string) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  usageOnError(validate),
+		RunE:  func(cmd *cobra.Command, args []string) error { return run(cmd.Context(), args) },
+	}
+}
+
 func (a *cliApp) initCmd() *cobra.Command {
 	var force bool
 	cmd := a.leafCmd("init [PATH]", "Create an example configuration", cobra.MaximumNArgs(1), func(args []string) error {
@@ -181,8 +200,8 @@ func (a *cliApp) daemonCmd() *cobra.Command {
 	}
 	var tail int
 	var follow bool
-	logs := a.simpleCmd("logs", "Read daemon logs", func() error {
-		return daemonLogsCommand(a.layout, daemonLogsOptions{Tail: tail, Follow: follow})
+	logs := a.actionCmdWithContext("logs", "Read daemon logs", func(ctx context.Context) error {
+		return daemonLogsCommandWithContext(ctx, a.layout, daemonLogsOptions{Tail: tail, Follow: follow})
 	})
 	logs.Flags().IntVar(&tail, "tail", 15, "number of lines")
 	logs.Flags().BoolVar(&follow, "follow", false, "follow new output")
@@ -266,8 +285,8 @@ func (a *cliApp) logsCmd() *cobra.Command {
 	var stream string
 	var tail int
 	var follow bool
-	cmd := a.leafCmd("logs TARGET [TARGET...]", "Read service logs", cobra.MinimumNArgs(1), func(args []string) error {
-		return logsCommand(args, logsOptions{stream: stream, tail: tail, follow: follow})
+	cmd := a.leafCmdWithContext("logs TARGET [TARGET...]", "Read service logs", cobra.MinimumNArgs(1), func(ctx context.Context, args []string) error {
+		return logsCommandWithContext(ctx, args, logsOptions{stream: stream, tail: tail, follow: follow})
 	})
 	cmd.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
 	cmd.Flags().IntVar(&tail, "tail", 15, "number of lines")
