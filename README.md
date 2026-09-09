@@ -2,7 +2,7 @@
 
 Mango is a cross-platform service and workflow manager written in Go. It runs
 long-lived processes, executes one-off tasks, connects tasks into workflows,
-and triggers them on a cron schedule.
+and triggers them on cron schedules or optional authenticated webhooks.
 
 Mango manages any executable. It does not require Node.js, containers, or a
 shell-based process definition.
@@ -32,6 +32,8 @@ shell-based process definition.
 - One-off tasks with timeouts, retries, and concurrency control.
 - DAG workflows that run task nodes sequentially or in parallel.
 - Five-field cron schedules with IANA time zones.
+- Optional authenticated loopback webhooks for triggering tasks and workflows,
+  with HMAC signatures, replay protection, rate limiting, and idempotency.
 - A terminal monitor and interactive execution-history browsers.
 - Per-user startup integration on Windows, Linux, and macOS.
 - JSON output for automation and CI where supported.
