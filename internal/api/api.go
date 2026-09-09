@@ -342,11 +342,10 @@ type HistoryAttemptInfo struct {
 }
 
 // HistoryDetail is returned by history.get/show. It includes the complete
-// workflow node/task and attempt records for the terminal run.
+// workflow node/task, attempt, and lifecycle event records for the terminal run.
 type HistoryDetail struct {
 	HistoryInfo
-	Events     []ExecutionEventInfo     `json:"events,omitempty"`
-	Operations []ExecutionOperationInfo `json:"operations,omitempty"`
+	Events []ExecutionEventInfo `json:"events,omitempty"`
 }
 
 type ExecutionEventInfo struct {
@@ -354,14 +353,6 @@ type ExecutionEventInfo struct {
 	Status    string     `json:"status,omitempty"`
 	Details   string     `json:"details,omitempty"`
 	CreatedAt *time.Time `json:"created_at,omitempty"`
-}
-
-type ExecutionOperationInfo struct {
-	Type        string     `json:"type"`
-	Status      string     `json:"status,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	RequestedAt *time.Time `json:"requested_at,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 type ExecutionLogEntry struct {

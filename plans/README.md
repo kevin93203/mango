@@ -79,7 +79,7 @@ Kubernetes orchestration, or multi-host high availability.
   - YAML and the project registry own desired configuration.
   - Runtime files and `mango-shim` state own process ownership and observed
     process state.
-  - The metadata database owns executions, execution operations, events, audit records,
+  - The metadata database owns executions, events, audit records,
     and schedule occurrences.
   - Log files own execution output.
 - Mango remains single-host and process-native. A future remote-control design

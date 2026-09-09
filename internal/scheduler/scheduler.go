@@ -125,16 +125,6 @@ type ExecutionQuery struct {
 	All bool
 }
 
-type ExecutionOperation struct {
-	ID          int64
-	RunID       string
-	Type        string
-	Status      string
-	Error       string
-	RequestedAt time.Time
-	CompletedAt time.Time
-}
-
 var ErrExecutionNotFound = errors.New("execution not found")
 
 // ErrTerminalExecutionImmutable is returned when a terminal execution is
@@ -157,18 +147,13 @@ type ExecutionStore interface {
 	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
 	UpdateExecution(context.Context, Record) error
 	RecordExecutionEvent(context.Context, ExecutionEvent) error
-	RecordExecutionOperation(context.Context, ExecutionOperation) (ExecutionOperation, error)
 }
 
-// ExecutionEventReader and ExecutionOperationReader are optional detail-read
-// boundaries for history.get. Keeping them separate preserves compatibility
-// with older embedders that implement only the execution lifecycle store.
+// ExecutionEventReader is an optional detail-read boundary for history.get.
+// Keeping it separate preserves compatibility with older embedders that
+// implement only the execution lifecycle store.
 type ExecutionEventReader interface {
 	ListExecutionEvents(context.Context, string) ([]ExecutionEvent, error)
-}
-
-type ExecutionOperationReader interface {
-	ListExecutionOperations(context.Context, string) ([]ExecutionOperation, error)
 }
 
 // HistoryPurger is the narrow destructive history boundary. It removes only
@@ -470,14 +455,6 @@ func (s *Scheduler) RecordExecutionEvent(ctx context.Context, event ExecutionEve
 	return store.RecordExecutionEvent(ctx, event)
 }
 
-func (s *Scheduler) RecordExecutionOperation(ctx context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
-	store := s.executionStore()
-	if store == nil {
-		return operation, nil
-	}
-	return store.RecordExecutionOperation(ctx, operation)
-}
-
 func (s *Scheduler) ListExecutionEvents(ctx context.Context, runID string) ([]ExecutionEvent, error) {
 	store := s.executionStore()
 	reader, ok := store.(ExecutionEventReader)
@@ -485,15 +462,6 @@ func (s *Scheduler) ListExecutionEvents(ctx context.Context, runID string) ([]Ex
 		return []ExecutionEvent{}, nil
 	}
 	return reader.ListExecutionEvents(ctx, runID)
-}
-
-func (s *Scheduler) ListExecutionOperations(ctx context.Context, runID string) ([]ExecutionOperation, error) {
-	store := s.executionStore()
-	reader, ok := store.(ExecutionOperationReader)
-	if !ok {
-		return []ExecutionOperation{}, nil
-	}
-	return reader.ListExecutionOperations(ctx, runID)
 }
 
 // CancelExecution cancels a scheduler-owned execution. Manual executions are

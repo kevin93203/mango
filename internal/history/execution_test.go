@@ -68,11 +68,6 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{
-		RunID: "durable-run", Type: "inspect", Status: "requested",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	events, err := repository.ListExecutionEvents(context.Background(), "durable-run")
 	foundEvent := false
 	for _, event := range events {
@@ -82,10 +77,6 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	}
 	if err != nil || len(events) < 3 || !foundEvent {
 		t.Fatalf("execution events = %+v, err=%v", events, err)
-	}
-	operations, err := repository.ListExecutionOperations(context.Background(), "durable-run")
-	if err != nil || len(operations) != 1 || operations[0].Type != "inspect" {
-		t.Fatalf("execution operations = %+v, err=%v", operations, err)
 	}
 
 	mutated := loaded.Record
@@ -99,7 +90,7 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 		t.Fatalf("terminal to active transition = %v, want transition error", err)
 	}
 
-	for _, model := range []interface{}{&schemaVersionModel{}, &eventModel{}, &operationModel{}} {
+	for _, model := range []interface{}{&schemaVersionModel{}, &eventModel{}} {
 		if !repository.db.Migrator().HasTable(model) {
 			t.Fatalf("migration table missing for %T", model)
 		}
@@ -122,6 +113,32 @@ func TestSQLiteMigrationCreatesBackupBeforeReopen(t *testing.T) {
 	defer repository.Close()
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatalf("migration backup missing: %v", err)
+	}
+}
+
+func TestSQLiteMigrationRemovesRetiredExecutionOperationsTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	repository, err := Open(Config{Driver: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.db.Exec("CREATE TABLE execution_operations (id INTEGER PRIMARY KEY)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", 3).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err = Open(Config{Driver: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	if repository.db.Migrator().HasTable("execution_operations") {
+		t.Fatal("retired execution_operations table still exists after migration")
 	}
 }
 

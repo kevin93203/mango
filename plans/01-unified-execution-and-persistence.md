@@ -71,7 +71,7 @@ Persistence responsibilities remain separated:
 ```text
 YAML / registry       desired configuration
 runtime / shim files  process ownership and observed service state
-metadata database     active runs, attempts, operations, events, audit
+metadata database     active runs, attempts, events, audit
 logs                  stdout and stderr output
 ```
 
@@ -80,7 +80,7 @@ automatic schema creation must not be the production migration mechanism.
 
 ## Implementation Tasks
 
-- Define execution, attempt, operation, and idempotency domain types.
+- Define execution, attempt, and idempotency domain types.
 - Generate one UUID-like `run_id` for every logical execution.
 - Persist an execution before starting the command.
 - Persist state transitions atomically with relevant attempt metadata.

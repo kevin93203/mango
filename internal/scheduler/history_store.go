@@ -64,7 +64,6 @@ type memoryHistoryRepository struct {
 	counters   map[string]uint64
 	executions map[string]Execution
 	events     map[string][]ExecutionEvent
-	operations map[string][]ExecutionOperation
 }
 
 func newMemoryHistoryRepository() HistoryRepository {
@@ -72,7 +71,6 @@ func newMemoryHistoryRepository() HistoryRepository {
 		counters:   make(map[string]uint64),
 		executions: make(map[string]Execution),
 		events:     make(map[string][]ExecutionEvent),
-		operations: make(map[string][]ExecutionOperation),
 	}
 }
 
@@ -164,7 +162,6 @@ func (r *memoryHistoryRepository) Clear(_ context.Context) error {
 	r.counters = make(map[string]uint64)
 	r.executions = make(map[string]Execution)
 	r.events = make(map[string][]ExecutionEvent)
-	r.operations = make(map[string][]ExecutionOperation)
 	return nil
 }
 
@@ -368,7 +365,6 @@ func (r *memoryHistoryRepository) Purge(_ context.Context, before *time.Time, al
 		if purge {
 			delete(r.executions, record.RunID)
 			delete(r.events, record.RunID)
-			delete(r.operations, record.RunID)
 			removed++
 			continue
 		}
@@ -385,28 +381,10 @@ func (r *memoryHistoryRepository) RecordExecutionEvent(_ context.Context, event 
 	return nil
 }
 
-func (r *memoryHistoryRepository) RecordExecutionOperation(_ context.Context, operation ExecutionOperation) (ExecutionOperation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if operation.RequestedAt.IsZero() {
-		operation.RequestedAt = time.Now().UTC()
-	}
-	operation.ID = int64(len(r.operations[operation.RunID]) + 1)
-	r.operations[operation.RunID] = append(r.operations[operation.RunID], operation)
-	r.appendEventLocked(ExecutionEvent{RunID: operation.RunID, Type: "operation:" + operation.Type, Status: operation.Status, Details: operation.Error, CreatedAt: operation.RequestedAt})
-	return operation, nil
-}
-
 func (r *memoryHistoryRepository) ListExecutionEvents(_ context.Context, runID string) ([]ExecutionEvent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]ExecutionEvent(nil), r.events[runID]...), nil
-}
-
-func (r *memoryHistoryRepository) ListExecutionOperations(_ context.Context, runID string) ([]ExecutionOperation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]ExecutionOperation(nil), r.operations[runID]...), nil
 }
 
 func (r *memoryHistoryRepository) appendEventLocked(event ExecutionEvent) {

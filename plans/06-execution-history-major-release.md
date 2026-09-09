@@ -37,12 +37,13 @@ with different semantics.
 
 ## Data migration
 
-Opening an existing database applies schema migration 3. It adds nullable,
-indexed `history_runs.retried_from_run_id`; no foreign key is created, so a
-source run may be purged later. Existing rows are read as-is. Historical
-records that previously reused one `run_id` for retries are not split.
+Opening an existing database applies schema migration 4. It adds nullable,
+indexed `history_runs.retried_from_run_id` and removes the retired
+`execution_operations` table; no foreign key is created, so a source run may
+be purged later. Existing rows are read as-is. Historical records that
+previously reused one `run_id` for retries are not split.
 
-Retention and purge delete only terminal runs and their tasks, attempts,
-events, and operations. They never delete queued/running metadata, lifetime
-counters, or log files. Restore the existing `history.db.bak` backup procedure
-if a SQLite migration fails.
+Retention and purge delete only terminal runs and their tasks, attempts, and
+events. They never delete queued/running metadata, lifetime counters, or log
+files. Restore the existing `history.db.bak` backup procedure if a SQLite
+migration fails.

@@ -3881,22 +3881,6 @@ func (d *Daemon) historyDetail(ctx context.Context, record scheduler.Record) (ap
 			Type: event.Type, Status: event.Status, Details: event.Details, CreatedAt: &created,
 		})
 	}
-	operations, err := d.scheduler.ListExecutionOperations(ctx, record.RunID)
-	if err != nil {
-		return api.HistoryDetail{}, err
-	}
-	for _, operation := range operations {
-		item := api.ExecutionOperationInfo{Type: operation.Type, Status: operation.Status, Error: operation.Error}
-		if !operation.RequestedAt.IsZero() {
-			requested := operation.RequestedAt
-			item.RequestedAt = &requested
-		}
-		if !operation.CompletedAt.IsZero() {
-			completed := operation.CompletedAt
-			item.CompletedAt = &completed
-		}
-		detail.Operations = append(detail.Operations, item)
-	}
 	return detail, nil
 }
 
@@ -4069,9 +4053,6 @@ func (d *Daemon) cancelExecution(runID string) error {
 	if isTerminalExecution(execution.Record.Status) {
 		return nil
 	}
-	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: runID, Type: "cancel", Status: "requested", RequestedAt: time.Now().UTC()}); err != nil {
-		return err
-	}
 	if d.cancelManualExecution(runID) || d.scheduler.CancelExecution(runID) {
 		return nil
 	}
@@ -4101,9 +4082,6 @@ func (d *Daemon) retryExecution(runID string) (scheduler.Execution, error) {
 	if execution.Record.TargetType == "task" && !d.workflow.HasTask(execution.Record.Project+"/"+execution.Record.Target) {
 		return scheduler.Execution{}, fmt.Errorf("retry target %s/%s no longer exists", execution.Record.Project, execution.Record.Target)
 	}
-	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: runID, Type: "retry", Status: "requested", RequestedAt: time.Now().UTC()}); err != nil {
-		return scheduler.Execution{}, err
-	}
 	configurationGeneration := d.projectGeneration(execution.Record.Project)
 	if configurationGeneration == 0 {
 		configurationGeneration = d.currentConfigurationGeneration()
@@ -4131,9 +4109,6 @@ func (d *Daemon) retryExecution(runID string) (scheduler.Execution, error) {
 	}
 	if !created {
 		return scheduler.Execution{}, fmt.Errorf("retry generated duplicate execution %s", queuedExecution.Record.RunID)
-	}
-	if _, err := d.scheduler.RecordExecutionOperation(context.Background(), scheduler.ExecutionOperation{RunID: newRunID, Type: "retry", Status: "requested", RequestedAt: now}); err != nil {
-		return scheduler.Execution{}, err
 	}
 	if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
 		return scheduler.Execution{}, err

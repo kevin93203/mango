@@ -237,8 +237,7 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 		t.Fatalf("history.get failed: %+v", response.Error)
 	}
 	var detail struct {
-		Events     []struct{ Type, Status string } `json:"events"`
-		Operations []struct{ Type, Status string } `json:"operations"`
+		Events []struct{ Type, Status string } `json:"events"`
 	}
 	if err := decodeTestData(response.Data, &detail); err != nil {
 		t.Fatal(err)
@@ -249,14 +248,8 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 			foundCancelled = true
 		}
 	}
-	foundCancelOperation := false
-	for _, operation := range detail.Operations {
-		if operation.Type == "cancel" && operation.Status == "requested" {
-			foundCancelOperation = true
-		}
-	}
-	if !foundCancelled || !foundCancelOperation {
-		t.Fatalf("history detail events=%+v operations=%+v", detail.Events, detail.Operations)
+	if !foundCancelled {
+		t.Fatalf("history detail events=%+v", detail.Events)
 	}
 	retry := requestForMethod(t, "execution.retry")
 	retry.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))

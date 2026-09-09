@@ -1146,8 +1146,8 @@ mango history purge (--before RFC3339 | --all) --yes [--json]
 History is terminal-only and is read from the canonical execution store.
 `history ls` is newest-first and `--limit 0` returns all retained terminal
 runs. `history show` accepts terminal runs and returns workflow nodes, task
-records, and attempts. `history purge` removes only terminal runs and their
-tasks, attempts, events, and operations; it never removes active metadata,
+records, attempts, and lifecycle events. `history purge` removes only terminal
+runs and their tasks, attempts, and events; it never removes active metadata,
 lifetime counters, or log files. Purged run IDs return not found.
 
 History JSON uses stable snake_case `HistoryInfo` fields. Text output shows

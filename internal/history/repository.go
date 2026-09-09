@@ -127,19 +127,7 @@ type eventModel struct {
 
 func (eventModel) TableName() string { return "execution_events" }
 
-type operationModel struct {
-	ID          int64     `gorm:"primaryKey;autoIncrement"`
-	RunID       string    `gorm:"index;size:255;not null"`
-	Type        string    `gorm:"size:64;not null"`
-	Status      string    `gorm:"size:32"`
-	Error       string    `gorm:"type:text"`
-	RequestedAt time.Time `gorm:"index"`
-	CompletedAt *time.Time
-}
-
-func (operationModel) TableName() string { return "execution_operations" }
-
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 func Open(config Config) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
@@ -269,7 +257,7 @@ func applyMigration(db *gorm.DB, version int) error {
 				}
 			}
 		}
-		for _, model := range []interface{}{&eventModel{}, &operationModel{}} {
+		for _, model := range []interface{}{&eventModel{}} {
 			if !migrator.HasTable(model) {
 				if err := migrator.CreateTable(model); err != nil {
 					return err
@@ -289,6 +277,13 @@ func applyMigration(db *gorm.DB, version int) error {
 		if !migrator.HasIndex(&runModel{}, "idx_history_runs_retried_from_run_id") {
 			if err := migrator.CreateIndex(&runModel{}, "idx_history_runs_retried_from_run_id"); err != nil {
 				return fmt.Errorf("index history_runs.retried_from_run_id: %w", err)
+			}
+		}
+		return nil
+	case 4:
+		if migrator.HasTable("execution_operations") {
+			if err := migrator.DropTable("execution_operations"); err != nil {
+				return fmt.Errorf("drop execution_operations table: %w", err)
 			}
 		}
 		return nil
@@ -737,42 +732,6 @@ func (r *Repository) ListExecutionEvents(ctx context.Context, runID string) ([]s
 	return result, nil
 }
 
-func (r *Repository) RecordExecutionOperation(ctx context.Context, operation scheduler.ExecutionOperation) (scheduler.ExecutionOperation, error) {
-	r.writeMu.Lock()
-	defer r.writeMu.Unlock()
-	if operation.RequestedAt.IsZero() {
-		operation.RequestedAt = time.Now().UTC()
-	}
-	var model operationModel
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		model = operationModel{RunID: operation.RunID, Type: operation.Type, Status: operation.Status, Error: operation.Error, RequestedAt: operation.RequestedAt, CompletedAt: timePointer(operation.CompletedAt)}
-		if err := tx.Create(&model).Error; err != nil {
-			return err
-		}
-		return createEvent(tx, scheduler.ExecutionEvent{RunID: operation.RunID, Type: "operation:" + operation.Type, Status: operation.Status, Details: operation.Error, CreatedAt: operation.RequestedAt})
-	})
-	if err != nil {
-		return scheduler.ExecutionOperation{}, err
-	}
-	operation.ID = model.ID
-	return operation, nil
-}
-
-func (r *Repository) ListExecutionOperations(ctx context.Context, runID string) ([]scheduler.ExecutionOperation, error) {
-	var rows []operationModel
-	if err := r.db.WithContext(ctx).Where("run_id = ?", runID).Order("id ASC").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	result := make([]scheduler.ExecutionOperation, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, scheduler.ExecutionOperation{
-			ID: row.ID, RunID: row.RunID, Type: row.Type, Status: row.Status,
-			Error: row.Error, RequestedAt: row.RequestedAt, CompletedAt: timeValue(row.CompletedAt),
-		})
-	}
-	return result, nil
-}
-
 // Ping verifies that the database connection used by the repository is
 // currently usable without modifying any history data.
 func (r *Repository) Ping(ctx context.Context) error {
@@ -799,7 +758,6 @@ func (r *Repository) MissingTables(ctx context.Context) ([]string, error) {
 		{name: "history_counters", model: &counterModel{}},
 		{name: "schema_version", model: &schemaVersionModel{}},
 		{name: "execution_events", model: &eventModel{}},
-		{name: "execution_operations", model: &operationModel{}},
 	}
 	migrator := r.db.WithContext(ctx).Migrator()
 	missing := make([]string, 0)
@@ -829,9 +787,6 @@ func (r *Repository) Clear(ctx context.Context) error {
 			return err
 		}
 		if err := allowGlobalDelete.Delete(&eventModel{}).Error; err != nil {
-			return err
-		}
-		if err := allowGlobalDelete.Delete(&operationModel{}).Error; err != nil {
 			return err
 		}
 		return allowGlobalDelete.Delete(&counterModel{}).Error
@@ -882,9 +837,6 @@ func (r *Repository) Purge(ctx context.Context, before *time.Time, all bool) (in
 			return err
 		}
 		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("run_id IN ?", runIDs).Delete(&operationModel{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("run_row_id IN ?", ids).Delete(&taskModel{}).Error; err != nil {
@@ -1087,9 +1039,6 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 	}
 	if len(runIDs) > 0 {
 		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("run_id IN ?", runIDs).Delete(&operationModel{}).Error; err != nil {
 			return err
 		}
 	}
