@@ -34,19 +34,19 @@ type Repository struct {
 }
 
 type runModel struct {
-	ID                      int64     `gorm:"primaryKey;autoIncrement"`
-	RunID                   string    `gorm:"uniqueIndex;size:255;not null"`
-	Project                 string    `gorm:"index:idx_history_runs_target,priority:1;size:255"`
-	Name                    string    `gorm:"size:255"`
-	TargetType              string    `gorm:"index:idx_history_runs_target,priority:2;size:32"`
-	Target                  string    `gorm:"index:idx_history_runs_target,priority:3;size:255"`
-	TriggerType             string    `gorm:"index:idx_history_runs_trigger,priority:1;size:32"`
-	TriggerName             string    `gorm:"index:idx_history_runs_trigger,priority:2;size:255"`
-	TriggerMode             string    `gorm:"size:32"`
-	EventID                 string    `gorm:"size:255"`
-	Status                  string    `gorm:"size:32"`
-	Started                 time.Time `gorm:"index:idx_history_runs_started,priority:1"`
-	Finished                time.Time
+	ID                      int64      `gorm:"primaryKey;autoIncrement"`
+	RunID                   string     `gorm:"uniqueIndex;size:255;not null"`
+	Project                 string     `gorm:"index:idx_history_runs_target,priority:1;size:255"`
+	Name                    string     `gorm:"size:255"`
+	TargetType              string     `gorm:"index:idx_history_runs_target,priority:2;size:32"`
+	Target                  string     `gorm:"index:idx_history_runs_target,priority:3;size:255"`
+	TriggerType             string     `gorm:"index:idx_history_runs_trigger,priority:1;size:32"`
+	TriggerName             string     `gorm:"index:idx_history_runs_trigger,priority:2;size:255"`
+	TriggerMode             string     `gorm:"size:32"`
+	EventID                 string     `gorm:"size:255"`
+	Status                  string     `gorm:"size:32"`
+	Started                 *time.Time `gorm:"index:idx_history_runs_started,priority:1"`
+	Finished                *time.Time
 	ExitCode                int
 	Error                   string `gorm:"type:text"`
 	Stderr                  string `gorm:"type:text"`
@@ -73,9 +73,9 @@ type taskModel struct {
 	WorkingDir      string `gorm:"type:text"`
 	EnvKeysJSON     string `gorm:"type:text"`
 	ArgsRedacted    bool
-	Status          string    `gorm:"size:32"`
-	Started         time.Time `gorm:"index:idx_history_tasks_run_started,priority:2"`
-	Finished        time.Time
+	Status          string     `gorm:"size:32"`
+	Started         *time.Time `gorm:"index:idx_history_tasks_run_started,priority:2"`
+	Finished        *time.Time
 	DurationSeconds float64
 	ExitCode        int
 	Error           string `gorm:"type:text"`
@@ -91,8 +91,8 @@ type attemptModel struct {
 	RunRowID        int64 `gorm:"index;not null"`
 	TaskRowID       int64 `gorm:"index;not null"`
 	Number          int
-	Started         time.Time
-	Finished        time.Time
+	Started         *time.Time
+	Finished        *time.Time
 	DurationSeconds float64
 	ExitCode        int
 	Error           string `gorm:"type:text"`
@@ -134,7 +134,7 @@ type operationModel struct {
 	Status      string    `gorm:"size:32"`
 	Error       string    `gorm:"type:text"`
 	RequestedAt time.Time `gorm:"index"`
-	CompletedAt time.Time
+	CompletedAt *time.Time
 }
 
 func (operationModel) TableName() string { return "execution_operations" }
@@ -557,7 +557,7 @@ func recordFromModel(run runModel) (scheduler.Record, error) {
 	return scheduler.Record{
 		RunID: compatibleRunID(run), Project: run.Project, Name: run.Name, TargetType: run.TargetType, Target: run.Target,
 		Trigger: scheduler.TriggerRef{Type: run.TriggerType, Name: run.TriggerName, Mode: run.TriggerMode, EventID: run.EventID},
-		Status:  run.Status, Started: run.Started, Finished: run.Finished, ExitCode: run.ExitCode,
+		Status:  run.Status, Started: timeValue(run.Started), Finished: timeValue(run.Finished), ExitCode: run.ExitCode,
 		Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath,
 		IdempotencyKey: run.IdempotencyKey, ConfigurationGeneration: run.ConfigurationGeneration,
 		RetriedFromRunID: stringValue(run.RetriedFromRunID),
@@ -745,7 +745,7 @@ func (r *Repository) RecordExecutionOperation(ctx context.Context, operation sch
 	}
 	var model operationModel
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		model = operationModel{RunID: operation.RunID, Type: operation.Type, Status: operation.Status, Error: operation.Error, RequestedAt: operation.RequestedAt, CompletedAt: operation.CompletedAt}
+		model = operationModel{RunID: operation.RunID, Type: operation.Type, Status: operation.Status, Error: operation.Error, RequestedAt: operation.RequestedAt, CompletedAt: timePointer(operation.CompletedAt)}
 		if err := tx.Create(&model).Error; err != nil {
 			return err
 		}
@@ -767,7 +767,7 @@ func (r *Repository) ListExecutionOperations(ctx context.Context, runID string) 
 	for _, row := range rows {
 		result = append(result, scheduler.ExecutionOperation{
 			ID: row.ID, RunID: row.RunID, Type: row.Type, Status: row.Status,
-			Error: row.Error, RequestedAt: row.RequestedAt, CompletedAt: row.CompletedAt,
+			Error: row.Error, RequestedAt: row.RequestedAt, CompletedAt: timeValue(row.CompletedAt),
 		})
 	}
 	return result, nil
@@ -852,7 +852,9 @@ func (r *Repository) Purge(ctx context.Context, before *time.Time, all bool) (in
 		statuses := []string{scheduler.StatusSuccess, scheduler.StatusFailed, scheduler.StatusSkipped, scheduler.StatusCancelled, scheduler.StatusInterrupted}
 		query := tx.Model(&runModel{}).Where("status IN ?", statuses)
 		if !all {
-			query = query.Where("finished < ?", *before)
+			// An unset finish time was historically represented by Go's zero
+			// time, which compares older than any normal retention cutoff.
+			query = query.Where("finished IS NULL OR finished < ?", *before)
 		}
 		var runs []runModel
 		if err := query.Find(&runs).Error; err != nil {
@@ -1052,9 +1054,16 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 		return err
 	}
 	var ids []int64
-	if err := tx.Model(&runModel{}).Where("status IN ?", statuses).
-		Where("finished < ? OR (finished = ? AND id <= ?)", boundary.Finished, boundary.Finished, boundary.ID).
-		Pluck("id", &ids).Error; err != nil {
+	deleteQuery := tx.Model(&runModel{}).Where("status IN ?", statuses)
+	if boundary.Finished == nil {
+		// NULL represents an unset finish time. It sorts before concrete
+		// timestamps for the retention purpose of these legacy/incomplete
+		// terminal rows, so only the NULL rows up to the boundary are removed.
+		deleteQuery = deleteQuery.Where("finished IS NULL AND id <= ?", boundary.ID)
+	} else {
+		deleteQuery = deleteQuery.Where("finished IS NULL OR finished < ? OR (finished = ? AND id <= ?)", boundary.Finished, boundary.Finished, boundary.ID)
+	}
+	if err := deleteQuery.Pluck("id", &ids).Error; err != nil {
 		return err
 	}
 	var taskIDs []int64
@@ -1124,7 +1133,7 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 		record := scheduler.Record{
 			RunID: compatibleRunID(run), Project: run.Project, Name: run.Name, TargetType: run.TargetType, Target: run.Target,
 			Trigger: scheduler.TriggerRef{Type: run.TriggerType, Name: run.TriggerName, Mode: run.TriggerMode, EventID: run.EventID},
-			Status:  run.Status, Started: run.Started, Finished: run.Finished, ExitCode: run.ExitCode,
+			Status:  run.Status, Started: timeValue(run.Started), Finished: timeValue(run.Finished), ExitCode: run.ExitCode,
 			Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath,
 			IdempotencyKey: run.IdempotencyKey, ConfigurationGeneration: run.ConfigurationGeneration,
 			RetriedFromRunID: stringValue(run.RetriedFromRunID),
@@ -1142,7 +1151,7 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 				RunID: task.TaskRunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
 				Command: task.Command, Args: decodeStrings(task.ArgsJSON), WorkingDir: task.WorkingDir,
 				EnvKeys: decodeStrings(task.EnvKeysJSON), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
-				Started: task.Started, Finished: task.Finished, DurationSeconds: task.DurationSeconds,
+				Started: timeValue(task.Started), Finished: timeValue(task.Finished), DurationSeconds: task.DurationSeconds,
 				ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
 				StdoutPath: task.StdoutPath, StderrPath: task.StderrPath,
 				Attempts: cloneAttempts(attemptsByTask[task.ID]),
@@ -1157,7 +1166,7 @@ func runModelFromRecord(record scheduler.Record) runModel {
 	return runModel{
 		RunID: record.RunID, Project: record.Project, Name: record.Name, TargetType: record.TargetType, Target: record.Target,
 		TriggerType: record.Trigger.Type, TriggerName: record.Trigger.Name, TriggerMode: record.Trigger.Mode, EventID: record.Trigger.EventID,
-		Status: record.Status, Started: record.Started, Finished: record.Finished, ExitCode: record.ExitCode,
+		Status: record.Status, Started: timePointer(record.Started), Finished: timePointer(record.Finished), ExitCode: record.ExitCode,
 		Error: record.Error, Stderr: record.Stderr, StdoutPath: record.StdoutPath, StderrPath: record.StderrPath,
 		IdempotencyKey: record.IdempotencyKey, ConfigurationGeneration: record.ConfigurationGeneration,
 		RetriedFromRunID: stringPointer(record.RetriedFromRunID),
@@ -1183,7 +1192,7 @@ func taskModelFromRecord(runID int64, task scheduler.TaskRecord) taskModel {
 		RunRowID: runID, TaskRunID: task.RunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
 		Command: task.Command, ArgsJSON: encodeStrings(task.Args), WorkingDir: task.WorkingDir,
 		EnvKeysJSON: encodeStrings(task.EnvKeys), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
-		Started: task.Started, Finished: task.Finished, DurationSeconds: task.DurationSeconds,
+		Started: timePointer(task.Started), Finished: timePointer(task.Finished), DurationSeconds: task.DurationSeconds,
 		ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
 		StdoutPath: task.StdoutPath, StderrPath: task.StderrPath,
 	}
@@ -1192,8 +1201,8 @@ func taskModelFromRecord(runID int64, task scheduler.TaskRecord) taskModel {
 func createAttempts(tx *gorm.DB, runID, taskID int64, attempts []scheduler.Attempt) error {
 	for _, attempt := range attempts {
 		model := attemptModel{
-			RunRowID: runID, TaskRowID: taskID, Number: attempt.Number, Started: attempt.Started,
-			Finished: attempt.Finished, DurationSeconds: attempt.DurationSeconds, ExitCode: attempt.ExitCode,
+			RunRowID: runID, TaskRowID: taskID, Number: attempt.Number, Started: timePointer(attempt.Started),
+			Finished: timePointer(attempt.Finished), DurationSeconds: attempt.DurationSeconds, ExitCode: attempt.ExitCode,
 			Error: attempt.Error, Stderr: attempt.Stderr,
 		}
 		if err := tx.Create(&model).Error; err != nil {
@@ -1205,9 +1214,27 @@ func createAttempts(tx *gorm.DB, runID, taskID int64, attempts []scheduler.Attem
 
 func attemptToRecord(attempt attemptModel) scheduler.Attempt {
 	return scheduler.Attempt{
-		Number: attempt.Number, Started: attempt.Started, Finished: attempt.Finished,
+		Number: attempt.Number, Started: timeValue(attempt.Started), Finished: timeValue(attempt.Finished),
 		DurationSeconds: attempt.DurationSeconds, ExitCode: attempt.ExitCode, Error: attempt.Error, Stderr: attempt.Stderr,
 	}
+}
+
+// timePointer maps an optional application timestamp to a nullable database
+// value. MySQL strict mode rejects Go's zero time when it is encoded as the
+// legacy zero date (0000-00-00 00:00:00), so unset timestamps must be stored as
+// SQL NULL instead.
+func timePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
+func timeValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func cloneAttempts(attempts []scheduler.Attempt) []scheduler.Attempt {

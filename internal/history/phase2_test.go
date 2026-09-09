@@ -54,6 +54,34 @@ func TestTerminalExecutionIsImmutableAndCannotReturnToActive(t *testing.T) {
 	}
 }
 
+func TestActiveExecutionStoresUnsetTimesAsNull(t *testing.T) {
+	repository := openTestRepository(t)
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	record := scheduler.Record{
+		RunID: "active", Project: "demo", TargetType: "task", Target: "job",
+		Status: scheduler.StatusQueued, Started: started,
+	}
+	if _, created, err := repository.BeginExecution(context.Background(), record, "", 1); err != nil || !created {
+		t.Fatalf("BeginExecution = created %v, err %v", created, err)
+	}
+
+	var stored runModel
+	if err := repository.db.Where("run_id = ?", record.RunID).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Finished != nil {
+		t.Fatalf("stored finished = %v, want NULL", *stored.Finished)
+	}
+
+	loaded, err := repository.GetExecution(context.Background(), record.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Record.Finished.IsZero() {
+		t.Fatalf("loaded finished = %v, want zero time", loaded.Record.Finished)
+	}
+}
+
 func TestPurgeDeletesOnlyTerminalMetadataAndKeepsCounters(t *testing.T) {
 	repository := openTestRepository(t)
 	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
