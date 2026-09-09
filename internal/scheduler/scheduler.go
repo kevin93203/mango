@@ -826,7 +826,7 @@ func (s *Scheduler) executeWithRetry(ctx context.Context, schedule config.Effect
 			return result, attempts
 		}
 		attemptStarted := time.Now()
-		result = s.runner(ctx, schedule)
+		result = s.runner(WithAttemptNumber(ctx, attemptNumber), schedule)
 		attemptFinished := time.Now()
 		attempt := Attempt{
 			Number:          attemptNumber,

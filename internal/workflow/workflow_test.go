@@ -102,6 +102,24 @@ func TestTaskRecordsPersistSafeExecutionMetadata(t *testing.T) {
 	assertSafeTaskRecord(t, workflowRun.Record.Tasks[0])
 }
 
+func TestTaskRunnerReceivesAttemptNumber(t *testing.T) {
+	task := testTask("demo", "retry")
+	task.RetryCount = 1
+	var numbers []int
+	e := New(func(_ context.Context, _ config.EffectiveTask, invocation Invocation) scheduler.ExecutionResult {
+		numbers = append(numbers, invocation.AttemptNumber)
+		if len(numbers) == 1 {
+			return scheduler.ExecutionResult{ExitCode: 1, Err: errors.New("retry")}
+		}
+		return scheduler.ExecutionResult{}
+	}, nil)
+	e.Apply(map[string]config.EffectiveTask{"demo/retry": task}, nil)
+	result := e.RunTask(context.Background(), "demo", "retry", scheduler.ManualTrigger())
+	if result.ExitCode != 0 || len(numbers) != 2 || numbers[0] != 1 || numbers[1] != 2 {
+		t.Fatalf("result = %+v, runner attempt numbers = %v, want success and [1 2]", result, numbers)
+	}
+}
+
 func assertSafeTaskRecord(t *testing.T, record scheduler.TaskRecord) {
 	t.Helper()
 	if record.Command != "/usr/bin/compiler" || record.WorkingDir != "/workspace/demo" {

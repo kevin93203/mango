@@ -3,11 +3,14 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/scheduler"
 )
 
@@ -336,6 +339,99 @@ func TestUnifiedHistoryDirectTaskAttemptTablePaginatesAndPreservesSelection(t *t
 	if model.screen != unifiedHistoryTask || model.selected != 15 {
 		t.Fatalf("direct task back selection = screen %d, selected %d", model.screen, model.selected)
 	}
+}
+
+func TestUnifiedHistoryAttemptOutputLoadsSeparateRetainedStreams(t *testing.T) {
+	root := t.TempDir()
+	task := scheduler.TaskRecord{
+		RunID:      "task-run",
+		Node:       "compile",
+		Task:       "compile",
+		StdoutPath: filepath.Join(root, "execution", "stdout.log"),
+		StderrPath: filepath.Join(root, "execution", "stderr.log"),
+		Attempts:   []scheduler.Attempt{{Number: 1, Error: "first failed"}, {Number: 2, Error: "second failed"}},
+	}
+	for _, test := range []struct {
+		number int
+		stdout string
+		stderr string
+	}{
+		{number: 1, stdout: "attempt one stdout\n", stderr: "attempt one stderr\n"},
+		{number: 2, stdout: "attempt two stdout\n", stderr: "attempt two stderr\n"},
+	} {
+		stdoutPath := logging.AttemptPath(task.StdoutPath, task.RunID, test.number, "stdout")
+		stderrPath := logging.AttemptPath(task.StderrPath, task.RunID, test.number, "stderr")
+		if err := os.MkdirAll(filepath.Dir(stdoutPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stdoutPath+".1", []byte("rotated "+test.stdout), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stdoutPath, []byte(test.stdout), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stderrPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stderrPath, []byte(test.stderr), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	model := &unifiedHistoryModel{records: []scheduler.Record{{
+		RunID: "run-1", TargetType: "task", Target: "compile", Tasks: []scheduler.TaskRecord{task},
+	}}}
+	model.enter()
+	model.enter()
+	model.enter()
+	text := historyOutputText(model.outputLines())
+	for _, want := range []string{"error", "first failed", "stdout", "rotated attempt one stdout", "attempt one stdout", "stderr", "attempt one stderr"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("attempt output = %q, want %q", text, want)
+		}
+	}
+	for _, unwanted := range []string{"second failed", "attempt two stdout", "attempt two stderr"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("attempt output = %q, must not contain %q", text, unwanted)
+		}
+	}
+}
+
+func TestUnifiedHistoryLegacyAttemptOutputMarksMissingStdout(t *testing.T) {
+	task := scheduler.TaskRecord{
+		RunID:      "old-task-run",
+		StdoutPath: filepath.Join(t.TempDir(), "stdout.log"),
+		StderrPath: filepath.Join(t.TempDir(), "stderr.log"),
+	}
+	lines, err := loadHistoryAttemptOutput(task, scheduler.Attempt{Number: 1, Stderr: "saved attempt stderr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := historyOutputText(lines)
+	if !strings.Contains(text, "unavailable") || !strings.Contains(text, "saved attempt stderr") {
+		t.Fatalf("legacy output = %q, want unavailable stdout and saved stderr", text)
+	}
+}
+
+func TestUnifiedHistorySyntheticTaskPreservesLogPaths(t *testing.T) {
+	run := scheduler.Record{
+		RunID: "run-1", TargetType: "task", Target: "compile",
+		StdoutPath: "stdout.log", StderrPath: "stderr.log",
+		Attempts: []scheduler.Attempt{{Number: 1}},
+	}
+	model := &unifiedHistoryModel{records: []scheduler.Record{run}}
+	tasks := model.visibleTasks()
+	if len(tasks) != 1 || tasks[0].StdoutPath != run.StdoutPath || tasks[0].StderrPath != run.StderrPath {
+		t.Fatalf("synthetic task = %+v, want inherited log paths", tasks)
+	}
+}
+
+func historyOutputText(lines []historyOutputLine) string {
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		values = append(values, line.Text)
+	}
+	return strings.Join(values, "\n")
 }
 
 func TestReadWorkflowHistoryKeyRecognizesHorizontalArrows(t *testing.T) {

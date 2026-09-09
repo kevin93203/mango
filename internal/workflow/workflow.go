@@ -32,6 +32,9 @@ type Invocation struct {
 	RunID       string
 	Trigger     scheduler.TriggerRef
 	ParentRunID string
+	// AttemptNumber is internal execution context used to isolate the
+	// process output produced by each retry attempt.
+	AttemptNumber int
 }
 
 type TaskRunner func(context.Context, config.EffectiveTask, Invocation) scheduler.ExecutionResult
@@ -454,7 +457,9 @@ func (e *Executor) executeTask(ctx context.Context, task config.EffectiveTask, i
 			return scheduler.ExecutionResult{ExitCode: 130, Err: ctx.Err()}, attempts
 		}
 		attemptStarted := time.Now()
-		result = e.runner(ctx, task, invocation)
+		attemptInvocation := invocation
+		attemptInvocation.AttemptNumber = number
+		result = e.runner(ctx, task, attemptInvocation)
 		attemptFinished := time.Now()
 		e.releaseTask(task.Project + "/" + task.Name)
 		attempt := scheduler.Attempt{Number: number, Started: attemptStarted, Finished: attemptFinished, DurationSeconds: nonNegativeSeconds(attemptFinished.Sub(attemptStarted)), ExitCode: result.ExitCode, Stderr: result.Stderr}

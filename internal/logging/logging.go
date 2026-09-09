@@ -179,10 +179,27 @@ func NewManager(root string) *Manager {
 }
 
 func (m *Manager) Open(project, process, stream string, maxSize int64, maxFiles int) (*RotatingWriter, string, error) {
-	if stream != "stdout" && stream != "stderr" {
-		return nil, "", fmt.Errorf("invalid log stream %q", stream)
+	if err := validateStream(stream); err != nil {
+		return nil, "", err
 	}
 	path := filepath.Join(m.root, cleanPart(project), cleanPart(process), stream+".log")
+	pathMu := m.pathLock(path)
+	pathMu.RLock()
+	defer pathMu.RUnlock()
+	writer, err := Open(path, maxSize, maxFiles)
+	if writer != nil {
+		writer.pathMu = pathMu
+	}
+	return writer, path, err
+}
+
+// OpenAttempt opens the isolated log for one execution attempt. basePath is
+// the corresponding aggregate execution log path.
+func (m *Manager) OpenAttempt(basePath, ownerID string, attemptNumber int, stream string, maxSize int64, maxFiles int) (*RotatingWriter, string, error) {
+	if err := validateStream(stream); err != nil {
+		return nil, "", err
+	}
+	path := AttemptPath(basePath, ownerID, attemptNumber, stream)
 	pathMu := m.pathLock(path)
 	pathMu.RLock()
 	defer pathMu.RUnlock()
@@ -253,6 +270,13 @@ func (m *Manager) pathLock(path string) *sync.RWMutex {
 
 func (m *Manager) Path(project, process, stream string) string {
 	return filepath.Join(m.root, cleanPart(project), cleanPart(process), stream+".log")
+}
+
+func validateStream(stream string) error {
+	if stream != "stdout" && stream != "stderr" {
+		return fmt.Errorf("invalid log stream %q", stream)
+	}
+	return nil
 }
 
 func decimalSuffix(value string) bool {

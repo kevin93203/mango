@@ -128,6 +128,30 @@ func TestRunNowRetriesFailedExecution(t *testing.T) {
 	}
 }
 
+func TestRunNowPassesAttemptNumberToRunner(t *testing.T) {
+	var numbers []int
+	s := New(func(ctx context.Context, _ config.EffectiveSchedule) ExecutionResult {
+		numbers = append(numbers, AttemptNumber(ctx))
+		if len(numbers) < 2 {
+			return ExecutionResult{ExitCode: 1, Err: errors.New("retry")}
+		}
+		return ExecutionResult{}
+	})
+	if err := s.Apply([]config.EffectiveSchedule{{
+		Project: "demo", Name: "numbered", Cron: "* * * * *", Timezone: time.UTC,
+		RetryCount: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunNow(context.Background(), "demo/numbered"); err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	if len(numbers) != 2 || numbers[0] != 1 || numbers[1] != 2 {
+		t.Fatalf("runner attempt numbers = %v, want [1 2]", numbers)
+	}
+}
+
 func TestRunIDsAreUniqueForConcurrentRuns(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})

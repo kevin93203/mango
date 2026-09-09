@@ -16,6 +16,7 @@ import (
 	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
+	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/metrics"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
@@ -445,6 +446,97 @@ func TestScheduleRunCapturesStderrInRecordAndLog(t *testing.T) {
 	}
 	if string(data) != result.Stderr {
 		t.Fatalf("stderr log = %q, result stderr = %q", data, result.Stderr)
+	}
+}
+
+func TestTaskAttemptCapturesPerAttemptStreams(t *testing.T) {
+	if os.Getenv("MANGO_TASK_ATTEMPT_HELPER") == "1" {
+		fmt.Fprintln(os.Stdout, os.Getenv("MANGO_TASK_ATTEMPT_STDOUT"))
+		fmt.Fprintln(os.Stderr, os.Getenv("MANGO_TASK_ATTEMPT_STDERR"))
+		if os.Getenv("MANGO_TASK_ATTEMPT_FAIL") == "1" {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	d := New(testLayout(t.TempDir()))
+	task := config.EffectiveTask{
+		Project:    "demo",
+		Name:       "retry-task",
+		Command:    os.Args[0],
+		Args:       []string{"-test.run=TestTaskAttemptCapturesPerAttemptStreams", "--"},
+		WorkingDir: t.TempDir(),
+	}
+	baseInvocation := workflow.Invocation{Project: "demo", Node: "retry-task", RunID: "task-run"}
+	for number, values := range []struct {
+		stdout string
+		stderr string
+	}{{"attempt one stdout", "attempt one stderr"}, {"attempt two stdout", "attempt two stderr"}} {
+		attemptNumber := number + 1
+		task.Env = map[string]string{
+			"MANGO_TASK_ATTEMPT_HELPER": "1",
+			"MANGO_TASK_ATTEMPT_STDOUT": values.stdout,
+			"MANGO_TASK_ATTEMPT_STDERR": values.stderr,
+		}
+		invocation := baseInvocation
+		invocation.AttemptNumber = attemptNumber
+		result := d.runTaskAttempt(context.Background(), task, invocation)
+		if result.ExitCode != 0 || result.Err != nil {
+			t.Fatalf("attempt %d result = %+v, want success", attemptNumber, result)
+		}
+		stdoutPath := logging.AttemptPath(result.StdoutPath, invocation.RunID, attemptNumber, "stdout")
+		stdout, found, err := logging.ReadRetained(stdoutPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found || stdout != values.stdout+"\n" {
+			t.Fatalf("attempt %d stdout = %q, found = %v, want %q", attemptNumber, stdout, found, values.stdout+"\n")
+		}
+		stderrPath := logging.AttemptPath(result.StderrPath, invocation.RunID, attemptNumber, "stderr")
+		stderr, found, err := logging.ReadRetained(stderrPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found || stderr != values.stderr+"\n" {
+			t.Fatalf("attempt %d stderr = %q, found = %v, want %q", attemptNumber, stderr, found, values.stderr+"\n")
+		}
+	}
+}
+
+func TestLegacyScheduleAttemptUsesSchedulerAttemptNumber(t *testing.T) {
+	if os.Getenv("MANGO_LEGACY_ATTEMPT_HELPER") == "1" {
+		fmt.Fprintln(os.Stdout, "legacy stdout")
+		fmt.Fprintln(os.Stderr, "legacy stderr")
+		os.Exit(0)
+	}
+
+	d := New(testLayout(t.TempDir()))
+	schedule := config.EffectiveSchedule{
+		Project:    "demo",
+		Name:       "legacy-task",
+		RunID:      "schedule-run",
+		Action:     "run",
+		Command:    os.Args[0],
+		Args:       []string{"-test.run=TestLegacyScheduleAttemptUsesSchedulerAttemptNumber", "--"},
+		WorkingDir: t.TempDir(),
+		Env:        map[string]string{"MANGO_LEGACY_ATTEMPT_HELPER": "1"},
+	}
+	result := d.runLegacyScheduleTask(scheduler.WithAttemptNumber(context.Background(), 3), schedule)
+	if result.ExitCode != 0 || result.Err != nil {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		path := logging.AttemptPath(result.StdoutPath, schedule.RunID, 3, stream)
+		if stream == "stderr" {
+			path = logging.AttemptPath(result.StderrPath, schedule.RunID, 3, stream)
+		}
+		data, found, err := logging.ReadRetained(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found || !strings.Contains(data, "legacy "+stream) {
+			t.Fatalf("%s = %q, found = %v, want legacy output", stream, data, found)
+		}
 	}
 }
 

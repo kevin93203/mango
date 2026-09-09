@@ -43,6 +43,8 @@ type unifiedHistoryModel struct {
 	taskIndex    int
 	attemptIndex int
 	outputOffset int
+	outputCache  []historyOutputLine
+	outputLoaded bool
 	hasMore      bool
 	lastError    string
 }
@@ -164,7 +166,9 @@ func (m *unifiedHistoryModel) historyHandleKey(key int) (bool, error) {
 	case 'r':
 		return false, m.reload()
 	case 10, 13:
-		m.enter()
+		if err := m.enter(); err != nil {
+			return false, err
+		}
 	}
 	return false, nil
 }
@@ -194,12 +198,12 @@ func (m *unifiedHistoryModel) historyError() string { return m.lastError }
 
 func (m *unifiedHistoryModel) historySetError(message string) { m.lastError = message }
 
-func (m *unifiedHistoryModel) enter() {
+func (m *unifiedHistoryModel) enter() error {
 	switch m.screen {
 	case unifiedHistoryRuns:
 		run := m.currentRun()
 		if run == nil {
-			return
+			return nil
 		}
 		m.runIndex = m.selected
 		m.selected = 0
@@ -210,26 +214,35 @@ func (m *unifiedHistoryModel) enter() {
 		}
 	case unifiedHistoryTask:
 		if m.currentTask() == nil {
-			return
+			return nil
 		}
 		m.taskIndex = 0
 		m.attemptIndex = m.selected
 		m.screen = unifiedHistoryAttempts
 	case unifiedHistoryWorkflowTasks:
 		if m.currentTask() == nil {
-			return
+			return nil
 		}
 		m.taskIndex = m.selected
 		m.selected = 0
 		m.screen = unifiedHistoryAttempts
 	case unifiedHistoryAttempts:
-		if m.currentAttempt() == nil {
-			return
+		task := m.currentTask()
+		attempt := m.currentAttempt()
+		if task == nil || attempt == nil {
+			return nil
 		}
+		lines, err := loadHistoryAttemptOutput(*task, *attempt)
+		if err != nil {
+			return err
+		}
+		m.outputCache = lines
+		m.outputLoaded = true
 		m.attemptIndex = m.selected
 		m.outputOffset = 0
 		m.screen = unifiedHistoryOutput
 	}
+	return nil
 }
 
 func (m *unifiedHistoryModel) back() {
@@ -248,6 +261,8 @@ func (m *unifiedHistoryModel) back() {
 	case unifiedHistoryOutput:
 		m.screen = unifiedHistoryAttempts
 		m.selected = m.attemptIndex
+		m.outputCache = nil
+		m.outputLoaded = false
 	}
 	m.outputOffset = 0
 	m.clampSelection()
@@ -431,7 +446,7 @@ func (m *unifiedHistoryModel) visibleTasks() []scheduler.TaskRecord {
 			RunID: run.RunID, Node: run.Target, Task: run.Target, Command: run.Name,
 			Status: run.Status, Started: run.Started, Finished: run.Finished,
 			DurationSeconds: historyRecordDurationSeconds(*run), ExitCode: run.ExitCode,
-			Error: run.Error, Stderr: run.Stderr, Attempts: run.Attempts,
+			Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath, Attempts: run.Attempts,
 		}}
 	}
 	if m.filter.TargetType != "task" || m.filter.Target == "" {
@@ -508,27 +523,10 @@ func (m *unifiedHistoryModel) clampOutputOffset() {
 }
 
 func (m *unifiedHistoryModel) outputLines() []historyOutputLine {
-	task := m.currentTask()
-	if task == nil {
+	if !m.outputLoaded {
 		return nil
 	}
-	errorText, stderrText := task.Error, task.Stderr
-	if attempt := m.currentAttempt(); attempt != nil {
-		errorText, stderrText = attempt.Error, attempt.Stderr
-	}
-	lines := []historyOutputLine{{Text: "error", Style: cliui.StyleHeader}}
-	if errorText == "" {
-		lines = append(lines, historyOutputLine{Text: "-", Style: cliui.StyleMuted})
-	} else {
-		lines = append(lines, splitHistoryLines(errorText, cliui.StyleError)...)
-	}
-	lines = append(lines, historyOutputLine{Text: "stderr", Style: cliui.StyleHeader})
-	if stderrText == "" {
-		lines = append(lines, historyOutputLine{Text: "-", Style: cliui.StyleMuted})
-	} else {
-		lines = append(lines, splitHistoryLines(stderrText, cliui.StyleStderr)...)
-	}
-	return lines
+	return m.outputCache
 }
 
 func unifiedRecordID(record scheduler.Record) string {

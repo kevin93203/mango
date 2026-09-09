@@ -2938,13 +2938,47 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 			return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 		}
 	}
+	attemptOwner := schedule.RunID
+	if attemptOwner == "" {
+		attemptOwner = legacyLogName
+	}
+	attemptNumber := scheduler.AttemptNumber(ctx)
+	attemptStdout, _, err := d.logs.OpenAttempt(executionStdoutPath, attemptOwner, attemptNumber, "stdout", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		if executionStdout != stdout {
+			_ = executionStdout.Close()
+		}
+		if executionStderr != stderr {
+			_ = executionStderr.Close()
+		}
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
+	attemptStderr, _, err := d.logs.OpenAttempt(executionStderrPath, attemptOwner, attemptNumber, "stderr", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		if executionStdout != stdout {
+			_ = executionStdout.Close()
+		}
+		if executionStderr != stderr {
+			_ = executionStderr.Close()
+		}
+		_ = attemptStdout.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
 	stdoutWriter := io.Writer(stdout)
 	stderrWriter := io.Writer(stderr)
 	if executionStdout != stdout {
-		stdoutWriter = io.MultiWriter(stdout, executionStdout)
+		stdoutWriter = io.MultiWriter(stdout, executionStdout, attemptStdout)
+	} else {
+		stdoutWriter = io.MultiWriter(stdout, attemptStdout)
 	}
 	if executionStderr != stderr {
-		stderrWriter = io.MultiWriter(stderr, executionStderr)
+		stderrWriter = io.MultiWriter(stderr, executionStderr, attemptStderr)
+	} else {
+		stderrWriter = io.MultiWriter(stderr, attemptStderr)
 	}
 	capture := logging.NewCaptureWriter(stderrWriter, 64<<10)
 	handle, err := process.Start(process.Spec{Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir, Env: schedule.Env, Stdout: stdoutWriter, Stderr: capture})
@@ -2957,6 +2991,8 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 		if executionStderr != stderr {
 			_ = executionStderr.Close()
 		}
+		_ = attemptStdout.Close()
+		_ = attemptStderr.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
 	var timeout <-chan time.Time
@@ -2988,6 +3024,8 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 	if executionStderr != stderr {
 		_ = executionStderr.Close()
 	}
+	_ = attemptStdout.Close()
+	_ = attemptStderr.Close()
 	if timedOut {
 		return scheduler.ExecutionResult{ExitCode: 124, Err: fmt.Errorf("schedule timed out after %s", schedule.Timeout), Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
@@ -3019,8 +3057,33 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 		_ = executionStdout.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err}
 	}
-	stdoutWriter := io.MultiWriter(stdout, executionStdout)
-	stderrWriter := io.MultiWriter(stderr, executionStderr)
+	attemptOwner := invocation.RunID
+	if attemptOwner == "" {
+		attemptOwner = executionLogName
+	}
+	attemptNumber := invocation.AttemptNumber
+	if attemptNumber < 1 {
+		attemptNumber = 1
+	}
+	attemptStdout, _, err := d.logs.OpenAttempt(executionStdoutPath, attemptOwner, attemptNumber, "stdout", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		_ = executionStdout.Close()
+		_ = executionStderr.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
+	attemptStderr, _, err := d.logs.OpenAttempt(executionStderrPath, attemptOwner, attemptNumber, "stderr", 100<<20, 10)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		_ = executionStdout.Close()
+		_ = executionStderr.Close()
+		_ = attemptStdout.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
+	stdoutWriter := io.MultiWriter(stdout, executionStdout, attemptStdout)
+	stderrWriter := io.MultiWriter(stderr, executionStderr, attemptStderr)
 	capture := logging.NewCaptureWriter(stderrWriter, 64<<10)
 	handle, err := process.Start(process.Spec{
 		Command: task.Command, Args: task.Args, WorkingDir: task.WorkingDir,
@@ -3031,6 +3094,8 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 		_ = stderr.Close()
 		_ = executionStdout.Close()
 		_ = executionStderr.Close()
+		_ = attemptStdout.Close()
+		_ = attemptStderr.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
 	var timeout <-chan time.Time
@@ -3058,6 +3123,8 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 	_ = stderr.Close()
 	_ = executionStdout.Close()
 	_ = executionStderr.Close()
+	_ = attemptStdout.Close()
+	_ = attemptStderr.Close()
 	if timedOut {
 		return scheduler.ExecutionResult{
 			ExitCode:   124,
