@@ -18,7 +18,7 @@ Kubernetes orchestration, or multi-host high availability.
 | [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Completed | 00 |
 | [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Completed | 01 |
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Completed | 01, 02 |
-| [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
+| [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Completed | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
 | [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |
 
@@ -48,6 +48,23 @@ Kubernetes orchestration, or multi-host high availability.
   apply-operation metadata is ignored and is not removed automatically.
   `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build ./...`
   pass.
+- **Phase 04 — Completed.** Added scalar-or-reference environment decoding
+  with `from_env` and `from_file` providers, runtime-only secret resolution,
+  redaction wrappers for process output and structured daemon logs, optional
+  `run_as` identity handling, capability-aware resource policy reporting,
+  and guarded shim bootstrap handling without persisting secret values; service
+  policies that require daemon-side redaction or identity/resource adapters
+  are rejected for shim-supervised services.
+  Added durable version-10 `events`, `audit_entries`, `secret_references`,
+  and `resource_policies` metadata tables, a non-blocking event bus, event
+  retention, administrative audit records, Prometheus text metrics, and
+  correlation fields for operation/run/configuration generation metadata.
+  Added `mango events` and `mango status --watch`, versioned opt-in HTTP
+  endpoints under `/api/v1`, bearer-token authentication for configured or
+  non-loopback listeners, and explicit resource capability status. Existing
+  string environment values, webhook HMAC behavior, local IPC permissions,
+  YAML v3, and execution-history records remain compatible. Go and Rust
+  formatting, unit/integration tests, and static checks pass.
 
 ## Dependency Flow
 

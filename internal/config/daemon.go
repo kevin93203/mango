@@ -3,10 +3,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kevin93203/mango/internal/secrets"
 )
 
 const DefaultScheduleHistoryLimit = 0
@@ -15,6 +18,7 @@ const DefaultWebhookListen = "127.0.0.1:8787"
 const DefaultWebhookMaxBodyBytes int64 = 1 << 20
 const DefaultWebhookReplayWindow = 5 * time.Minute
 const DefaultWebhookRateLimitPerMinute = 60
+const DefaultHTTPListen = "127.0.0.1:8788"
 
 type HistoryConfig struct {
 	Database DatabaseConfig `yaml:"database"`
@@ -35,10 +39,19 @@ type WebhookServerConfig struct {
 	RateLimitPerMinute int    `yaml:"rate_limit_per_minute"`
 }
 
+type HTTPServerConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Listen      string `yaml:"listen"`
+	TokenRef    string `yaml:"token_ref"`
+	RequireAuth bool   `yaml:"require_auth"`
+}
+
 type DaemonConfig struct {
 	ScheduleHistoryLimit int                 `yaml:"schedule_history_limit"`
+	EventRetentionLimit  int                 `yaml:"event_retention_limit"`
 	History              HistoryConfig       `yaml:"history"`
 	WebhookServer        WebhookServerConfig `yaml:"webhook_server"`
+	HTTPServer           HTTPServerConfig    `yaml:"http_server"`
 }
 
 func LoadDaemonConfig(path string) (DaemonConfig, error) {
@@ -49,6 +62,7 @@ func LoadDaemonConfig(path string) (DaemonConfig, error) {
 			Listen: DefaultWebhookListen, MaxBodyBytes: DefaultWebhookMaxBodyBytes,
 			ReplayWindow: DefaultWebhookReplayWindow.String(), RateLimitPerMinute: DefaultWebhookRateLimitPerMinute,
 		},
+		HTTPServer: HTTPServerConfig{Listen: DefaultHTTPListen},
 	}
 	if path == "" {
 		return result, nil
@@ -73,6 +87,9 @@ func LoadDaemonConfig(path string) (DaemonConfig, error) {
 	if result.ScheduleHistoryLimit < 0 {
 		return DaemonConfig{}, errors.New("schedule_history_limit must be non-negative")
 	}
+	if result.EventRetentionLimit < 0 {
+		return DaemonConfig{}, errors.New("event_retention_limit must be non-negative")
+	}
 	if strings.TrimSpace(result.WebhookServer.Listen) == "" {
 		return DaemonConfig{}, errors.New("webhook_server.listen must not be empty")
 	}
@@ -88,8 +105,32 @@ func LoadDaemonConfig(path string) (DaemonConfig, error) {
 	if err := result.History.Database.Validate(); err != nil {
 		return DaemonConfig{}, err
 	}
+	if strings.TrimSpace(result.HTTPServer.Listen) == "" {
+		return DaemonConfig{}, errors.New("http_server.listen must not be empty")
+	}
+	if result.HTTPServer.TokenRef != "" {
+		if _, err := secrets.Parse(result.HTTPServer.TokenRef); err != nil {
+			return DaemonConfig{}, fmt.Errorf("http_server.token_ref: %w", err)
+		}
+	}
+	if result.HTTPServer.Enabled && result.HTTPServer.TokenRef == "" && (result.HTTPServer.RequireAuth || !isLoopbackListen(result.HTTPServer.Listen)) {
+		return DaemonConfig{}, errors.New("http_server requires token_ref when authentication is required")
+	}
 	result.History.Database.Driver = normalizedDatabaseDriver(result.History.Database.Driver)
 	return result, nil
+}
+
+func isLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c DatabaseConfig) Validate() error {

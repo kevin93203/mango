@@ -12,13 +12,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/secrets"
 )
 
 const (
@@ -282,16 +282,13 @@ func (s *Server) allow(r *http.Request, path string, now time.Time, limit int) b
 }
 
 func ResolveSecret(reference string) ([]byte, error) {
-	if !strings.HasPrefix(reference, "env:") {
+	ref, err := secrets.Parse(reference)
+	if err != nil {
 		return nil, errors.New("unsupported webhook secret reference")
 	}
-	name := strings.TrimSpace(strings.TrimPrefix(reference, "env:"))
-	if name == "" {
-		return nil, errors.New("webhook secret environment name is empty")
-	}
-	value, ok := os.LookupEnv(name)
-	if !ok || value == "" {
-		return nil, errors.New("webhook secret environment variable is empty")
+	value, err := secrets.NewResolver().Resolve(context.Background(), ref)
+	if err != nil {
+		return nil, err
 	}
 	return []byte(value), nil
 }

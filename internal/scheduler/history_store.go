@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/kevin93203/mango/internal/observability"
 )
 
 // HistoryQuery describes the filters shared by the history IPC methods and
@@ -59,13 +61,82 @@ type historyClearer interface {
 }
 
 type memoryHistoryRepository struct {
-	mu                sync.Mutex
-	records           []Record
-	counters          map[string]uint64
-	executions        map[string]Execution
-	events            map[string][]ExecutionEvent
-	occurrences       map[string]ScheduleOccurrence
-	webhookDeliveries map[string]WebhookDelivery
+	mu                  sync.Mutex
+	records             []Record
+	counters            map[string]uint64
+	executions          map[string]Execution
+	events              map[string][]ExecutionEvent
+	occurrences         map[string]ScheduleOccurrence
+	webhookDeliveries   map[string]WebhookDelivery
+	observabilityEvents []observability.Event
+	auditEntries        []observability.AuditEntry
+}
+
+func (r *memoryHistoryRepository) AppendEvent(_ context.Context, event observability.Event) (observability.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	event.ID = int64(len(r.observabilityEvents) + 1)
+	r.observabilityEvents = append(r.observabilityEvents, event)
+	return event, nil
+}
+
+func (r *memoryHistoryRepository) ListEvents(_ context.Context, query observability.EventQuery) ([]observability.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]observability.Event, 0)
+	for _, event := range r.observabilityEvents {
+		if event.ID <= query.AfterID || (query.Type != "" && event.Type != query.Type) || (query.Project != "" && event.Project != query.Project) || (query.RunID != "" && event.RunID != query.RunID) {
+			continue
+		}
+		result = append(result, event)
+		if query.Limit > 0 && len(result) >= query.Limit {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (r *memoryHistoryRepository) PruneEvents(_ context.Context, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.observabilityEvents) > limit {
+		r.observabilityEvents = append([]observability.Event(nil), r.observabilityEvents[len(r.observabilityEvents)-limit:]...)
+	}
+	return nil
+}
+
+func (r *memoryHistoryRepository) ReplaceSecurityMetadata(_ context.Context, _ string, _ []observability.SecretReferenceMetadata, _ []observability.ResourcePolicyMetadata) error {
+	return nil
+}
+
+func (r *memoryHistoryRepository) AppendAudit(_ context.Context, entry observability.AuditEntry) (observability.AuditEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	entry.ID = int64(len(r.auditEntries) + 1)
+	r.auditEntries = append(r.auditEntries, entry)
+	return entry, nil
+}
+
+func (r *memoryHistoryRepository) ListAudit(_ context.Context, limit int) ([]observability.AuditEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 || limit > len(r.auditEntries) {
+		limit = len(r.auditEntries)
+	}
+	result := make([]observability.AuditEntry, 0, limit)
+	for index := len(r.auditEntries) - 1; index >= 0 && len(result) < limit; index-- {
+		result = append(result, r.auditEntries[index])
+	}
+	return result, nil
 }
 
 func newMemoryHistoryRepository() HistoryRepository {

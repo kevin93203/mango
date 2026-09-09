@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kevin93203/mango/internal/secrets"
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
@@ -57,21 +58,79 @@ type Defaults struct {
 }
 
 type Service struct {
-	Name           string                `yaml:"-"`
-	Command        string                `yaml:"command"`
-	Supervisor     string                `yaml:"supervisor"`
-	Args           []string              `yaml:"args"`
-	WorkingDir     string                `yaml:"working_dir"`
-	Environment    map[string]string     `yaml:"environment"`
-	Autostart      bool                  `yaml:"autostart"`
-	Restart        string                `yaml:"restart"`
-	StartupTimeout string                `yaml:"startup_timeout"`
-	StopTimeout    string                `yaml:"stop_timeout"`
-	MaxRestarts    *int                  `yaml:"max_restarts"`
-	RestartWindow  string                `yaml:"restart_window"`
-	StableAfter    string                `yaml:"stable_after"`
-	HealthCheck    *HealthCheck          `yaml:"healthcheck"`
-	DependsOn      map[string]Dependency `yaml:"depends_on"`
+	Name            string                       `yaml:"-"`
+	Command         string                       `yaml:"command"`
+	Supervisor      string                       `yaml:"supervisor"`
+	Args            []string                     `yaml:"args"`
+	WorkingDir      string                       `yaml:"working_dir"`
+	Environment     map[string]string            `yaml:"environment"`
+	EnvironmentRefs map[string]secrets.Reference `yaml:"-"`
+	Autostart       bool                         `yaml:"autostart"`
+	Restart         string                       `yaml:"restart"`
+	StartupTimeout  string                       `yaml:"startup_timeout"`
+	StopTimeout     string                       `yaml:"stop_timeout"`
+	MaxRestarts     *int                         `yaml:"max_restarts"`
+	RestartWindow   string                       `yaml:"restart_window"`
+	StableAfter     string                       `yaml:"stable_after"`
+	HealthCheck     *HealthCheck                 `yaml:"healthcheck"`
+	DependsOn       map[string]Dependency        `yaml:"depends_on"`
+	RunAs           *RunAs                       `yaml:"run_as"`
+	Resources       *ResourcePolicy              `yaml:"resources"`
+}
+
+type RunAs struct {
+	User  string `yaml:"user"`
+	Group string `yaml:"group"`
+}
+
+type ResourcePolicy struct {
+	ProcessLimit int    `yaml:"process_limit"`
+	Memory       string `yaml:"memory"`
+	CPUPercent   int    `yaml:"cpu_percent"`
+}
+
+func (s *Service) UnmarshalYAML(node *yaml.Node) error {
+	type rawService struct {
+		Name           string                `yaml:"-"`
+		Command        string                `yaml:"command"`
+		Supervisor     string                `yaml:"supervisor"`
+		Args           []string              `yaml:"args"`
+		WorkingDir     string                `yaml:"working_dir"`
+		Environment    yaml.Node             `yaml:"environment"`
+		Autostart      bool                  `yaml:"autostart"`
+		Restart        string                `yaml:"restart"`
+		StartupTimeout string                `yaml:"startup_timeout"`
+		StopTimeout    string                `yaml:"stop_timeout"`
+		MaxRestarts    *int                  `yaml:"max_restarts"`
+		RestartWindow  string                `yaml:"restart_window"`
+		StableAfter    string                `yaml:"stable_after"`
+		HealthCheck    *HealthCheck          `yaml:"healthcheck"`
+		DependsOn      map[string]Dependency `yaml:"depends_on"`
+		RunAs          *RunAs                `yaml:"run_as"`
+		Resources      *ResourcePolicy       `yaml:"resources"`
+	}
+	if err := validateNodeKeys(node, map[string]bool{
+		"command": true, "supervisor": true, "args": true, "working_dir": true,
+		"environment": true, "autostart": true, "restart": true, "startup_timeout": true,
+		"stop_timeout": true, "max_restarts": true, "restart_window": true, "stable_after": true,
+		"healthcheck": true, "depends_on": true, "run_as": true, "resources": true,
+	}); err != nil {
+		return err
+	}
+	var raw rawService
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	env, refs, err := decodeEnvironmentNode(raw.Environment, "environment")
+	if err != nil {
+		return err
+	}
+	*s = Service{Command: raw.Command, Supervisor: raw.Supervisor, Args: raw.Args, WorkingDir: raw.WorkingDir,
+		Environment: env, EnvironmentRefs: refs, Autostart: raw.Autostart, Restart: raw.Restart,
+		StartupTimeout: raw.StartupTimeout, StopTimeout: raw.StopTimeout, MaxRestarts: raw.MaxRestarts,
+		RestartWindow: raw.RestartWindow, StableAfter: raw.StableAfter, HealthCheck: raw.HealthCheck,
+		DependsOn: raw.DependsOn, RunAs: raw.RunAs, Resources: raw.Resources}
+	return nil
 }
 
 // Process is retained as an internal compatibility alias while the public
@@ -122,14 +181,109 @@ type Schedule struct {
 }
 
 type Task struct {
-	Command     string            `yaml:"command"`
-	Args        []string          `yaml:"args"`
-	WorkingDir  string            `yaml:"working_dir"`
-	Env         map[string]string `yaml:"env"`
-	Timeout     string            `yaml:"timeout"`
-	Concurrency string            `yaml:"concurrency"`
-	Retry       *TaskRetry        `yaml:"retry"`
-	Outputs     []string          `yaml:"outputs"`
+	Command     string                       `yaml:"command"`
+	Args        []string                     `yaml:"args"`
+	WorkingDir  string                       `yaml:"working_dir"`
+	Env         map[string]string            `yaml:"env"`
+	EnvRefs     map[string]secrets.Reference `yaml:"-"`
+	Timeout     string                       `yaml:"timeout"`
+	Concurrency string                       `yaml:"concurrency"`
+	Retry       *TaskRetry                   `yaml:"retry"`
+	Outputs     []string                     `yaml:"outputs"`
+}
+
+func (t *Task) UnmarshalYAML(node *yaml.Node) error {
+	type rawTask struct {
+		Command     string     `yaml:"command"`
+		Args        []string   `yaml:"args"`
+		WorkingDir  string     `yaml:"working_dir"`
+		Env         yaml.Node  `yaml:"env"`
+		Timeout     string     `yaml:"timeout"`
+		Concurrency string     `yaml:"concurrency"`
+		Retry       *TaskRetry `yaml:"retry"`
+		Outputs     []string   `yaml:"outputs"`
+	}
+	if err := validateNodeKeys(node, map[string]bool{"command": true, "args": true, "working_dir": true, "env": true, "timeout": true, "concurrency": true, "retry": true, "outputs": true}); err != nil {
+		return err
+	}
+	var raw rawTask
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	env, refs, err := decodeEnvironmentNode(raw.Env, "env")
+	if err != nil {
+		return err
+	}
+	*t = Task{Command: raw.Command, Args: raw.Args, WorkingDir: raw.WorkingDir, Env: env, EnvRefs: refs,
+		Timeout: raw.Timeout, Concurrency: raw.Concurrency, Retry: raw.Retry, Outputs: raw.Outputs}
+	return nil
+}
+
+func validateNodeKeys(node *yaml.Node, allowed map[string]bool) error {
+	if node == nil || node.Kind == 0 || node.Tag == "!!null" {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return errors.New("configuration value must be a mapping")
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		if !allowed[key] {
+			return fmt.Errorf("unknown field %s", key)
+		}
+	}
+	return nil
+}
+
+func decodeEnvironmentNode(node yaml.Node, field string) (map[string]string, map[string]secrets.Reference, error) {
+	values := map[string]string{}
+	refs := map[string]secrets.Reference{}
+	if node.Kind == 0 || node.Tag == "!!null" {
+		return values, refs, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, nil, fmt.Errorf("%s must be a mapping", field)
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		keyNode, valueNode := node.Content[index], node.Content[index+1]
+		key := keyNode.Value
+		if key == "" {
+			return nil, nil, fmt.Errorf("%s key must not be empty", field)
+		}
+		switch valueNode.Kind {
+		case yaml.ScalarNode:
+			var value string
+			if err := valueNode.Decode(&value); err != nil {
+				return nil, nil, fmt.Errorf("%s.%s must be a string or secret reference", field, key)
+			}
+			values[key] = value
+		case yaml.MappingNode:
+			if err := validateNodeKeys(valueNode, map[string]bool{"from_env": true, "from_file": true}); err != nil {
+				return nil, nil, fmt.Errorf("%s.%s: %w", field, key, err)
+			}
+			var raw struct {
+				FromEnv  string `yaml:"from_env"`
+				FromFile string `yaml:"from_file"`
+			}
+			if err := valueNode.Decode(&raw); err != nil {
+				return nil, nil, fmt.Errorf("%s.%s: %w", field, key, err)
+			}
+			if (raw.FromEnv == "") == (raw.FromFile == "") {
+				return nil, nil, fmt.Errorf("%s.%s must define exactly one of from_env or from_file", field, key)
+			}
+			ref := secrets.Reference{Provider: "from_env", Name: raw.FromEnv}
+			if raw.FromFile != "" {
+				ref = secrets.Reference{Provider: "from_file", Name: raw.FromFile}
+			}
+			if err := ref.Validate(); err != nil {
+				return nil, nil, fmt.Errorf("%s.%s: %w", field, key, err)
+			}
+			refs[key] = ref
+		default:
+			return nil, nil, fmt.Errorf("%s.%s must be a string or secret reference", field, key)
+		}
+	}
+	return values, refs, nil
 }
 
 type TaskRetry struct {
@@ -163,26 +317,29 @@ type Webhook struct {
 }
 
 type EffectiveProcess struct {
-	Project        string
-	Name           string
-	Command        string
-	Supervisor     string
-	Args           []string
-	WorkingDir     string
-	Env            map[string]string // Deprecated alias for Environment.
-	Environment    map[string]string
-	Autostart      bool
-	Restart        string
-	StartupTimeout time.Duration
-	StopTimeout    time.Duration
-	MaxRestarts    int
-	RestartWindow  time.Duration
-	StableAfter    time.Duration
-	LogMaxSize     int64
-	LogMaxFiles    int
-	MetricsEvery   time.Duration
-	HealthCheck    *EffectiveHealthCheck
-	DependsOn      map[string]Dependency
+	Project         string
+	Name            string
+	Command         string
+	Supervisor      string
+	Args            []string
+	WorkingDir      string
+	Env             map[string]string // Deprecated alias for Environment.
+	Environment     map[string]string
+	EnvironmentRefs map[string]secrets.Reference
+	Autostart       bool
+	Restart         string
+	StartupTimeout  time.Duration
+	StopTimeout     time.Duration
+	MaxRestarts     int
+	RestartWindow   time.Duration
+	StableAfter     time.Duration
+	LogMaxSize      int64
+	LogMaxFiles     int
+	MetricsEvery    time.Duration
+	HealthCheck     *EffectiveHealthCheck
+	DependsOn       map[string]Dependency
+	RunAs           *RunAs
+	Resources       *ResourcePolicy
 }
 
 type EffectiveService = EffectiveProcess
@@ -241,12 +398,13 @@ type EffectiveTask struct {
 	Env        map[string]string
 	// DeclaredEnv contains only values explicitly configured on the task. Env
 	// may additionally contain inherited process environment values.
-	DeclaredEnv map[string]string
-	Timeout     time.Duration
-	Concurrency string
-	RetryCount  int
-	RetryDelay  time.Duration
-	Outputs     []string
+	DeclaredEnv     map[string]string
+	EnvironmentRefs map[string]secrets.Reference
+	Timeout         time.Duration
+	Concurrency     string
+	RetryCount      int
+	RetryDelay      time.Duration
+	Outputs         []string
 }
 
 type EffectiveWorkflowTask struct {
@@ -390,8 +548,19 @@ func Validate(f File) error {
 		if s.MaxRestarts != nil && *s.MaxRestarts < 0 {
 			return fmt.Errorf("service %q max_restarts must be non-negative", name)
 		}
+		if err := validateRunAsAndResources(name, s.RunAs, s.Resources); err != nil {
+			return err
+		}
 		if err := validateHealthCheck(name, s.HealthCheck); err != nil {
 			return err
+		}
+		for key, ref := range s.EnvironmentRefs {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("service %q environment key must not be empty", name)
+			}
+			if err := ref.Validate(); err != nil {
+				return fmt.Errorf("service %q environment %q: %w", name, key, err)
+			}
 		}
 		for dependency, spec := range s.DependsOn {
 			if _, ok := f.Services[dependency]; !ok {
@@ -441,6 +610,14 @@ func Validate(f File) error {
 		}
 		if err := validateOutputPaths(task.Outputs); err != nil {
 			return fmt.Errorf("task %q outputs: %w", name, err)
+		}
+		for key, ref := range task.EnvRefs {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("task %q env key must not be empty", name)
+			}
+			if err := ref.Validate(); err != nil {
+				return fmt.Errorf("task %q env %q: %w", name, key, err)
+			}
 		}
 	}
 	for name, workflow := range f.Workflows {
@@ -563,8 +740,8 @@ func Validate(f File) error {
 			return fmt.Errorf("duplicate webhook path %q", hook.Path)
 		}
 		webhookPaths[hook.Path] = true
-		if !strings.HasPrefix(hook.SecretRef, "env:") || strings.TrimSpace(strings.TrimPrefix(hook.SecretRef, "env:")) == "" {
-			return fmt.Errorf("webhook %q secret_ref must use env:NAME", hook.Name)
+		if _, err := secrets.Parse(hook.SecretRef); err != nil {
+			return fmt.Errorf("webhook %q secret_ref must use env:NAME or file:PATH: %w", hook.Name, err)
 		}
 		if hook.TargetType != "workflow" && hook.TargetType != "task" {
 			return fmt.Errorf("webhook %q target_type must be workflow or task", hook.Name)
@@ -579,6 +756,25 @@ func Validate(f File) error {
 		} else if _, ok := f.Tasks[hook.Target]; !ok {
 			return fmt.Errorf("webhook %q target task %q does not exist", hook.Name, hook.Target)
 		}
+	}
+	return nil
+}
+
+func validateRunAsAndResources(name string, runAs *RunAs, resources *ResourcePolicy) error {
+	if runAs != nil && strings.TrimSpace(runAs.User) == "" && strings.TrimSpace(runAs.Group) == "" {
+		return fmt.Errorf("service %q run_as must define user or group", name)
+	}
+	if resources == nil {
+		return nil
+	}
+	if resources.ProcessLimit < 0 {
+		return fmt.Errorf("service %q resources.process_limit must be non-negative", name)
+	}
+	if resources.CPUPercent < 0 || resources.CPUPercent > 100 {
+		return fmt.Errorf("service %q resources.cpu_percent must be between 0 and 100", name)
+	}
+	if _, err := parseBytes(resources.Memory, 0); err != nil && strings.TrimSpace(resources.Memory) != "" {
+		return fmt.Errorf("service %q resources.memory: %w", name, err)
 	}
 	return nil
 }
@@ -758,10 +954,11 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		}
 		result = append(result, EffectiveService{
 			Project: projectName, Name: name, Command: command, Supervisor: serviceSupervisor, Args: append([]string(nil), p.Args...),
-			WorkingDir: dir, Env: env, Environment: env, Autostart: p.Autostart, Restart: restartPolicy,
+			WorkingDir: dir, Env: env, Environment: env, EnvironmentRefs: resolveSecretRefs(p.EnvironmentRefs, base), Autostart: p.Autostart, Restart: restartPolicy,
 			StartupTimeout: serviceStartupTimeout, StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
 			HealthCheck: effectiveHealth, DependsOn: dependsOn,
+			RunAs: cloneRunAs(p.RunAs), Resources: cloneResourcePolicy(p.Resources),
 		})
 	}
 	return result, nil
@@ -814,7 +1011,7 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 		}
 		result[name] = EffectiveTask{
 			Project: projectName, Name: name, Command: command, Args: append([]string(nil), task.Args...),
-			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), DeclaredEnv: cloneStringMap(task.Env), Timeout: timeout,
+			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), DeclaredEnv: cloneStringMap(task.Env), EnvironmentRefs: resolveSecretRefs(task.EnvRefs, base), Timeout: timeout,
 			Concurrency: defaultString(task.Concurrency, "forbid"), RetryCount: retryCount, RetryDelay: retryDelay,
 			Outputs: append([]string(nil), task.Outputs...),
 		}
@@ -897,10 +1094,15 @@ func (f File) WebhooksEffective(projectName string) ([]EffectiveWebhook, error) 
 		return nil, err
 	}
 	result := make([]EffectiveWebhook, 0, len(f.Webhooks))
+	base := filepath.Dir(f.Path)
 	for _, hook := range f.Webhooks {
+		secretRef := hook.SecretRef
+		if reference, err := secrets.Parse(secretRef); err == nil && reference.Provider == "from_file" && !filepath.IsAbs(reference.Name) {
+			secretRef = "file:" + filepath.Join(base, reference.Name)
+		}
 		result = append(result, EffectiveWebhook{
 			Project: projectName, Name: hook.Name, Path: hook.Path,
-			TargetType: hook.TargetType, Target: hook.Target, SecretRef: hook.SecretRef,
+			TargetType: hook.TargetType, Target: hook.Target, SecretRef: secretRef,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -937,6 +1139,43 @@ func cloneStringMap(values map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
+}
+
+func cloneSecretRefs(values map[string]secrets.Reference) map[string]secrets.Reference {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]secrets.Reference, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func resolveSecretRefs(values map[string]secrets.Reference, base string) map[string]secrets.Reference {
+	result := cloneSecretRefs(values)
+	for key, value := range result {
+		if value.Provider == "from_file" && !filepath.IsAbs(value.Name) {
+			result[key] = secrets.Reference{Provider: value.Provider, Name: filepath.Join(base, value.Name)}
+		}
+	}
+	return result
+}
+
+func cloneRunAs(value *RunAs) *RunAs {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneResourcePolicy(value *ResourcePolicy) *ResourcePolicy {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func resolveWorkingDir(base, dir string) string {

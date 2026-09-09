@@ -15,6 +15,8 @@ type Spec struct {
 	Args       []string
 	WorkingDir string
 	Env        map[string]string
+	User       string
+	Group      string
 	Stdout     io.Writer
 	Stderr     io.Writer
 }
@@ -55,7 +57,7 @@ func Start(spec Spec) (*Handle, error) {
 	cmd.Stdout = spec.Stdout
 	cmd.Stderr = spec.Stderr
 	cmd.WaitDelay = time.Second
-	if err := prepareCommand(cmd); err != nil {
+	if err := prepareCommand(cmd, spec); err != nil {
 		return nil, err
 	}
 	startedAt := time.Now()

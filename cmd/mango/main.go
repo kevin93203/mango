@@ -24,6 +24,7 @@ import (
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
+	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
@@ -800,7 +801,31 @@ func lsCommand() error {
 }
 
 func statusCommand(key string) error {
-	response, err := call("service.get", struct{ Key string }{key})
+	return statusCommandWithOptions(cliCommandContext, key, false)
+}
+
+func statusCommandWithOptions(ctx context.Context, key string, watch bool) error {
+	if !watch {
+		return statusCommandOnce(ctx, key)
+	}
+	for {
+		if err := statusCommandOnce(ctx, key); err != nil {
+			return err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func statusCommandOnce(ctx context.Context, key string) error {
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := callWithContext(callCtx, "service.get", struct{ Key string }{key})
 	if err != nil {
 		return err
 	}
@@ -813,6 +838,68 @@ func statusCommand(key string) error {
 	}
 	printProcessDetail(item)
 	return nil
+}
+
+func eventsCommandWithContext(ctx context.Context, limit int, follow bool) error {
+	if limit < 0 {
+		return errors.New("event limit must be non-negative")
+	}
+	var afterID int64
+	for {
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		response, err := callWithContext(callCtx, "events.list", map[string]interface{}{"after_id": afterID, "limit": limit})
+		cancel()
+		if err != nil {
+			return err
+		}
+		var events []observability.Event
+		if err := decodeData(response.Data, &events); err != nil {
+			return err
+		}
+		if jsonOutput {
+			if len(events) > 0 && len(events) > 0 {
+				if err := cliOutput.JSON(events); err != nil {
+					return err
+				}
+			}
+		} else if len(events) > 0 {
+			printEventTable(events)
+		}
+		for _, event := range events {
+			if event.ID > afterID {
+				afterID = event.ID
+			}
+		}
+		if !follow {
+			if len(events) == 0 && !jsonOutput {
+				cliOutput.Println(cliOutput.Text(cliui.StyleMuted, "No events found."))
+			}
+			return nil
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func printEventTable(events []observability.Event) {
+	rows := make([][]cliui.Cell, 0, len(events))
+	for _, event := range events {
+		metadata := ""
+		if len(event.Metadata) > 0 {
+			encoded, _ := json.Marshal(event.Metadata)
+			metadata = string(encoded)
+		}
+		rows = append(rows, []cliui.Cell{{Text: fmt.Sprintf("%d", event.ID), Align: cliui.AlignRight},
+			{Text: event.Timestamp.Format(time.RFC3339)}, {Text: event.Type}, {Text: event.Actor},
+			{Text: event.Project + "/" + event.Target, Style: zeroStyle(event.Target)},
+			{Text: event.RunID, Style: zeroStyle(event.RunID)}, {Text: metadata, Style: zeroStyle(metadata)}})
+	}
+	cliOutput.Table([]string{"ID", "TIME", "TYPE", "ACTOR", "TARGET", "RUN_ID", "METADATA"}, rows)
 }
 
 func processCommand(command string, args []string) error {

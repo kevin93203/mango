@@ -14,6 +14,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -171,7 +172,60 @@ type eventModel struct {
 
 func (eventModel) TableName() string { return "execution_events" }
 
-const currentSchemaVersion = 9
+type observabilityEventModel struct {
+	ID                      int64     `gorm:"primaryKey;autoIncrement"`
+	Timestamp               time.Time `gorm:"index"`
+	Type                    string    `gorm:"index;size:96;not null"`
+	Actor                   string    `gorm:"size:255"`
+	Project                 string    `gorm:"index;size:255"`
+	Target                  string    `gorm:"size:255"`
+	RunID                   string    `gorm:"index;size:255"`
+	OperationID             string    `gorm:"index;size:255"`
+	ConfigurationGeneration uint64
+	Metadata                string `gorm:"type:text"`
+}
+
+func (observabilityEventModel) TableName() string { return "events" }
+
+type auditModel struct {
+	ID          int64     `gorm:"primaryKey;autoIncrement"`
+	Timestamp   time.Time `gorm:"index"`
+	Actor       string    `gorm:"size:255"`
+	Action      string    `gorm:"index;size:96;not null"`
+	Target      string    `gorm:"size:255"`
+	OperationID string    `gorm:"index;size:255"`
+	Result      string    `gorm:"size:32"`
+	Error       string    `gorm:"type:text"`
+}
+
+func (auditModel) TableName() string { return "audit_entries" }
+
+type secretReferenceModel struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	Project   string `gorm:"index;size:255"`
+	Target    string `gorm:"size:255"`
+	Name      string `gorm:"size:255"`
+	Provider  string `gorm:"size:64"`
+	Reference string `gorm:"size:1024"`
+	CreatedAt time.Time
+}
+
+func (secretReferenceModel) TableName() string { return "secret_references" }
+
+type resourcePolicyModel struct {
+	ID           int64  `gorm:"primaryKey;autoIncrement"`
+	Project      string `gorm:"index;size:255"`
+	Target       string `gorm:"size:255"`
+	ProcessLimit int
+	Memory       string `gorm:"size:64"`
+	CPUPercent   int
+	Status       string `gorm:"size:32"`
+	CreatedAt    time.Time
+}
+
+func (resourcePolicyModel) TableName() string { return "resource_policies" }
+
+const currentSchemaVersion = 10
 
 func Open(config Config) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
@@ -223,6 +277,12 @@ func Open(config Config) (*Repository, error) {
 	if err := migrate(db, driver, config.Path); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate history database: %w", err)
+	}
+	if driver == "sqlite" && config.Path != "" {
+		if err := os.Chmod(config.Path, 0o600); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("restrict history database permissions: %w", err)
+		}
 	}
 	return repository, nil
 }
@@ -376,6 +436,15 @@ func applyMigration(db *gorm.DB, version int) error {
 	case 9:
 		if !migrator.HasTable(&scheduleOccurrenceModel{}) {
 			return errors.New("schedule_occurrences table is missing")
+		}
+		return backfillScheduleOccurrences(db)
+	case 10:
+		for _, model := range []interface{}{&observabilityEventModel{}, &auditModel{}, &secretReferenceModel{}, &resourcePolicyModel{}} {
+			if !migrator.HasTable(model) {
+				if err := migrator.CreateTable(model); err != nil {
+					return err
+				}
+			}
 		}
 		return backfillScheduleOccurrences(db)
 	default:
@@ -1026,6 +1095,148 @@ func (r *Repository) ListExecutionEvents(ctx context.Context, runID string) ([]s
 	return result, nil
 }
 
+func (r *Repository) AppendEvent(ctx context.Context, event observability.Event) (observability.Event, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	metadata := ""
+	if event.Metadata != nil {
+		data, err := json.Marshal(event.Metadata)
+		if err != nil {
+			return observability.Event{}, err
+		}
+		metadata = string(data)
+	}
+	row := observabilityEventModel{Timestamp: event.Timestamp, Type: event.Type, Actor: event.Actor,
+		Project: event.Project, Target: event.Target, RunID: event.RunID, OperationID: event.OperationID,
+		ConfigurationGeneration: event.ConfigurationGeneration, Metadata: metadata}
+	if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {
+		return observability.Event{}, err
+	}
+	event.ID = row.ID
+	return event, nil
+}
+
+func (r *Repository) ListEvents(ctx context.Context, query observability.EventQuery) ([]observability.Event, error) {
+	if query.Limit < 0 {
+		return nil, errors.New("event limit must be non-negative")
+	}
+	db := r.db.WithContext(ctx).Model(&observabilityEventModel{}).Where("id > ?", query.AfterID)
+	if query.Type != "" {
+		db = db.Where("type = ?", query.Type)
+	}
+	if query.Project != "" {
+		db = db.Where("project = ?", query.Project)
+	}
+	if query.RunID != "" {
+		db = db.Where("run_id = ?", query.RunID)
+	}
+	if query.Limit > 0 {
+		db = db.Limit(query.Limit)
+	}
+	var rows []observabilityEventModel
+	if err := db.Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]observability.Event, 0, len(rows))
+	for _, row := range rows {
+		event := observability.Event{ID: row.ID, Timestamp: row.Timestamp, Type: row.Type, Actor: row.Actor,
+			Project: row.Project, Target: row.Target, RunID: row.RunID, OperationID: row.OperationID,
+			ConfigurationGeneration: row.ConfigurationGeneration}
+		if row.Metadata != "" {
+			if err := json.Unmarshal([]byte(row.Metadata), &event.Metadata); err != nil {
+				return nil, fmt.Errorf("decode event metadata: %w", err)
+			}
+		}
+		result = append(result, event)
+	}
+	return result, nil
+}
+
+func (r *Repository) PruneEvents(ctx context.Context, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	var rows []observabilityEventModel
+	if err := r.db.WithContext(ctx).Order("id DESC").Offset(limit).Find(&rows).Error; err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	return r.db.WithContext(ctx).Where("id IN ?", ids).Delete(&observabilityEventModel{}).Error
+}
+
+func (r *Repository) ReplaceSecurityMetadata(ctx context.Context, project string, refs []observability.SecretReferenceMetadata, policies []observability.ResourcePolicyMetadata) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("project = ?", project).Delete(&secretReferenceModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("project = ?", project).Delete(&resourcePolicyModel{}).Error; err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			if err := tx.Create(&secretReferenceModel{Project: ref.Project, Target: ref.Target, Name: ref.Name,
+				Provider: ref.Provider, Reference: ref.Reference, CreatedAt: time.Now().UTC()}).Error; err != nil {
+				return err
+			}
+		}
+		for _, policy := range policies {
+			if err := tx.Create(&resourcePolicyModel{Project: policy.Project, Target: policy.Target,
+				ProcessLimit: policy.ProcessLimit, Memory: policy.Memory, CPUPercent: policy.CPUPercent,
+				Status: policy.Status, CreatedAt: time.Now().UTC()}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *Repository) AppendAudit(ctx context.Context, entry observability.AuditEntry) (observability.AuditEntry, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	row := auditModel{Timestamp: entry.Timestamp, Actor: entry.Actor, Action: entry.Action,
+		Target: entry.Target, OperationID: entry.OperationID, Result: entry.Result, Error: entry.Error}
+	if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {
+		return observability.AuditEntry{}, err
+	}
+	entry.ID = row.ID
+	return entry, nil
+}
+
+func (r *Repository) ListAudit(ctx context.Context, limit int) ([]observability.AuditEntry, error) {
+	if limit < 0 {
+		return nil, errors.New("audit limit must be non-negative")
+	}
+	db := r.db.WithContext(ctx).Model(&auditModel{}).Order("id DESC")
+	if limit > 0 {
+		db = db.Limit(limit)
+	}
+	var rows []auditModel
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]observability.AuditEntry, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, observability.AuditEntry{ID: row.ID, Timestamp: row.Timestamp, Actor: row.Actor,
+			Action: row.Action, Target: row.Target, OperationID: row.OperationID, Result: row.Result, Error: row.Error})
+	}
+	return result, nil
+}
+
 // Ping verifies that the database connection used by the repository is
 // currently usable without modifying any history data.
 func (r *Repository) Ping(ctx context.Context) error {
@@ -1055,6 +1266,10 @@ func (r *Repository) MissingTables(ctx context.Context) ([]string, error) {
 		{name: "history_counters", model: &counterModel{}},
 		{name: "schema_version", model: &schemaVersionModel{}},
 		{name: "execution_events", model: &eventModel{}},
+		{name: "events", model: &observabilityEventModel{}},
+		{name: "audit_entries", model: &auditModel{}},
+		{name: "secret_references", model: &secretReferenceModel{}},
+		{name: "resource_policies", model: &resourcePolicyModel{}},
 	}
 	migrator := r.db.WithContext(ctx).Migrator()
 	missing := make([]string, 0)
@@ -1087,6 +1302,18 @@ func (r *Repository) Clear(ctx context.Context) error {
 			return err
 		}
 		if err := allowGlobalDelete.Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&observabilityEventModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&auditModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&secretReferenceModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&resourcePolicyModel{}).Error; err != nil {
 			return err
 		}
 		if err := allowGlobalDelete.Delete(&webhookDeliveryModel{}).Error; err != nil {

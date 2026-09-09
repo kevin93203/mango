@@ -83,12 +83,25 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
 		a.simpleCmd("ls", "List services", func() error { return lsCommand() }),
-		a.leafCmd("status TARGET", "Show service status", cobra.ExactArgs(1), func(args []string) error { return statusCommand(args[0]) }),
 		a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"), a.processCmd("enable"), a.processCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
 		a.historyCmd(), a.executionCmd(), a.startupCmd(),
 		a.simpleCmd("doctor", "Inspect Mango environment and daemon health", func() error { return doctorCommand(a.layout) }),
 	)
+	var watchStatus bool
+	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
+		return statusCommandWithOptions(ctx, args[0], watchStatus)
+	})
+	status.Flags().BoolVar(&watchStatus, "watch", false, "watch service status until interrupted")
+	root.AddCommand(status)
+	var followEvents bool
+	var eventLimit int
+	events := a.actionCmdWithContext("events", "Read the event stream", func(ctx context.Context) error {
+		return eventsCommandWithContext(ctx, eventLimit, followEvents)
+	})
+	events.Flags().IntVar(&eventLimit, "limit", 100, "maximum events per read")
+	events.Flags().BoolVar(&followEvents, "follow", false, "follow new events")
+	root.AddCommand(events)
 	return root
 }
 

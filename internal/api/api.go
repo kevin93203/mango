@@ -112,8 +112,17 @@ type ServiceInfo struct {
 	Disabled      bool
 	Health        *HealthInfo
 	OSState       string
-	WaitingOn     []DependencyStatus `json:"WaitingOn,omitempty"`
-	Children      []ChildProcessInfo `json:"Children,omitempty"`
+	WaitingOn     []DependencyStatus    `json:"WaitingOn,omitempty"`
+	Children      []ChildProcessInfo    `json:"Children,omitempty"`
+	Resources     *ResourceLimitsStatus `json:"resources,omitempty"`
+}
+
+type ResourceLimitsStatus struct {
+	ProcessLimit CapabilityInfo `json:"process_limit"`
+	Memory       CapabilityInfo `json:"memory"`
+	CPUPercent   CapabilityInfo `json:"cpu_percent"`
+	Overall      string         `json:"overall"`
+	Detail       string         `json:"detail,omitempty"`
 }
 
 // ServiceOperationResult is the result of one service lifecycle operation.

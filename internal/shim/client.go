@@ -99,6 +99,9 @@ type Client struct {
 
 func NewBootstrap(spec config.EffectiveService, serviceKey, instanceID, incarnation, stdoutPath, stderrPath string, autostart bool) Bootstrap {
 	env := serviceEnvironment(spec)
+	for key, reference := range spec.EnvironmentRefs {
+		env[key] = "__MANGO_SECRET_REF__:" + reference.Provider + ":" + reference.Name
+	}
 	return Bootstrap{
 		SchemaVersion: 1, ProtocolVersion: ProtocolVersion, ServiceKey: serviceKey,
 		InstanceID: instanceID, Incarnation: incarnation, ConfigFingerprint: fingerprintFor(spec),
@@ -481,20 +484,23 @@ func readStatus(stateDir string) (Status, error) {
 
 func fingerprintFor(spec config.EffectiveService) string {
 	payload := struct {
-		Project       string
-		Name          string
-		Command       string
-		Supervisor    string
-		Args          []string
-		WorkingDir    string
-		Env           map[string]string
-		Restart       string
-		StopTimeout   int64
-		MaxRestarts   int
-		RestartWindow int64
-		StableAfter   int64
-		LogMaxSize    int64
-		LogMaxFiles   int
+		Project         string
+		Name            string
+		Command         string
+		Supervisor      string
+		Args            []string
+		WorkingDir      string
+		Env             map[string]string
+		EnvironmentRefs map[string]string
+		RunAs           *config.RunAs
+		Resources       *config.ResourcePolicy
+		Restart         string
+		StopTimeout     int64
+		MaxRestarts     int
+		RestartWindow   int64
+		StableAfter     int64
+		LogMaxSize      int64
+		LogMaxFiles     int
 	}{
 		Project: spec.Project, Name: spec.Name, Command: spec.Command, Supervisor: spec.Supervisor, Args: spec.Args,
 		WorkingDir: spec.WorkingDir, Env: serviceEnvironment(spec), Restart: spec.Restart,
@@ -502,6 +508,12 @@ func fingerprintFor(spec config.EffectiveService) string {
 		RestartWindow: spec.RestartWindow.Milliseconds(), StableAfter: spec.StableAfter.Milliseconds(),
 		LogMaxSize: spec.LogMaxSize, LogMaxFiles: spec.LogMaxFiles,
 	}
+	payload.EnvironmentRefs = map[string]string{}
+	for key, reference := range spec.EnvironmentRefs {
+		payload.EnvironmentRefs[key] = reference.String()
+	}
+	payload.RunAs = spec.RunAs
+	payload.Resources = spec.Resources
 	data, _ := json.Marshal(payload)
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])

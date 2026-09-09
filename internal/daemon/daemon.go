@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,11 +29,14 @@ import (
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/metrics"
+	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/process"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/resources"
 	"github.com/kevin93203/mango/internal/scheduler"
+	"github.com/kevin93203/mango/internal/secrets"
 	"github.com/kevin93203/mango/internal/shim"
 	"github.com/kevin93203/mango/internal/webhook"
 	"github.com/kevin93203/mango/internal/workflow"
@@ -53,14 +58,20 @@ const (
 )
 
 type Daemon struct {
-	layout        paths.Layout
-	logs          *logging.Manager
-	metrics       *metrics.Collector
-	scheduler     *scheduler.Scheduler
-	historyRepo   scheduler.HistoryRepository
-	workflow      *workflow.Executor
-	webhookServer *webhook.Server
-	webhookMu     sync.Mutex
+	layout         paths.Layout
+	logs           *logging.Manager
+	metrics        *metrics.Collector
+	secretResolver *secrets.Resolver
+	redactor       *secrets.Redactor
+	structuredLog  *logging.JSONLogger
+	events         *observability.Bus
+	httpServer     *http.Server
+	httpListener   net.Listener
+	scheduler      *scheduler.Scheduler
+	historyRepo    scheduler.HistoryRepository
+	workflow       *workflow.Executor
+	webhookServer  *webhook.Server
+	webhookMu      sync.Mutex
 
 	mu                      sync.RWMutex
 	applyMu                 sync.Mutex
@@ -68,6 +79,7 @@ type Daemon struct {
 	projects                map[string]*projectRuntime
 	configErrors            map[string]string
 	historyDatabase         api.HistoryDatabaseHealth
+	eventRetentionLimit     int
 	disabledSchedules       map[string]bool
 	executionCancels        map[string]context.CancelFunc
 	configurationGeneration uint64
@@ -223,6 +235,9 @@ func New(layout paths.Layout) *Daemon {
 		layout:                  layout,
 		logs:                    logging.NewManager(layout.Logs),
 		metrics:                 metrics.NewCollector(),
+		secretResolver:          secrets.NewResolver(),
+		redactor:                secrets.NewRedactor(),
+		events:                  observability.NewBus(),
 		projects:                map[string]*projectRuntime{},
 		configErrors:            map[string]string{},
 		disabledSchedules:       map[string]bool{},
@@ -236,8 +251,82 @@ func New(layout paths.Layout) *Daemon {
 	return d
 }
 
+type observabilityStore interface {
+	observability.Store
+}
+
+func (d *Daemon) appendEvent(ctx context.Context, event observability.Event) observability.Event {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if event.Actor == "" {
+		event.Actor = observability.Actor(ctx)
+	}
+	d.mu.RLock()
+	store, _ := d.historyRepo.(observabilityStore)
+	retention := d.eventRetentionLimit
+	d.mu.RUnlock()
+	if store != nil {
+		if stored, err := store.AppendEvent(ctx, event); err == nil {
+			event = stored
+		}
+		if retention > 0 {
+			if pruner, ok := store.(observability.EventPruner); ok {
+				_ = pruner.PruneEvents(ctx, retention)
+			}
+		}
+	}
+	if d.events != nil {
+		d.events.Publish(event)
+	}
+	return event
+}
+
+func (d *Daemon) appendAudit(ctx context.Context, entry observability.AuditEntry) {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	if entry.Actor == "" {
+		entry.Actor = observability.Actor(ctx)
+	}
+	d.mu.RLock()
+	store, _ := d.historyRepo.(observabilityStore)
+	d.mu.RUnlock()
+	if store != nil {
+		_, _ = store.AppendAudit(ctx, entry)
+	}
+	d.appendEvent(ctx, observability.Event{Timestamp: entry.Timestamp, Type: "audit." + entry.Action,
+		Actor: entry.Actor, Target: entry.Target, OperationID: entry.OperationID,
+		Metadata: map[string]string{"result": entry.Result}})
+}
+
+func (d *Daemon) listEvents(ctx context.Context, query observability.EventQuery) ([]observability.Event, error) {
+	d.mu.RLock()
+	store, _ := d.historyRepo.(observabilityStore)
+	d.mu.RUnlock()
+	if store == nil {
+		return []observability.Event{}, nil
+	}
+	return store.ListEvents(ctx, query)
+}
+
+func isAuditedMethod(method string) bool {
+	switch method {
+	case "daemon.stop", "project.reload", "config.apply", "config.rollback", "project.rollback",
+		"service.start", "service.stop", "service.restart", "service.enable", "service.disable", "service.bulk",
+		"schedule.bulk", "task.run", "workflow.run", "execution.cancel", "execution.retry":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) recordExecution(record scheduler.Record) {
 	d.scheduler.RecordExecution(record)
+	d.appendEvent(context.Background(), observability.Event{Type: "execution." + record.Status, Project: record.Project,
+		Target: record.Target, RunID: record.RunID, ConfigurationGeneration: record.ConfigurationGeneration,
+		Metadata: map[string]string{"target_type": record.TargetType}})
+	d.metrics.Add("mango_executions_total", 1, map[string]string{"status": record.Status, "target_type": record.TargetType})
 	d.mu.Lock()
 	cancel := d.executionCancels[record.RunID]
 	delete(d.executionCancels, record.RunID)
@@ -251,6 +340,8 @@ func (d *Daemon) recordExecutionProgress(record scheduler.Record) {
 	if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: write active workflow progress: %v\n", err)
 	}
+	d.appendEvent(context.Background(), observability.Event{Type: "execution." + record.Status, Project: record.Project,
+		Target: record.Target, RunID: record.RunID, ConfigurationGeneration: record.ConfigurationGeneration})
 }
 
 // SetHealthExecutorFactory injects probe execution for tests or embedders.
@@ -265,6 +356,18 @@ func (d *Daemon) SetHealthExecutorFactory(factory func(config.EffectiveService) 
 func (d *Daemon) Run(ctx context.Context) error {
 	if err := paths.Ensure(d.layout); err != nil {
 		return err
+	}
+	if d.structuredLog == nil {
+		logger, err := logging.NewJSONLogger(d.layout.DaemonLog, func(value string) string {
+			if d.redactor == nil {
+				return value
+			}
+			return d.redactor.Redact(value)
+		})
+		if err != nil {
+			return fmt.Errorf("open structured daemon log: %w", err)
+		}
+		d.structuredLog = logger
 	}
 	ipc.SetEndpoint(d.layout.SocketPath)
 	lockPath := d.layout.LockPath
@@ -326,6 +429,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.mu.Lock()
 	d.historyRepo = historyRepo
 	d.historyDatabase = databaseInfo
+	d.eventRetentionLimit = daemonConfig.EventRetentionLimit
 	d.mu.Unlock()
 	if err := d.recoverActiveExecutions(); err != nil {
 		return fmt.Errorf("recover active executions: %w", err)
@@ -348,6 +452,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if err := d.webhookServer.Start(d.ctx); err != nil {
 			return err
 		}
+	}
+	if err := d.startHTTPServer(d.ctx, daemonConfig.HTTPServer); err != nil {
+		return err
 	}
 	if err := d.scheduler.RefreshHistorySummary(d.ctx); err != nil {
 		return fmt.Errorf("load latest history summary: %w", err)
@@ -406,6 +513,13 @@ func (d *Daemon) shutdown() {
 		_ = d.webhookServer.Shutdown(ctx)
 		cancel()
 	}
+	if d.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = d.httpServer.Shutdown(ctx)
+		cancel()
+		d.httpServer = nil
+		d.httpListener = nil
+	}
 	if d.scheduler != nil {
 		stopped := d.scheduler.Stop()
 		<-stopped.Done()
@@ -413,6 +527,10 @@ func (d *Daemon) shutdown() {
 	}
 	if d.workflow != nil {
 		d.workflow.Wait()
+	}
+	if d.structuredLog != nil {
+		_ = d.structuredLog.Close()
+		d.structuredLog = nil
 	}
 	d.mu.Lock()
 	type shutdownTarget struct {
@@ -920,6 +1038,19 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 	if err := config.Validate(file); err != nil {
 		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
+	for _, service := range desired.Services {
+		if service.Supervisor == "shim" && (len(service.EnvironmentRefs) > 0 || service.RunAs != nil || service.Resources != nil) {
+			return api.ApplyResult{}, fmt.Errorf("project %s service %s: secret references, run_as, and resources require the legacy supervisor", name, service.Name)
+		}
+		if service.RunAs != nil {
+			if err := resources.ValidateIdentity(service.RunAs); err != nil {
+				return api.ApplyResult{}, fmt.Errorf("project %s service %s: %w", name, service.Name, err)
+			}
+		}
+		if service.Resources != nil && resources.Status(service.Resources).Overall == api.CapabilityUnsupported {
+			return api.ApplyResult{}, fmt.Errorf("project %s service %s: resource policy is unsupported on this platform", name, service.Name)
+		}
+	}
 	d.mu.RLock()
 	_, registered := d.registry.Projects[name]
 	d.mu.RUnlock()
@@ -972,8 +1103,49 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 	d.registry = nextRegistry
 	d.installProjectDesiredLocked(name, file, desired, requestedGeneration, now, projectRecord)
 	d.mu.Unlock()
+	d.persistSecurityMetadata(name, desired)
 	d.ensureReconciler(name)
 	return api.ApplyResult{Project: name, Generation: requestedGeneration, Status: "accepted", AcceptedAt: now, SourceGeneration: sourceGeneration}, nil
+}
+
+func (d *Daemon) persistSecurityMetadata(project string, desired reconcile.DesiredState) {
+	refs := make([]observability.SecretReferenceMetadata, 0)
+	for _, service := range desired.Services {
+		for name, reference := range service.EnvironmentRefs {
+			refs = append(refs, observability.SecretReferenceMetadata{Project: project, Target: "service/" + service.Name,
+				Name: name, Provider: reference.Provider, Reference: reference.String()})
+		}
+	}
+	for name, task := range desired.Tasks {
+		for key, reference := range task.EnvironmentRefs {
+			refs = append(refs, observability.SecretReferenceMetadata{Project: project, Target: "task/" + name,
+				Name: key, Provider: reference.Provider, Reference: reference.String()})
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Target != refs[j].Target {
+			return refs[i].Target < refs[j].Target
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	policies := make([]observability.ResourcePolicyMetadata, 0)
+	for _, service := range desired.Services {
+		if service.Resources == nil {
+			continue
+		}
+		status := resources.Status(service.Resources)
+		policies = append(policies, observability.ResourcePolicyMetadata{Project: project, Target: service.Name,
+			ProcessLimit: service.Resources.ProcessLimit, Memory: service.Resources.Memory, CPUPercent: service.Resources.CPUPercent,
+			Status: status.Overall})
+	}
+	d.mu.RLock()
+	store, _ := d.historyRepo.(observability.MetadataStore)
+	d.mu.RUnlock()
+	if store != nil {
+		if err := store.ReplaceSecurityMetadata(context.Background(), project, refs, policies); err != nil && d.structuredLog != nil {
+			_ = d.structuredLog.Log("error", "persist security metadata failed", map[string]interface{}{"project": project, "error": err.Error()})
+		}
+	}
 }
 
 func cloneRegistry(source registry.File) registry.File {
@@ -1523,6 +1695,13 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 		return nil
 	}
 	managed.state = StateStarting
+	env, redactor, resolveErr := d.resolveEnvironment(context.Background(), serviceEnvironment(managed.spec), managed.spec.EnvironmentRefs)
+	if resolveErr != nil {
+		managed.state = StateFailed
+		managed.lastError = resolveErr.Error()
+		d.mu.Unlock()
+		return resolveErr
+	}
 	stdout, stdoutPath, err := d.logs.Open(projectName, managed.spec.Name, "stdout", managed.spec.LogMaxSize, managed.spec.LogMaxFiles)
 	if err != nil {
 		managed.state = StateFailed
@@ -1540,7 +1719,8 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	}
 	handle, err := process.Start(process.Spec{
 		Command: managed.spec.Command, Args: managed.spec.Args, WorkingDir: managed.spec.WorkingDir,
-		Env: serviceEnvironment(managed.spec), Stdout: stdout, Stderr: stderr,
+		Env: env, User: serviceRunAsUser(managed.spec), Group: serviceRunAsGroup(managed.spec),
+		Stdout: redactor.Wrap(stdout), Stderr: redactor.Wrap(stderr),
 	})
 	if err != nil {
 		_ = stdout.Close()
@@ -1577,6 +1757,20 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	return nil
 }
 
+func serviceRunAsUser(spec config.EffectiveService) string {
+	if spec.RunAs == nil {
+		return ""
+	}
+	return spec.RunAs.User
+}
+
+func serviceRunAsGroup(spec config.EffectiveService) string {
+	if spec.RunAs == nil {
+		return ""
+	}
+	return spec.RunAs.Group
+}
+
 func (d *Daemon) startShimManaged(projectName string, managed *managedProcess) error {
 	d.mu.Lock()
 	current := d.projects[projectName]
@@ -1593,6 +1787,27 @@ func (d *Daemon) startShimManaged(projectName string, managed *managedProcess) e
 	generation := managed.generation
 	spec := managed.spec
 	d.mu.Unlock()
+	if len(spec.EnvironmentRefs) > 0 {
+		err := fmt.Errorf("service %s uses secret environment references; legacy supervisor is required for log redaction", spec.Name)
+		d.mu.Lock()
+		managed.state, managed.lastError = StateFailed, err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	if spec.RunAs != nil {
+		err := fmt.Errorf("service %s uses run_as; the shim supervisor does not support identity execution", spec.Name)
+		d.mu.Lock()
+		managed.state, managed.lastError = StateFailed, err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	if spec.Resources != nil {
+		err := fmt.Errorf("service %s uses resources; the shim supervisor does not support resource policies", spec.Name)
+		d.mu.Lock()
+		managed.state, managed.lastError = StateFailed, err.Error()
+		d.mu.Unlock()
+		return err
+	}
 
 	executable, err := os.Executable()
 	if err != nil {
@@ -2071,6 +2286,21 @@ func serviceEnvironment(spec config.EffectiveService) map[string]string {
 		return spec.Env
 	}
 	return spec.Environment
+}
+
+func (d *Daemon) resolveEnvironment(ctx context.Context, values map[string]string, refs map[string]secrets.Reference) (map[string]string, *secrets.Redactor, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolver := d.secretResolver
+	if resolver == nil {
+		resolver = secrets.NewResolver()
+	}
+	resolved, redactor, err := resolver.ResolveMap(ctx, values, refs)
+	if err == nil && d.redactor != nil {
+		d.redactor.Merge(redactor)
+	}
+	return resolved, redactor, err
 }
 
 func serviceCommandLine(spec config.EffectiveService) string {
@@ -2726,6 +2956,10 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 			StartedAt: managed.startedAt, RestartCount: managed.restarts, LastExitCode: managed.lastExit,
 			LastError: managed.lastError, StdoutPath: managed.stdoutPath, StderrPath: managed.stderrPath,
 		}
+		resourceStatus := resources.Status(managed.spec.Resources)
+		if resourceStatus.Overall != "not_configured" {
+			info.Resources = &resourceStatus
+		}
 		if managed.state == StateWaiting {
 			info.WaitingOn = waitingDependencies(item.runtimeProject, managed)
 		}
@@ -2763,6 +2997,9 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 				info.Children = childProcessInfos(snapshot.Children)
 			}
 		}
+		d.metrics.Set("mango_service_state", 1, map[string]string{"project": info.Project, "service": info.Name, "state": info.State})
+		d.metrics.Set("mango_service_cpu_percent", info.CPUPercent, map[string]string{"project": info.Project, "service": info.Name})
+		d.metrics.Set("mango_service_memory_bytes", float64(info.RSSBytes), map[string]string{"project": info.Project, "service": info.Name})
 		result = append(result, info)
 	}
 	sortProcessInfo(result)
@@ -3108,6 +3345,13 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 }
 
 func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, invocation workflow.Invocation) scheduler.ExecutionResult {
+	if d.structuredLog != nil {
+		_ = d.structuredLog.Log("info", "execution attempt start", map[string]interface{}{
+			"run_id": invocation.RunID, "parent_run_id": invocation.ParentRunID, "project": task.Project,
+			"task": task.Name, "workflow": invocation.Workflow, "node": invocation.Node,
+			"attempt": invocation.AttemptNumber,
+		})
+	}
 	logName := taskLogName(invocation, task.Name)
 	stdout, _, err := d.logs.Open(task.Project, logName, "stdout", 100<<20, 10)
 	if err != nil {
@@ -3157,12 +3401,22 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 		_ = attemptStdout.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
-	stdoutWriter := io.MultiWriter(stdout, executionStdout, attemptStdout)
-	stderrWriter := io.MultiWriter(stderr, executionStderr, attemptStderr)
+	env, redactor, resolveErr := d.resolveEnvironment(ctx, task.Env, task.EnvironmentRefs)
+	if resolveErr != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		_ = executionStdout.Close()
+		_ = executionStderr.Close()
+		_ = attemptStdout.Close()
+		_ = attemptStderr.Close()
+		return scheduler.ExecutionResult{ExitCode: 1, Err: resolveErr, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	}
+	stdoutWriter := redactor.Wrap(io.MultiWriter(stdout, executionStdout, attemptStdout))
+	stderrWriter := redactor.Wrap(io.MultiWriter(stderr, executionStderr, attemptStderr))
 	capture := logging.NewCaptureWriter(stderrWriter, 64<<10)
 	handle, err := process.Start(process.Spec{
 		Command: task.Command, Args: task.Args, WorkingDir: task.WorkingDir,
-		Env: task.Env, Stdout: stdoutWriter, Stderr: capture,
+		Env: env, Stdout: stdoutWriter, Stderr: capture,
 	})
 	if err != nil {
 		_ = stdout.Close()
@@ -3194,6 +3448,13 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 		}
 	}
 	result := handle.Wait()
+	if d.structuredLog != nil {
+		_ = d.structuredLog.Log("info", "execution attempt complete", map[string]interface{}{
+			"run_id": invocation.RunID, "parent_run_id": invocation.ParentRunID, "project": task.Project,
+			"task": task.Name, "workflow": invocation.Workflow, "node": invocation.Node,
+			"attempt": invocation.AttemptNumber, "exit_code": result.ExitCode,
+		})
+	}
 	_ = stdout.Close()
 	_ = stderr.Close()
 	_ = executionStdout.Close()
@@ -3230,7 +3491,32 @@ func executionTaskLogName(invocation workflow.Invocation, taskName string) strin
 	return "execution-" + invocation.ParentRunID + "-" + name
 }
 
-func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
+func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.Response) {
+	started := time.Now()
+	defer func() {
+		if d.metrics != nil {
+			d.metrics.Add("mango_ipc_requests_total", 1, map[string]string{"method": request.Method, "ok": strconv.FormatBool(response.OK)})
+			d.metrics.Add("mango_ipc_request_duration_seconds", time.Since(started).Seconds(), map[string]string{"method": request.Method})
+		}
+		if d.structuredLog != nil {
+			_ = d.structuredLog.Log("info", "ipc request", map[string]interface{}{
+				"operation_id": request.ID, "method": request.Method, "ok": response.OK,
+				"duration_ms": time.Since(started).Milliseconds(),
+			})
+		}
+		if isAuditedMethod(request.Method) {
+			result := "success"
+			errorMessage := ""
+			if !response.OK {
+				result = "failure"
+				if response.Error != nil {
+					errorMessage = response.Error.Message
+				}
+			}
+			d.appendAudit(ctx, observability.AuditEntry{Actor: observability.Actor(ctx), Action: request.Method,
+				OperationID: request.ID, Result: result, Error: errorMessage})
+		}
+	}()
 	if request.Version != ipc.ProtocolVersion {
 		return failure(request, "UNSUPPORTED_VERSION", fmt.Errorf("unsupported API version %d", request.Version))
 	}
@@ -3260,8 +3546,48 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 		}
 		return success(request, map[string]interface{}{
 			"status": status, "pid": os.Getpid(), "version": ipc.ProtocolVersion, "config_errors": configErrors,
-			"history_database": database, "capabilities": capabilities,
+			"history_database": database, "capabilities": capabilities, "metrics": d.metrics.Prometheus(),
 		})
+	case "events.list":
+		var p struct {
+			AfterID int64  `json:"after_id"`
+			Limit   int    `json:"limit"`
+			Type    string `json:"type"`
+			Project string `json:"project"`
+			RunID   string `json:"run_id"`
+		}
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Limit < 0 || p.AfterID < 0 {
+			if err == nil {
+				err = errors.New("event after_id and limit must be non-negative")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		events, err := d.listEvents(ctx, observability.EventQuery{AfterID: p.AfterID, Limit: p.Limit, Type: p.Type, Project: p.Project, RunID: p.RunID})
+		if err != nil {
+			return failure(request, "EVENTS_READ_FAILED", err)
+		}
+		return success(request, events)
+	case "audit.ls":
+		var p struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Limit < 0 {
+			if err == nil {
+				err = errors.New("audit limit must be non-negative")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		d.mu.RLock()
+		store, _ := d.historyRepo.(observabilityStore)
+		d.mu.RUnlock()
+		if store == nil {
+			return success(request, []observability.AuditEntry{})
+		}
+		entries, err := store.ListAudit(ctx, p.Limit)
+		if err != nil {
+			return failure(request, "AUDIT_READ_FAILED", err)
+		}
+		return success(request, entries)
 	case "daemon.stop":
 		d.stopAllServices(true)
 		d.mu.RLock()
@@ -4690,7 +5016,8 @@ func sameSpec(a, b config.EffectiveProcess) bool {
 			return false
 		}
 	}
-	return reflect.DeepEqual(a.HealthCheck, b.HealthCheck) && reflect.DeepEqual(a.DependsOn, b.DependsOn)
+	return reflect.DeepEqual(a.EnvironmentRefs, b.EnvironmentRefs) && reflect.DeepEqual(a.HealthCheck, b.HealthCheck) &&
+		reflect.DeepEqual(a.DependsOn, b.DependsOn) && reflect.DeepEqual(a.RunAs, b.RunAs) && reflect.DeepEqual(a.Resources, b.Resources)
 }
 
 func StateDisabledIf(disabled bool) string {

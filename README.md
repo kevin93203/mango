@@ -19,6 +19,7 @@ shell-based process definition.
 - [Repository examples](#repository-examples)
 - [Runtime files](#runtime-files)
 - [Platform behavior](#platform-behavior)
+- [Security and observability](#security-and-observability)
 - [Development](#development)
 
 ## What Mango provides
@@ -34,6 +35,10 @@ shell-based process definition.
 - A terminal monitor and interactive execution-history browsers.
 - Per-user startup integration on Windows, Linux, and macOS.
 - JSON output for automation and CI where supported.
+- Runtime secret references with redacted output and history-safe metadata.
+- Durable events, administrative audit records, structured daemon logs, and
+  Prometheus-compatible metrics.
+- Optional authenticated `/api/v1` HTTP administration, disabled by default.
 
 ## How it works
 
@@ -211,6 +216,9 @@ Common service settings include:
 - `restart`: `never`, `on-failure`, or `always`.
 - `startup_timeout`, `stop_timeout`, restart limits, and crash-loop protection.
 - `healthcheck` and `depends_on`.
+- `run_as.user` / `run_as.group` for host identity execution where supported.
+- `resources.process_limit`, `resources.memory`, and `resources.cpu_percent`
+  for capability-aware host resource controls.
 
 Health is reported separately from the service lifecycle. A failed health check
 does not automatically restart the service unless `healthcheck.on_unhealthy` is
@@ -236,6 +244,53 @@ fails or is skipped.
 Schedules are cron triggers. Each schedule targets either one task or one
 workflow using `target_type` and `target`. Cron expressions use five fields and
 the optional `timezone` value must be an IANA time zone.
+
+### Secrets and references
+
+Environment values may remain plain strings or use a runtime-only reference:
+
+```yaml
+services:
+  worker:
+    command: ./bin/worker
+    environment:
+      APP_ENV: production
+      API_TOKEN:
+        from_env: MANGO_API_TOKEN
+      TLS_PASSWORD:
+        from_file: C:/secure/mango/tls-password
+```
+
+The first providers are `from_env` and `from_file`. Values are resolved when a
+service or task starts, are never copied into the metadata database, and are
+redacted from process output, structured logs, errors, and control-plane
+metadata. The file provider trims only the final newline and fails closed for
+missing, unreadable, or empty files. Webhook `secret_ref` accepts `env:NAME`
+and `file:PATH`.
+
+### Resource policies
+
+```yaml
+services:
+  worker:
+    command: ./bin/worker
+    run_as:
+      user: mango
+      group: mango
+    resources:
+      process_limit: 100
+      memory: 512MiB
+      cpu_percent: 80
+```
+
+Mango reports each configured policy as `supported`, `degraded`, or
+`unsupported` in service status and `mango doctor`. Linux uses cgroup
+availability and process-group boundaries, Windows uses Job Object primitives,
+and macOS reports the CPU/memory adapter as unsupported. These controls are
+resource boundaries, not container isolation or a security sandbox.
+Secret references and `run_as`/`resources` policies currently require the
+legacy daemon-owned supervisor; shim services are rejected during apply/start
+validation rather than silently dropping a security control.
 
 ## Command overview
 
@@ -439,7 +494,7 @@ services:
 | `supervisor` | string | `defaults.supervisor` or `legacy` | `legacy` uses the daemon-owned backend; `shim` delegates process-tree ownership to a per-service `mango-shim`. |
 | `args` | sequence of strings | `[]` | Arguments passed to `command`. |
 | `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the process. |
-| `environment` | string map | inherited environment | Variables to add or override. Set `defaults.inherit_env: false` for a clean environment. |
+| `environment` | string-or-reference map | inherited environment | Variables to add or override. References use `from_env` or `from_file` and resolve only at process start. Set `defaults.inherit_env: false` for a clean environment. |
 | `autostart` | boolean | `false` | Start when the daemon starts or the project is applied. |
 | `restart` | string | `defaults.restart` or `on-failure` | `never`, `on-failure`, or `always`. |
 | `startup_timeout` | duration | `defaults.startup_timeout` or `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
@@ -447,6 +502,8 @@ services:
 | `max_restarts` | integer | `defaults.max_restarts` or `10` | Restart limit used with crash-loop protection. |
 | `restart_window` | duration | `defaults.restart_window` or `5m` | Restart failure counting window. |
 | `stable_after` | duration | `defaults.stable_after` or `1m` | Time required to clear the restart counter. |
+| `run_as` | mapping | current user | Optional `user` and `group`; validated and applied by the host process adapter. |
+| `resources` | mapping | not configured | Optional process, memory, and CPU policy. Status is explicit when the host cannot enforce it. |
 | `healthcheck` | mapping | disabled | Optional command or native-probe health monitoring. |
 | `depends_on` | mapping | none | Optional service dependencies. |
 
@@ -571,7 +628,7 @@ tasks:
 | `command` | string | — | Required executable name or path. It follows the same direct-execution rules as services. |
 | `args` | sequence of strings | `[]` | Arguments passed to `command`. |
 | `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the task. |
-| `env` | string map | inherited environment | Variables to add or override. |
+| `env` | string-or-reference map | inherited environment | Variables to add or override; `from_env` and `from_file` references resolve per attempt. |
 | `timeout` | duration | no limit | Starts after the process starts. A timeout force-stops the process tree and records exit code `124`. |
 | `concurrency` | string | `forbid` | `forbid` queues overlapping invocations; `allow` runs them in parallel. |
 | `retry` | mapping | no retries | Retry settings for failed or timed-out attempts. |
@@ -936,7 +993,23 @@ last error, and unsatisfied dependencies.
 ```sh
 mango status demo/api-single
 mango status 2 --json
+mango status demo/api-single --watch
 ```
+
+`--watch` refreshes the service status until interrupted. Resource policies are
+shown in JSON under `resources`, including per-limit capability state and an
+overall `supported`, `degraded`, or `unsupported` result.
+
+### `mango events`
+
+```text
+mango events [--limit N] [--follow] [--json]
+```
+
+Reads the durable event stream covering administrative operations, execution
+transitions, service state, configuration, schedule, webhook, and audit
+activity. `--follow` polls after the last event ID and exits cleanly on Ctrl-C.
+Event metadata contains only safe fields; secret values are never included.
 
 ### Service lifecycle commands
 
@@ -1378,20 +1451,27 @@ MANGO_HOME/
 ├── logs/
 └── state/
     ├── history.db
+    ├── history.db.bak        # migration backup when first created
     ├── schedules.json       # persisted schedule enable/disable state
     ├── apply-operations.json     # legacy file, ignored if present
     └── generations/
         └── <project>/<generation>.json  # last and previous desired states
 ```
 
-The optional `daemon.yaml` supports execution-history retention, database, and
-webhook listener configuration. SQLite is used by default. The metadata schema is maintained by
+The SQLite metadata database also contains durable `events` and
+`audit_entries` records. Secret references and resource policies are stored as
+provider/policy metadata only; resolved secret values are never persisted.
+
+The optional `daemon.yaml` supports execution-history and event retention,
+database, webhook listener, and management HTTP API configuration. SQLite is
+used by default. The metadata schema is maintained by
 versioned migrations; before the first SQLite metadata migration Mango creates
 `history.db.bak` when it does not already exist.
 
 ```yaml
 # MANGO_HOME/daemon.yaml
 schedule_history_limit: 1000
+event_retention_limit: 10000
 
 history:
   database:
@@ -1405,16 +1485,27 @@ webhook_server:
   max_body_bytes: 1048576
   replay_window: 5m
   rate_limit_per_minute: 60
+
+http_server:
+  enabled: false
+  listen: 127.0.0.1:8788
+  # Required for non-loopback listeners; resolved at daemon start.
+  token_ref: env:MANGO_HTTP_TOKEN
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schedule_history_limit` | non-negative integer | `0` | Maximum number of terminal execution records to retain; active executions are never pruned. `0` keeps all records. |
+| `event_retention_limit` | non-negative integer | `0` | Maximum number of durable observability events to retain. `0` keeps all events and is independent of execution-history retention. |
 | `webhook_server.enabled` | boolean | `false` | Enables the optional authenticated webhook listener. |
 | `webhook_server.listen` | address | `127.0.0.1:8787` | Listener address; loopback is the safe default. |
 | `webhook_server.max_body_bytes` | positive integer | `1048576` | Maximum accepted raw request body size. |
 | `webhook_server.replay_window` | duration | `5m` | Allowed timestamp age/skew for signed requests. |
 | `webhook_server.rate_limit_per_minute` | positive integer | `60` | Per-client and per-path request limit. |
+| `http_server.enabled` | boolean | `false` | Enables the versioned management API. |
+| `http_server.listen` | address | `127.0.0.1:8788` | Management listener; loopback is the safe default. |
+| `http_server.token_ref` | `env:NAME` or `file:PATH` | none | Bearer token reference. Required for non-loopback listeners. The token is resolved at daemon start and never logged. |
+| `http_server.require_auth` | boolean | `false` | Requires bearer authentication even on loopback. |
 
 Supported database drivers are `sqlite`, `postgres`, and `mysql`. PostgreSQL
 and MySQL require a DSN, preferably supplied through an environment variable:
@@ -1469,14 +1560,19 @@ containment and named-pipe IPC; Linux reports process groups, the shim
 subreaper path, and cgroup availability; macOS reports the process-group
 escape limitation and the absence of a portable Mango resource-limit adapter.
 
-The control plane and shim use versioned local JSON IPC only; Mango does not
-expose a remote API in this phase. Protocol version `2` is carried in every
-request and response, and `request_id` is echoed so callers can correlate a
-response. `mangod` owns desired configuration, reconciliation, scheduling,
-execution metadata, and history. Each `mango-shim` owns one service process
-tree, its restart/stop lifecycle, logs, and durable observed state. A caller's
-context deadline bounds an IPC call; service `stop_timeout` bounds graceful
-shutdown before force termination.
+The control plane and shim use versioned local JSON IPC by default. Protocol
+version `2` is carried in every request and response, and `request_id` is
+echoed so callers can correlate a response. The optional management API uses
+the same operations under `/api/v1`; it is disabled unless configured and
+binds to loopback by default. Non-loopback listeners require a bearer token
+reference. Webhooks remain independently authenticated with HMAC and are not
+granted administrative API access.
+
+`mangod` owns desired configuration, reconciliation, scheduling, execution
+metadata, and history. Each `mango-shim` owns one service process tree, its
+restart/stop lifecycle, logs, and durable observed state. A caller's context
+deadline bounds an IPC call; service `stop_timeout` bounds graceful shutdown
+before force termination.
 
 On daemon restart, the daemon scans persisted shim state, validates the
 service key, instance/incarnation identity, configuration fingerprint, and
@@ -1485,6 +1581,40 @@ starting a duplicate process. A live mismatch is shut down before replacement;
 an orphaned or uncertain process is surfaced as an error, while dead state is
 cleaned up. This keeps process ownership with the shim while the daemon owns
 the desired state.
+
+## Security and observability
+
+Phase 04 provides one event model across configuration, service lifecycle,
+health, execution, schedule, webhook, and administrative transitions. Events
+carry timestamp, actor, target, project, run ID, operation ID, configuration
+generation, and safe metadata. `mango events` reads these records and
+`--follow` follows by durable event ID without polling individual resources.
+
+Administrative requests also create audit entries with actor, action, target,
+result, operation ID, and time. The daemon writes JSON structured logs to
+`daemon.log`, and `mango doctor`, the health response, and `/api/v1/metrics`
+expose Prometheus-compatible counters/gauges for IPC requests, executions,
+service state, CPU, and memory.
+
+The management API exposes read-only health, service, execution, event, audit,
+and metrics routes plus authenticated service lifecycle and execution
+cancel/retry operations:
+
+```text
+GET  /api/v1/health
+GET  /api/v1/services?project=demo
+GET  /api/v1/services/demo/api
+GET  /api/v1/executions?status=running
+GET  /api/v1/events?after_id=42
+GET  /api/v1/audit
+GET  /api/v1/metrics
+POST /api/v1/services/demo/api/restart
+POST /api/v1/executions/RUN_ID/cancel
+```
+
+The API is intended for local administration or a trusted reverse proxy; Mango
+does not provide public-network exposure, TLS certificate management, RBAC,
+container isolation, or a security sandbox.
 
 ## Development
 

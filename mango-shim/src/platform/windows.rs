@@ -40,6 +40,7 @@ pub fn spawn_platform(
     stderr: File,
 ) -> io::Result<super::Spawned> {
     let mut command = Command::new(&bootstrap.command);
+    let environment = super::resolved_environment(bootstrap)?;
     command
         .args(&bootstrap.args)
         .current_dir(if bootstrap.working_dir.is_empty() {
@@ -48,7 +49,7 @@ pub fn spawn_platform(
             &bootstrap.working_dir
         })
         .env_clear()
-        .envs(&bootstrap.env)
+        .envs(&environment)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

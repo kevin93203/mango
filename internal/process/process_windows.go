@@ -16,7 +16,10 @@ type platformState struct {
 	job windows.Handle
 }
 
-func prepareCommand(cmd *exec.Cmd) error {
+func prepareCommand(cmd *exec.Cmd, spec Spec) error {
+	if spec.User != "" || spec.Group != "" {
+		return fmt.Errorf("run_as user/group is not supported by the Windows process adapter")
+	}
 	return nil
 }
 
