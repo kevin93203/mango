@@ -19,6 +19,12 @@ import (
 
 const CurrentVersion = 3
 
+const (
+	DefaultScheduleMisfire    = "skip"
+	DefaultScheduleMaxCatchUp = 1
+	MaxScheduleCatchUp        = 1000
+)
+
 var (
 	namePattern        = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
 	projectNamePattern = regexp.MustCompile("^[A-Za-z][A-Za-z0-9._-]*$")
@@ -31,6 +37,7 @@ type File struct {
 	Tasks     map[string]Task     `yaml:"tasks"`
 	Workflows map[string]Workflow `yaml:"workflows"`
 	Schedules []Schedule          `yaml:"schedules"`
+	Webhooks  []Webhook           `yaml:"webhooks"`
 	Path      string              `yaml:"-" json:"-"`
 }
 
@@ -99,6 +106,8 @@ type Schedule struct {
 	Timezone   string `yaml:"timezone"`
 	TargetType string `yaml:"target_type"`
 	Target     string `yaml:"target"`
+	Misfire    string `yaml:"misfire"`
+	MaxCatchUp int    `yaml:"max_catch_up"`
 
 	// Deprecated source-compatibility fields. They are deliberately excluded
 	// from YAML decoding so the breaking v3 schema cannot silently accept the
@@ -120,6 +129,7 @@ type Task struct {
 	Timeout     string            `yaml:"timeout"`
 	Concurrency string            `yaml:"concurrency"`
 	Retry       *TaskRetry        `yaml:"retry"`
+	Outputs     []string          `yaml:"outputs"`
 }
 
 type TaskRetry struct {
@@ -137,8 +147,19 @@ type Workflow struct {
 }
 
 type WorkflowTask struct {
-	Uses  string   `yaml:"uses"`
-	Needs []string `yaml:"needs"`
+	Uses         string     `yaml:"uses"`
+	Needs        []string   `yaml:"needs"`
+	Timeout      string     `yaml:"timeout"`
+	Retry        *TaskRetry `yaml:"retry"`
+	AllowFailure bool       `yaml:"allow_failure"`
+}
+
+type Webhook struct {
+	Name       string `yaml:"name"`
+	Path       string `yaml:"path"`
+	TargetType string `yaml:"target_type"`
+	Target     string `yaml:"target"`
+	SecretRef  string `yaml:"secret_ref"`
 }
 
 type EffectiveProcess struct {
@@ -190,6 +211,8 @@ type EffectiveSchedule struct {
 	Timezone   *time.Location
 	TargetType string
 	Target     string
+	Misfire    string
+	MaxCatchUp int
 	// RunID and OccurrenceID are populated only while the scheduler is
 	// executing a schedule. They are deliberately not part of YAML config.
 	RunID                   string
@@ -223,12 +246,18 @@ type EffectiveTask struct {
 	Concurrency string
 	RetryCount  int
 	RetryDelay  time.Duration
+	Outputs     []string
 }
 
 type EffectiveWorkflowTask struct {
-	Name  string
-	Uses  string
-	Needs []string
+	Name           string
+	Uses           string
+	Needs          []string
+	Timeout        time.Duration
+	RetryCount     int
+	RetryDelay     time.Duration
+	AllowFailure   bool
+	PolicyResolved bool
 }
 
 type EffectiveWorkflow struct {
@@ -236,6 +265,15 @@ type EffectiveWorkflow struct {
 	Name        string
 	Concurrency string
 	Tasks       map[string]EffectiveWorkflowTask
+}
+
+type EffectiveWebhook struct {
+	Project    string
+	Name       string
+	Path       string
+	TargetType string
+	Target     string
+	SecretRef  string
 }
 
 func Load(path string) (File, error) {
@@ -401,6 +439,9 @@ func Validate(f File) error {
 				return fmt.Errorf("task %q retry.delay: %w", name, err)
 			}
 		}
+		if err := validateOutputPaths(task.Outputs); err != nil {
+			return fmt.Errorf("task %q outputs: %w", name, err)
+		}
 	}
 	for name, workflow := range f.Workflows {
 		if !namePattern.MatchString(name) {
@@ -421,6 +462,17 @@ func Validate(f File) error {
 			}
 			if _, ok := f.Tasks[node.Uses]; !ok {
 				return fmt.Errorf("workflow %q task node %q uses unknown task %q", name, nodeName, node.Uses)
+			}
+			if _, err := parseDuration(node.Timeout, 0); err != nil {
+				return fmt.Errorf("workflow %q task node %q timeout: %w", name, nodeName, err)
+			}
+			if node.Retry != nil {
+				if node.Retry.Retries < 0 {
+					return fmt.Errorf("workflow %q task node %q retry.retries must be non-negative", name, nodeName)
+				}
+				if _, err := parseNonNegativeDuration(node.Retry.Delay, 0); err != nil {
+					return fmt.Errorf("workflow %q task node %q retry.delay: %w", name, nodeName, err)
+				}
 			}
 			seenNeeds := map[string]bool{}
 			for _, dependency := range node.Needs {
@@ -455,6 +507,24 @@ func Validate(f File) error {
 		if _, err := cron.ParseStandard(s.Cron); err != nil {
 			return fmt.Errorf("schedule %q cron: %w", s.Name, err)
 		}
+		misfire := s.Misfire
+		if misfire == "" {
+			misfire = DefaultScheduleMisfire
+		}
+		switch misfire {
+		case "skip", "run_once", "catch_up":
+		default:
+			return fmt.Errorf("schedule %q misfire must be skip, run_once, or catch_up", s.Name)
+		}
+		if s.MaxCatchUp < 0 {
+			return fmt.Errorf("schedule %q max_catch_up must be non-negative", s.Name)
+		}
+		if s.MaxCatchUp > MaxScheduleCatchUp {
+			return fmt.Errorf("schedule %q max_catch_up must be at most %d", s.Name, MaxScheduleCatchUp)
+		}
+		if misfire == "catch_up" && s.MaxCatchUp == 0 {
+			return fmt.Errorf("schedule %q max_catch_up must be positive for catch_up misfire policy", s.Name)
+		}
 		zone := s.Timezone
 		if zone == "" {
 			zone = "Local"
@@ -476,12 +546,89 @@ func Validate(f File) error {
 			return fmt.Errorf("schedule %q target task %q does not exist", s.Name, s.Target)
 		}
 	}
+	webhookNames := map[string]bool{}
+	webhookPaths := map[string]bool{}
+	for i, hook := range f.Webhooks {
+		if !namePattern.MatchString(hook.Name) {
+			return fmt.Errorf("webhooks[%d].name is invalid", i)
+		}
+		if webhookNames[hook.Name] {
+			return fmt.Errorf("duplicate webhook name %q", hook.Name)
+		}
+		webhookNames[hook.Name] = true
+		if err := validateWebhookPath(hook.Path); err != nil {
+			return fmt.Errorf("webhook %q path: %w", hook.Name, err)
+		}
+		if webhookPaths[hook.Path] {
+			return fmt.Errorf("duplicate webhook path %q", hook.Path)
+		}
+		webhookPaths[hook.Path] = true
+		if !strings.HasPrefix(hook.SecretRef, "env:") || strings.TrimSpace(strings.TrimPrefix(hook.SecretRef, "env:")) == "" {
+			return fmt.Errorf("webhook %q secret_ref must use env:NAME", hook.Name)
+		}
+		if hook.TargetType != "workflow" && hook.TargetType != "task" {
+			return fmt.Errorf("webhook %q target_type must be workflow or task", hook.Name)
+		}
+		if strings.TrimSpace(hook.Target) == "" {
+			return fmt.Errorf("webhook %q target is required", hook.Name)
+		}
+		if hook.TargetType == "workflow" {
+			if _, ok := f.Workflows[hook.Target]; !ok {
+				return fmt.Errorf("webhook %q target workflow %q does not exist", hook.Name, hook.Target)
+			}
+		} else if _, ok := f.Tasks[hook.Target]; !ok {
+			return fmt.Errorf("webhook %q target task %q does not exist", hook.Name, hook.Target)
+		}
+	}
 	return nil
 }
 
 func ValidateProjectName(name string) error {
 	if !projectNamePattern.MatchString(name) {
 		return errors.New("project name must start with an ASCII letter and contain only letters, digits, '.', '_' or '-'")
+	}
+	return nil
+}
+
+func validateOutputPaths(outputs []string) error {
+	seen := make(map[string]bool, len(outputs))
+	for _, output := range outputs {
+		if output == "" {
+			return errors.New("path cannot be empty")
+		}
+		if strings.IndexByte(output, 0) >= 0 {
+			return fmt.Errorf("path %q contains NUL", output)
+		}
+		normalized := strings.ReplaceAll(output, "\\", "/")
+		if strings.HasPrefix(normalized, "/") || (len(normalized) >= 2 && normalized[1] == ':') {
+			return fmt.Errorf("path %q must be relative", output)
+		}
+		for _, part := range strings.Split(normalized, "/") {
+			if part == ".." {
+				return fmt.Errorf("path %q must not contain ..", output)
+			}
+		}
+		clean := filepath.ToSlash(filepath.Clean(normalized))
+		if clean == "." || clean == "" {
+			return fmt.Errorf("path %q must name a file", output)
+		}
+		if seen[clean] {
+			return fmt.Errorf("duplicate path %q", output)
+		}
+		seen[clean] = true
+	}
+	return nil
+}
+
+func validateWebhookPath(value string) error {
+	if strings.TrimSpace(value) == "" || !strings.HasPrefix(value, "/") {
+		return errors.New("path must start with /")
+	}
+	if strings.ContainsAny(value, "?#") || strings.Contains(value, "//") {
+		return errors.New("path must not contain query, fragment, or empty segments")
+	}
+	if strings.Contains(value, "..") {
+		return errors.New("path must not contain ..")
 	}
 	return nil
 }
@@ -669,6 +816,7 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 			Project: projectName, Name: name, Command: command, Args: append([]string(nil), task.Args...),
 			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), DeclaredEnv: cloneStringMap(task.Env), Timeout: timeout,
 			Concurrency: defaultString(task.Concurrency, "forbid"), RetryCount: retryCount, RetryDelay: retryDelay,
+			Outputs: append([]string(nil), task.Outputs...),
 		}
 	}
 	return result, nil
@@ -676,6 +824,10 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 
 func (f File) WorkflowsEffective(projectName string) (map[string]EffectiveWorkflow, error) {
 	if err := Validate(f); err != nil {
+		return nil, err
+	}
+	tasks, err := f.TasksEffective(projectName)
+	if err != nil {
 		return nil, err
 	}
 	result := make(map[string]EffectiveWorkflow, len(f.Workflows))
@@ -688,8 +840,21 @@ func (f File) WorkflowsEffective(projectName string) (map[string]EffectiveWorkfl
 		workflow := f.Workflows[name]
 		nodes := make(map[string]EffectiveWorkflowTask, len(workflow.Tasks))
 		for nodeName, node := range workflow.Tasks {
+			base := tasks[node.Uses]
+			timeout := base.Timeout
+			retryCount := base.RetryCount
+			retryDelay := base.RetryDelay
+			if node.Timeout != "" {
+				timeout, _ = parseDuration(node.Timeout, 0)
+			}
+			if node.Retry != nil {
+				retryCount = node.Retry.Retries
+				retryDelay, _ = parseNonNegativeDuration(node.Retry.Delay, 0)
+			}
 			nodes[nodeName] = EffectiveWorkflowTask{
 				Name: nodeName, Uses: node.Uses, Needs: append([]string(nil), node.Needs...),
+				Timeout: timeout, RetryCount: retryCount, RetryDelay: retryDelay, AllowFailure: node.AllowFailure,
+				PolicyResolved: true,
 			}
 		}
 		result[name] = EffectiveWorkflow{
@@ -711,11 +876,39 @@ func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error
 			zone = "Local"
 		}
 		loc, _ := time.LoadLocation(zone)
+		misfire := s.Misfire
+		if misfire == "" {
+			misfire = DefaultScheduleMisfire
+		}
+		maxCatchUp := s.MaxCatchUp
+		if maxCatchUp == 0 {
+			maxCatchUp = DefaultScheduleMaxCatchUp
+		}
 		result = append(result, EffectiveSchedule{
 			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
-			TargetType: s.TargetType, Target: s.Target,
+			TargetType: s.TargetType, Target: s.Target, Misfire: misfire, MaxCatchUp: maxCatchUp,
 		})
 	}
+	return result, nil
+}
+
+func (f File) WebhooksEffective(projectName string) ([]EffectiveWebhook, error) {
+	if err := Validate(f); err != nil {
+		return nil, err
+	}
+	result := make([]EffectiveWebhook, 0, len(f.Webhooks))
+	for _, hook := range f.Webhooks {
+		result = append(result, EffectiveWebhook{
+			Project: projectName, Name: hook.Name, Path: hook.Path,
+			TargetType: hook.TargetType, Target: hook.Target, SecretRef: hook.SecretRef,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Path != result[j].Path {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].Project+"/"+result[i].Name < result[j].Project+"/"+result[j].Name
+	})
 	return result, nil
 }
 

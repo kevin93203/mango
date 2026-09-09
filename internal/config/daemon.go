@@ -6,10 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const DefaultScheduleHistoryLimit = 0
 const DefaultHistoryDatabaseDriver = "sqlite"
+const DefaultWebhookListen = "127.0.0.1:8787"
+const DefaultWebhookMaxBodyBytes int64 = 1 << 20
+const DefaultWebhookReplayWindow = 5 * time.Minute
+const DefaultWebhookRateLimitPerMinute = 60
 
 type HistoryConfig struct {
 	Database DatabaseConfig `yaml:"database"`
@@ -22,15 +27,28 @@ type DatabaseConfig struct {
 	DSNEnv string `yaml:"dsn_env"`
 }
 
+type WebhookServerConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	Listen             string `yaml:"listen"`
+	MaxBodyBytes       int64  `yaml:"max_body_bytes"`
+	ReplayWindow       string `yaml:"replay_window"`
+	RateLimitPerMinute int    `yaml:"rate_limit_per_minute"`
+}
+
 type DaemonConfig struct {
-	ScheduleHistoryLimit int           `yaml:"schedule_history_limit"`
-	History              HistoryConfig `yaml:"history"`
+	ScheduleHistoryLimit int                 `yaml:"schedule_history_limit"`
+	History              HistoryConfig       `yaml:"history"`
+	WebhookServer        WebhookServerConfig `yaml:"webhook_server"`
 }
 
 func LoadDaemonConfig(path string) (DaemonConfig, error) {
 	result := DaemonConfig{
 		ScheduleHistoryLimit: DefaultScheduleHistoryLimit,
 		History:              HistoryConfig{Database: DatabaseConfig{Driver: DefaultHistoryDatabaseDriver}},
+		WebhookServer: WebhookServerConfig{
+			Listen: DefaultWebhookListen, MaxBodyBytes: DefaultWebhookMaxBodyBytes,
+			ReplayWindow: DefaultWebhookReplayWindow.String(), RateLimitPerMinute: DefaultWebhookRateLimitPerMinute,
+		},
 	}
 	if path == "" {
 		return result, nil
@@ -54,6 +72,18 @@ func LoadDaemonConfig(path string) (DaemonConfig, error) {
 	}
 	if result.ScheduleHistoryLimit < 0 {
 		return DaemonConfig{}, errors.New("schedule_history_limit must be non-negative")
+	}
+	if strings.TrimSpace(result.WebhookServer.Listen) == "" {
+		return DaemonConfig{}, errors.New("webhook_server.listen must not be empty")
+	}
+	if result.WebhookServer.MaxBodyBytes <= 0 {
+		return DaemonConfig{}, errors.New("webhook_server.max_body_bytes must be positive")
+	}
+	if result.WebhookServer.RateLimitPerMinute <= 0 {
+		return DaemonConfig{}, errors.New("webhook_server.rate_limit_per_minute must be positive")
+	}
+	if replayWindow, err := time.ParseDuration(result.WebhookServer.ReplayWindow); err != nil || replayWindow <= 0 {
+		return DaemonConfig{}, errors.New("webhook_server.replay_window must be a positive duration")
 	}
 	if err := result.History.Database.Validate(); err != nil {
 		return DaemonConfig{}, err

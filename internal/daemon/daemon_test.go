@@ -24,6 +24,7 @@ import (
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/testfixture"
+	"github.com/kevin93203/mango/internal/webhook"
 	"github.com/kevin93203/mango/internal/workflow"
 )
 
@@ -179,6 +180,16 @@ func TestRecoverActiveExecutionsMarksDurableRunsInterrupted(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, _, err := d.scheduler.BeginExecution(context.Background(), scheduler.Record{
+		RunID: "workflow-before-restart", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Status: scheduler.StatusRunning, Started: started,
+		Tasks: []scheduler.TaskRecord{
+			{RunID: "node-running", ParentRunID: "workflow-before-restart", Node: "build", Task: "build", Status: scheduler.StatusRunning, Started: started},
+			{RunID: "node-done", ParentRunID: "workflow-before-restart", Node: "check", Task: "check", Status: scheduler.StatusSuccess, Started: started, Finished: started},
+		},
+	}, "", 11); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.recoverActiveExecutions(); err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +201,13 @@ func TestRecoverActiveExecutionsMarksDurableRunsInterrupted(t *testing.T) {
 		if execution.Record.Status != scheduler.StatusInterrupted || execution.Record.ExitCode != 125 || execution.Record.Error == "" {
 			t.Fatalf("recovered %s = %+v", runID, execution.Record)
 		}
+	}
+	workflowExecution, err := d.scheduler.GetExecution(context.Background(), "workflow-before-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflowExecution.Record.Tasks) != 2 || workflowExecution.Record.Tasks[0].Status != scheduler.StatusInterrupted || workflowExecution.Record.Tasks[1].Status != scheduler.StatusSuccess {
+		t.Fatalf("recovered workflow nodes = %+v, want active node interrupted and completed node retained", workflowExecution.Record.Tasks)
 	}
 	completed, err := d.scheduler.GetExecution(context.Background(), "completed-before-restart")
 	if err != nil {
@@ -1254,6 +1272,81 @@ func TestHistoryFiltersTriggersAndScheduleHistoryIsScheduleOnly(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Trigger == nil || records[0].Trigger.EventID != "evt-1" {
 		t.Fatalf("webhook history = %+v, want event id", records)
+	}
+}
+
+func TestWebhookCreatesDurableExecutionAndDeduplicatesByBody(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	d.workflow = workflow.New(func(context.Context, config.EffectiveTask, workflow.Invocation) scheduler.ExecutionResult {
+		return scheduler.ExecutionResult{}
+	}, d.recordExecution)
+	d.workflow.SetProgressSink(d.recordExecutionProgress)
+	d.workflow.Apply(map[string]config.EffectiveTask{
+		"demo/deploy": {Project: "demo", Name: "deploy", Command: "deploy"},
+	}, nil)
+	definition := config.EffectiveWebhook{
+		Project: "demo", Name: "deploy-hook", Path: "/hooks/deploy", TargetType: "task", Target: "deploy", SecretRef: "env:DEPLOY_SECRET",
+	}
+	delivery := webhook.Delivery{Webhook: definition, IdempotencyKey: "event-1", BodySHA256: "hash-1", BodySize: 4}
+	first, err := d.handleWebhook(context.Background(), delivery)
+	if err != nil || first.RunID == "" || first.Duplicate {
+		t.Fatalf("first webhook = %+v, err=%v", first, err)
+	}
+	d.workflow.Wait()
+	execution, err := d.scheduler.GetExecution(context.Background(), first.RunID)
+	if err != nil || execution.Record.Status != scheduler.StatusSuccess || execution.Record.Trigger.Type != scheduler.TriggerWebhook {
+		t.Fatalf("webhook execution = %+v, err=%v", execution, err)
+	}
+	events, err := d.scheduler.ListExecutionEvents(context.Background(), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundReceived := false
+	for _, event := range events {
+		if event.Type == "webhook_received" {
+			foundReceived = true
+		}
+	}
+	if !foundReceived {
+		t.Fatalf("webhook events = %+v, want webhook_received", events)
+	}
+	duplicate, err := d.handleWebhook(context.Background(), delivery)
+	if err != nil || !duplicate.Duplicate || duplicate.RunID != first.RunID {
+		t.Fatalf("duplicate webhook = %+v, err=%v", duplicate, err)
+	}
+	_, err = d.handleWebhook(context.Background(), webhook.Delivery{
+		Webhook: definition, IdempotencyKey: "event-1", BodySHA256: "hash-2", BodySize: 4,
+	})
+	var requestErr *webhook.RequestError
+	if !errors.As(err, &requestErr) || requestErr.Status != 409 {
+		t.Fatalf("conflicting webhook error = %v, want status 409", err)
+	}
+
+	orphanRunID := scheduler.NewRunID()
+	_, created, err := d.scheduler.ClaimWebhookDelivery(context.Background(), scheduler.WebhookDelivery{
+		WebhookKey: "demo/deploy-hook", IdempotencyKey: "orphan", BodySHA256: "hash-orphan", BodySize: 6, RunID: orphanRunID,
+	})
+	if err != nil || !created {
+		t.Fatalf("claim orphan webhook delivery = created=%v, err=%v", created, err)
+	}
+	_, created, err = d.scheduler.BeginExecution(context.Background(), scheduler.Record{
+		RunID: orphanRunID, Project: "demo", Name: "deploy", TargetType: "task", Target: "deploy",
+		Trigger: scheduler.WebhookTrigger("deploy-hook", "orphan"), Status: scheduler.StatusQueued, Started: time.Now().UTC(),
+		IdempotencyKey: "webhook:demo/deploy-hook:orphan",
+	}, "webhook:demo/deploy-hook:orphan", 0)
+	if err != nil || !created {
+		t.Fatalf("create orphan webhook execution = created=%v, err=%v", created, err)
+	}
+	resumed, err := d.handleWebhook(context.Background(), webhook.Delivery{
+		Webhook: definition, IdempotencyKey: "orphan", BodySHA256: "hash-orphan", BodySize: 6,
+	})
+	if err != nil || resumed.RunID != orphanRunID || resumed.Duplicate {
+		t.Fatalf("resumed webhook = %+v, err=%v", resumed, err)
+	}
+	d.workflow.Wait()
+	execution, err = d.scheduler.GetExecution(context.Background(), orphanRunID)
+	if err != nil || execution.Record.Status != scheduler.StatusSuccess {
+		t.Fatalf("resumed webhook execution = %+v, err=%v", execution, err)
 	}
 }
 

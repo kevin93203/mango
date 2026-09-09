@@ -42,6 +42,10 @@ func ScheduleTrigger(name string) TriggerRef {
 	return TriggerRef{Type: TriggerSchedule, Name: name, Mode: TriggerModeAutomatic}
 }
 
+func WebhookTrigger(name, eventID string) TriggerRef {
+	return TriggerRef{Type: TriggerWebhook, Name: name, Mode: TriggerModeAutomatic, EventID: eventID}
+}
+
 func (t TriggerRef) IsZero() bool {
 	return t.Type == "" && t.Name == "" && t.Mode == "" && t.EventID == ""
 }

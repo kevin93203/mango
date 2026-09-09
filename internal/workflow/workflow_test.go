@@ -60,11 +60,176 @@ func TestRunWorkflowExecutesReadyNodesInParallelAndSkipsDescendants(t *testing.T
 		}
 		byNode[task.Node] = task
 	}
-	if byNode["child"].Status != StatusSkipped || byNode["a"].Status != StatusSuccess || byNode["b"].Status != StatusSuccess || byNode["bad"].Status != StatusFailed {
+	if byNode["child"].Status != StatusSkipped || byNode["child"].SkipReason != "upstream_failed" || byNode["a"].Status != StatusSuccess || byNode["b"].Status != StatusSuccess || byNode["bad"].Status != StatusFailed {
 		t.Fatalf("task records = %+v", byNode)
 	}
 	if started["a"].IsZero() || started["b"].IsZero() || started["b"].Sub(started["a"]) > 20*time.Millisecond {
 		t.Fatalf("independent nodes did not start in parallel: %+v", started)
+	}
+}
+
+func TestWorkflowAllowFailureContinuesDownstreamAndSucceeds(t *testing.T) {
+	runner := func(_ context.Context, _ config.EffectiveTask, invocation Invocation) scheduler.ExecutionResult {
+		if invocation.Node == "optional" {
+			return scheduler.ExecutionResult{ExitCode: 2, Err: errors.New("optional failure")}
+		}
+		return scheduler.ExecutionResult{}
+	}
+	e := New(runner, nil)
+	e.Apply(map[string]config.EffectiveTask{
+		"demo/optional": testTask("demo", "optional"),
+		"demo/deploy":   testTask("demo", "deploy"),
+	}, map[string]config.EffectiveWorkflow{
+		"demo/release": {
+			Project: "demo", Name: "release", Concurrency: "allow",
+			Tasks: map[string]config.EffectiveWorkflowTask{
+				"optional": {Name: "optional", Uses: "optional", AllowFailure: true},
+				"deploy":   {Name: "deploy", Uses: "deploy", Needs: []string{"optional"}},
+			},
+		},
+	})
+
+	result := e.Run(context.Background(), "demo", "release", scheduler.ManualTrigger())
+	if result.Record == nil || result.Record.Status != StatusSuccess {
+		t.Fatalf("result = %+v, want successful workflow", result)
+	}
+	byNode := map[string]scheduler.TaskRecord{}
+	for _, task := range result.Record.Tasks {
+		byNode[task.Node] = task
+	}
+	if byNode["optional"].Status != StatusFailed || byNode["deploy"].Status != StatusSuccess {
+		t.Fatalf("nodes = %+v, want allowed failure followed by success", byNode)
+	}
+}
+
+func TestWorkflowNodePolicyIsPassedToTaskRunner(t *testing.T) {
+	var received config.EffectiveTask
+	e := New(func(_ context.Context, task config.EffectiveTask, _ Invocation) scheduler.ExecutionResult {
+		received = task
+		return scheduler.ExecutionResult{}
+	}, nil)
+	e.Apply(map[string]config.EffectiveTask{"demo/deploy": {
+		Project: "demo", Name: "deploy", Command: "deploy", Timeout: time.Minute,
+		RetryCount: 4, RetryDelay: 10 * time.Second, Concurrency: "allow",
+	}}, map[string]config.EffectiveWorkflow{
+		"demo/release": {Project: "demo", Name: "release", Concurrency: "allow", Tasks: map[string]config.EffectiveWorkflowTask{
+			"deploy": {Name: "deploy", Uses: "deploy", PolicyResolved: true, Timeout: 30 * time.Second, RetryCount: 2, RetryDelay: time.Second},
+		}},
+	})
+	result := e.Run(context.Background(), "demo", "release", scheduler.ManualTrigger())
+	if result.Record == nil || result.Record.Status != StatusSuccess {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if received.Timeout != 30*time.Second || received.RetryCount != 2 || received.RetryDelay != time.Second {
+		t.Fatalf("received task = %+v, want node policy", received)
+	}
+	node := result.Record.Tasks[0]
+	if node.Timeout != 30*time.Second || node.RetryCount != 2 || node.RetryDelay != time.Second || !node.PolicyResolved {
+		t.Fatalf("node record = %+v, want persisted resolved policy", node)
+	}
+}
+
+func TestWorkflowCancellationPropagatesToActiveAndPendingNodes(t *testing.T) {
+	started := make(chan struct{})
+	runner := func(ctx context.Context, _ config.EffectiveTask, invocation Invocation) scheduler.ExecutionResult {
+		if invocation.Node == "first" {
+			close(started)
+			<-ctx.Done()
+			return scheduler.ExecutionResult{ExitCode: 130, Err: ctx.Err()}
+		}
+		return scheduler.ExecutionResult{}
+	}
+	e := New(runner, nil)
+	e.Apply(map[string]config.EffectiveTask{
+		"demo/first":  testTask("demo", "first"),
+		"demo/second": testTask("demo", "second"),
+	}, map[string]config.EffectiveWorkflow{
+		"demo/pipeline": {Project: "demo", Name: "pipeline", Concurrency: "allow", Tasks: map[string]config.EffectiveWorkflowTask{
+			"first":  {Name: "first", Uses: "first"},
+			"second": {Name: "second", Uses: "second", Needs: []string{"first"}},
+		}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan scheduler.ExecutionResult, 1)
+	go func() { resultCh <- e.Run(ctx, "demo", "pipeline", scheduler.ManualTrigger()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("workflow did not start first node")
+	}
+	cancel()
+	result := <-resultCh
+	if result.Record == nil || result.Record.Status != StatusCancelled {
+		t.Fatalf("cancelled workflow = %+v, want cancelled", result)
+	}
+	byNode := map[string]scheduler.TaskRecord{}
+	for _, task := range result.Record.Tasks {
+		byNode[task.Node] = task
+	}
+	if byNode["first"].Status != StatusCancelled || byNode["second"].Status != StatusCancelled {
+		t.Fatalf("cancelled nodes = %+v, want active and pending nodes cancelled", byNode)
+	}
+}
+
+func TestWorkflowProgressSinkReportsActiveAndCompletedNodes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	progress := make(chan scheduler.Record, 8)
+	e := New(func(_ context.Context, _ config.EffectiveTask, _ Invocation) scheduler.ExecutionResult {
+		close(started)
+		<-release
+		return scheduler.ExecutionResult{}
+	}, nil)
+	e.SetProgressSink(func(record scheduler.Record) { progress <- record })
+	e.Apply(map[string]config.EffectiveTask{"demo/job": testTask("demo", "job")}, map[string]config.EffectiveWorkflow{
+		"demo/pipeline": {Project: "demo", Name: "pipeline", Concurrency: "allow", Tasks: map[string]config.EffectiveWorkflowTask{
+			"job": {Name: "job", Uses: "job"},
+		}},
+	})
+
+	resultCh := make(chan scheduler.ExecutionResult, 1)
+	go func() { resultCh <- e.Run(context.Background(), "demo", "pipeline", scheduler.ManualTrigger()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+
+	var runningSeen bool
+	for i := 0; i < 3; i++ {
+		select {
+		case snapshot := <-progress:
+			if len(snapshot.Tasks) == 1 && snapshot.Tasks[0].Status == StatusRunning {
+				runningSeen = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("workflow progress snapshot missing")
+		}
+		if runningSeen {
+			break
+		}
+	}
+	if !runningSeen {
+		t.Fatal("progress sink did not report running node")
+	}
+	close(release)
+	result := <-resultCh
+	if result.Record == nil || result.Record.Status != StatusSuccess {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	var completedSeen bool
+	for {
+		select {
+		case snapshot := <-progress:
+			if len(snapshot.Tasks) == 1 && snapshot.Tasks[0].Status == StatusSuccess {
+				completedSeen = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("workflow completion progress snapshot missing")
+		}
+		if completedSeen {
+			break
+		}
 	}
 }
 

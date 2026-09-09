@@ -18,11 +18,14 @@ func TestLoadDaemonConfigDefaultsWhenMissing(t *testing.T) {
 	if config.History.Database.Driver != DefaultHistoryDatabaseDriver {
 		t.Fatalf("history database driver = %q, want %q", config.History.Database.Driver, DefaultHistoryDatabaseDriver)
 	}
+	if config.WebhookServer.Enabled || config.WebhookServer.Listen != DefaultWebhookListen || config.WebhookServer.MaxBodyBytes != DefaultWebhookMaxBodyBytes {
+		t.Fatalf("webhook server defaults = %+v", config.WebhookServer)
+	}
 }
 
 func TestLoadDaemonConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.yaml")
-	if err := os.WriteFile(path, []byte("schedule_history_limit: 25\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("schedule_history_limit: 25\nwebhook_server:\n  enabled: true\n  listen: 127.0.0.1:0\n  replay_window: 30s\n  max_body_bytes: 2048\n  rate_limit_per_minute: 10\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := LoadDaemonConfig(path)
@@ -31,6 +34,9 @@ func TestLoadDaemonConfig(t *testing.T) {
 	}
 	if config.ScheduleHistoryLimit != 25 {
 		t.Fatalf("schedule history limit = %d, want 25", config.ScheduleHistoryLimit)
+	}
+	if !config.WebhookServer.Enabled || config.WebhookServer.Listen != "127.0.0.1:0" || config.WebhookServer.ReplayWindow != "30s" {
+		t.Fatalf("webhook server config = %+v", config.WebhookServer)
 	}
 }
 

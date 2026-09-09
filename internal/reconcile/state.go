@@ -14,6 +14,7 @@ const (
 	KindTask     = "task"
 	KindWorkflow = "workflow"
 	KindSchedule = "schedule"
+	KindWebhook  = "webhook"
 )
 
 // DesiredState is the fully compiled configuration used by both planning and
@@ -24,6 +25,7 @@ type DesiredState struct {
 	Tasks     map[string]config.EffectiveTask
 	Workflows map[string]config.EffectiveWorkflow
 	Schedules []config.EffectiveSchedule
+	Webhooks  []config.EffectiveWebhook
 }
 
 func Compile(file config.File, project string) (DesiredState, error) {
@@ -43,7 +45,11 @@ func Compile(file config.File, project string) (DesiredState, error) {
 	if err != nil {
 		return DesiredState{}, err
 	}
-	return DesiredState{Services: services, Tasks: tasks, Workflows: workflows, Schedules: schedules}, nil
+	webhooks, err := file.WebhooksEffective(project)
+	if err != nil {
+		return DesiredState{}, err
+	}
+	return DesiredState{Services: services, Tasks: tasks, Workflows: workflows, Schedules: schedules, Webhooks: webhooks}, nil
 }
 
 type ResourceKey struct {
@@ -63,7 +69,7 @@ type ResourceSpec struct {
 }
 
 func (state DesiredState) Resources() []ResourceSpec {
-	resources := make([]ResourceSpec, 0, len(state.Services)+len(state.Tasks)+len(state.Workflows)+len(state.Schedules))
+	resources := make([]ResourceSpec, 0, len(state.Services)+len(state.Tasks)+len(state.Workflows)+len(state.Schedules)+len(state.Webhooks))
 	for _, service := range state.Services {
 		resources = append(resources, ResourceSpec{
 			Key: ResourceKey{Kind: KindService, Name: service.Name}, Value: service,
@@ -86,6 +92,12 @@ func (state DesiredState) Resources() []ResourceSpec {
 		resources = append(resources, ResourceSpec{
 			Key: ResourceKey{Kind: KindSchedule, Name: schedule.Name}, Value: schedule,
 			Fingerprint: Fingerprint(schedule),
+		})
+	}
+	for _, webhook := range state.Webhooks {
+		resources = append(resources, ResourceSpec{
+			Key: ResourceKey{Kind: KindWebhook, Name: webhook.Name}, Value: webhook,
+			Fingerprint: Fingerprint(webhook),
 		})
 	}
 	sort.Slice(resources, func(i, j int) bool {
@@ -126,6 +138,8 @@ func resourceKindOrder(kind string) int {
 		return 2
 	case KindSchedule:
 		return 3
+	case KindWebhook:
+		return 4
 	default:
 		return 99
 	}
@@ -149,6 +163,8 @@ func Fingerprint(value interface{}) string {
 			Timezone    string
 			TargetType  string
 			Target      string
+			Misfire     string
+			MaxCatchUp  int
 			Action      string
 			Command     string
 			Args        []string
@@ -161,6 +177,7 @@ func Fingerprint(value interface{}) string {
 		}{
 			Project: schedule.Project, Name: schedule.Name, Cron: schedule.Cron, Timezone: timezone,
 			TargetType: schedule.TargetType, Target: schedule.Target, Action: schedule.Action,
+			Misfire: schedule.Misfire, MaxCatchUp: schedule.MaxCatchUp,
 			Command: schedule.Command, Args: schedule.Args, WorkingDir: schedule.WorkingDir,
 			Env: schedule.Env, Concurrency: schedule.Concurrency, Timeout: int64(schedule.Timeout),
 			RetryCount: schedule.RetryCount, RetryDelay: int64(schedule.RetryDelay),

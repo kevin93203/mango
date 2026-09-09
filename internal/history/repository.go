@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -73,7 +74,13 @@ type taskModel struct {
 	WorkingDir      string `gorm:"type:text"`
 	EnvKeysJSON     string `gorm:"type:text"`
 	ArgsRedacted    bool
-	Status          string     `gorm:"size:32"`
+	Status          string `gorm:"size:32"`
+	SkipReason      string `gorm:"size:64"`
+	TimeoutNanos    *int64
+	RetryCount      *int
+	RetryDelayNanos *int64
+	AllowFailure    *bool
+	PolicyResolved  *bool
 	Started         *time.Time `gorm:"index:idx_history_tasks_run_started,priority:2"`
 	Finished        *time.Time
 	DurationSeconds float64
@@ -101,6 +108,43 @@ type attemptModel struct {
 
 func (attemptModel) TableName() string { return "history_attempts" }
 
+type artifactModel struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	TaskRowID int64  `gorm:"index;not null"`
+	Path      string `gorm:"type:text"`
+	Exists    bool
+	Size      int64
+	SHA256    string `gorm:"size:64"`
+}
+
+func (artifactModel) TableName() string { return "history_artifacts" }
+
+type scheduleOccurrenceModel struct {
+	ID          string    `gorm:"primaryKey;size:255"`
+	Project     string    `gorm:"index:idx_schedule_occurrence_slot,priority:1;size:255"`
+	Schedule    string    `gorm:"index:idx_schedule_occurrence_slot,priority:2;size:255"`
+	ScheduledAt time.Time `gorm:"index:idx_schedule_occurrence_slot,priority:3"`
+	Status      string    `gorm:"size:32"`
+	RunID       string    `gorm:"index;size:255"`
+	Misfire     string    `gorm:"size:32"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+func (scheduleOccurrenceModel) TableName() string { return "schedule_occurrences" }
+
+type webhookDeliveryModel struct {
+	ID             int64  `gorm:"primaryKey;autoIncrement"`
+	WebhookKey     string `gorm:"uniqueIndex:idx_webhook_delivery_identity,priority:1;size:255"`
+	IdempotencyKey string `gorm:"uniqueIndex:idx_webhook_delivery_identity,priority:2;size:255"`
+	BodySHA256     string `gorm:"size:64"`
+	BodySize       int64
+	RunID          string    `gorm:"index;size:255"`
+	CreatedAt      time.Time `gorm:"index"`
+}
+
+func (webhookDeliveryModel) TableName() string { return "webhook_deliveries" }
+
 type counterModel struct {
 	Key   string `gorm:"primaryKey;size:512"`
 	Value int64
@@ -127,7 +171,7 @@ type eventModel struct {
 
 func (eventModel) TableName() string { return "execution_events" }
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 9
 
 func Open(config Config) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
@@ -287,9 +331,108 @@ func applyMigration(db *gorm.DB, version int) error {
 			}
 		}
 		return nil
+	case 5:
+		if !migrator.HasTable(&taskModel{}) {
+			return errors.New("history_tasks table is missing")
+		}
+		if !migrator.HasColumn(&taskModel{}, "SkipReason") {
+			if err := migrator.AddColumn(&taskModel{}, "SkipReason"); err != nil {
+				return fmt.Errorf("add history_tasks.skip_reason: %w", err)
+			}
+		}
+		if !migrator.HasTable(&artifactModel{}) {
+			if err := migrator.CreateTable(&artifactModel{}); err != nil {
+				return fmt.Errorf("create history_artifacts table: %w", err)
+			}
+		}
+		return nil
+	case 6:
+		if !migrator.HasTable(&scheduleOccurrenceModel{}) {
+			if err := migrator.CreateTable(&scheduleOccurrenceModel{}); err != nil {
+				return fmt.Errorf("create schedule_occurrences table: %w", err)
+			}
+		}
+		return nil
+	case 7:
+		if !migrator.HasTable(&webhookDeliveryModel{}) {
+			if err := migrator.CreateTable(&webhookDeliveryModel{}); err != nil {
+				return fmt.Errorf("create webhook_deliveries table: %w", err)
+			}
+		}
+		return nil
+	case 8:
+		if !migrator.HasTable(&taskModel{}) {
+			return errors.New("history_tasks table is missing")
+		}
+		for _, column := range []string{"TimeoutNanos", "RetryCount", "RetryDelayNanos", "AllowFailure", "PolicyResolved"} {
+			if migrator.HasColumn(&taskModel{}, column) {
+				continue
+			}
+			if err := migrator.AddColumn(&taskModel{}, column); err != nil {
+				return fmt.Errorf("add history_tasks.%s: %w", column, err)
+			}
+		}
+		return nil
+	case 9:
+		if !migrator.HasTable(&scheduleOccurrenceModel{}) {
+			return errors.New("schedule_occurrences table is missing")
+		}
+		return backfillScheduleOccurrences(db)
 	default:
 		return fmt.Errorf("unknown history migration %d", version)
 	}
+}
+
+func backfillScheduleOccurrences(db *gorm.DB) error {
+	var runs []runModel
+	if err := db.Where("trigger_type = ?", scheduler.TriggerSchedule).Find(&runs).Error; err != nil {
+		return err
+	}
+	for _, run := range runs {
+		scheduledAt, ok := legacyScheduleOccurrenceTime(run.EventID)
+		if !ok || run.Project == "" || run.TriggerName == "" {
+			continue
+		}
+		id := scheduler.ScheduleOccurrenceID(run.Project, run.TriggerName, scheduledAt)
+		var existing scheduleOccurrenceModel
+		if err := db.Where("id = ?", id).First(&existing).Error; err == nil {
+			continue
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		status := run.Status
+		if !scheduler.IsTerminalStatus(status) {
+			status = scheduler.OccurrenceDispatched
+		}
+		runID := run.RunID
+		if runID == "" {
+			runID = compatibleRunID(run)
+		}
+		createdAt := time.Now().UTC()
+		if !run.CreatedAt.IsZero() {
+			createdAt = run.CreatedAt
+		}
+		if err := db.Create(&scheduleOccurrenceModel{
+			ID: id, Project: run.Project, Schedule: run.TriggerName, ScheduledAt: scheduledAt,
+			Status: status, RunID: runID, Misfire: config.DefaultScheduleMisfire,
+			CreatedAt: createdAt, UpdatedAt: createdAt,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func legacyScheduleOccurrenceTime(eventID string) (time.Time, bool) {
+	separator := strings.LastIndexByte(eventID, ':')
+	if separator < 0 || separator == len(eventID)-1 {
+		return time.Time{}, false
+	}
+	nanos, err := strconv.ParseInt(eventID[separator+1:], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, nanos).UTC(), true
 }
 
 func backupBeforeMigration(path string) error {
@@ -451,6 +594,9 @@ func (r *Repository) saveRecord(tx *gorm.DB, record scheduler.Record) (runModel,
 				return run, false, previousStatus, err
 			}
 			if len(taskIDs) > 0 {
+				if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&artifactModel{}).Error; err != nil {
+					return run, false, previousStatus, err
+				}
 				if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&attemptModel{}).Error; err != nil {
 					return run, false, previousStatus, err
 				}
@@ -467,6 +613,9 @@ func (r *Repository) saveRecord(tx *gorm.DB, record scheduler.Record) (runModel,
 	for _, task := range record.Tasks {
 		model := taskModelFromRecord(run.ID, task)
 		if err := tx.Create(&model).Error; err != nil {
+			return run, created, previousStatus, err
+		}
+		if err := createArtifacts(tx, model.ID, task.Artifacts); err != nil {
 			return run, created, previousStatus, err
 		}
 		if err := createAttempts(tx, run.ID, model.ID, task.Attempts); err != nil {
@@ -717,6 +866,151 @@ func (r *Repository) RecordExecutionEvent(ctx context.Context, event scheduler.E
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return createEvent(tx, event) })
 }
 
+func (r *Repository) ClaimScheduleOccurrence(ctx context.Context, occurrence scheduler.ScheduleOccurrence) (scheduler.ScheduleOccurrence, bool, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	if occurrence.ID == "" {
+		return scheduler.ScheduleOccurrence{}, false, errors.New("schedule occurrence id is required")
+	}
+	var existing scheduleOccurrenceModel
+	err := r.db.WithContext(ctx).Where("id = ?", occurrence.ID).First(&existing).Error
+	if err == nil {
+		return occurrenceFromModel(existing), false, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return scheduler.ScheduleOccurrence{}, false, err
+	}
+	if occurrence.Status == "" {
+		occurrence.Status = scheduler.OccurrencePending
+	}
+	now := time.Now().UTC()
+	if occurrence.CreatedAt.IsZero() {
+		occurrence.CreatedAt = now
+	}
+	occurrence.UpdatedAt = now
+	model := occurrenceModelFromRecord(occurrence)
+	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		return scheduler.ScheduleOccurrence{}, false, err
+	}
+	return occurrenceFromModel(model), true, nil
+}
+
+func (r *Repository) GetScheduleOccurrence(ctx context.Context, id string) (scheduler.ScheduleOccurrence, error) {
+	var model scheduleOccurrenceModel
+	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return scheduler.ScheduleOccurrence{}, scheduler.ErrScheduleOccurrenceNotFound
+		}
+		return scheduler.ScheduleOccurrence{}, err
+	}
+	return occurrenceFromModel(model), nil
+}
+
+func (r *Repository) LatestScheduleOccurrence(ctx context.Context, project, schedule string) (scheduler.ScheduleOccurrence, error) {
+	var model scheduleOccurrenceModel
+	err := r.db.WithContext(ctx).Where("project = ? AND schedule = ?", project, schedule).
+		Order("scheduled_at DESC, id DESC").First(&model).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return scheduler.ScheduleOccurrence{}, scheduler.ErrScheduleOccurrenceNotFound
+	}
+	if err != nil {
+		return scheduler.ScheduleOccurrence{}, err
+	}
+	return occurrenceFromModel(model), nil
+}
+
+func (r *Repository) UpdateScheduleOccurrence(ctx context.Context, occurrence scheduler.ScheduleOccurrence) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	var existing scheduleOccurrenceModel
+	if err := r.db.WithContext(ctx).Where("id = ?", occurrence.ID).First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return scheduler.ErrScheduleOccurrenceNotFound
+		}
+		return err
+	}
+	if occurrence.CreatedAt.IsZero() {
+		occurrence.CreatedAt = existing.CreatedAt
+	}
+	occurrence.UpdatedAt = time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&existing).Updates(map[string]interface{}{
+		"project": occurrence.Project, "schedule": occurrence.Schedule, "scheduled_at": occurrence.ScheduledAt,
+		"status": occurrence.Status, "run_id": occurrence.RunID, "misfire": occurrence.Misfire,
+		"created_at": occurrence.CreatedAt, "updated_at": occurrence.UpdatedAt,
+	}).Error
+}
+
+func (r *Repository) ClaimWebhookDelivery(ctx context.Context, delivery scheduler.WebhookDelivery) (scheduler.WebhookDelivery, bool, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	if delivery.WebhookKey == "" || delivery.IdempotencyKey == "" {
+		return scheduler.WebhookDelivery{}, false, errors.New("webhook delivery identity is required")
+	}
+	var existing webhookDeliveryModel
+	err := r.db.WithContext(ctx).Where("webhook_key = ? AND idempotency_key = ?", delivery.WebhookKey, delivery.IdempotencyKey).First(&existing).Error
+	if err == nil {
+		stored := webhookDeliveryFromModel(existing)
+		if stored.BodySHA256 != delivery.BodySHA256 || stored.BodySize != delivery.BodySize {
+			return scheduler.WebhookDelivery{}, false, scheduler.ErrWebhookDeliveryConflict
+		}
+		return stored, false, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return scheduler.WebhookDelivery{}, false, err
+	}
+	if delivery.CreatedAt.IsZero() {
+		delivery.CreatedAt = time.Now().UTC()
+	}
+	model := webhookDeliveryModelFromRecord(delivery)
+	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		var concurrent webhookDeliveryModel
+		lookupErr := r.db.WithContext(ctx).
+			Where("webhook_key = ? AND idempotency_key = ?", delivery.WebhookKey, delivery.IdempotencyKey).
+			First(&concurrent).Error
+		if lookupErr == nil {
+			stored := webhookDeliveryFromModel(concurrent)
+			if stored.BodySHA256 != delivery.BodySHA256 || stored.BodySize != delivery.BodySize {
+				return scheduler.WebhookDelivery{}, false, scheduler.ErrWebhookDeliveryConflict
+			}
+			return stored, false, nil
+		}
+		return scheduler.WebhookDelivery{}, false, err
+	}
+	return webhookDeliveryFromModel(model), true, nil
+}
+
+func webhookDeliveryModelFromRecord(delivery scheduler.WebhookDelivery) webhookDeliveryModel {
+	return webhookDeliveryModel{
+		WebhookKey: delivery.WebhookKey, IdempotencyKey: delivery.IdempotencyKey,
+		BodySHA256: delivery.BodySHA256, BodySize: delivery.BodySize,
+		RunID: delivery.RunID, CreatedAt: delivery.CreatedAt,
+	}
+}
+
+func webhookDeliveryFromModel(model webhookDeliveryModel) scheduler.WebhookDelivery {
+	return scheduler.WebhookDelivery{
+		WebhookKey: model.WebhookKey, IdempotencyKey: model.IdempotencyKey,
+		BodySHA256: model.BodySHA256, BodySize: model.BodySize,
+		RunID: model.RunID, CreatedAt: model.CreatedAt,
+	}
+}
+
+func occurrenceModelFromRecord(occurrence scheduler.ScheduleOccurrence) scheduleOccurrenceModel {
+	return scheduleOccurrenceModel{
+		ID: occurrence.ID, Project: occurrence.Project, Schedule: occurrence.Schedule,
+		ScheduledAt: occurrence.ScheduledAt, Status: occurrence.Status, RunID: occurrence.RunID,
+		Misfire: occurrence.Misfire, CreatedAt: occurrence.CreatedAt, UpdatedAt: occurrence.UpdatedAt,
+	}
+}
+
+func occurrenceFromModel(model scheduleOccurrenceModel) scheduler.ScheduleOccurrence {
+	return scheduler.ScheduleOccurrence{
+		ID: model.ID, Project: model.Project, Schedule: model.Schedule, ScheduledAt: model.ScheduledAt,
+		Status: model.Status, RunID: model.RunID, Misfire: model.Misfire,
+		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+	}
+}
+
 func (r *Repository) ListExecutionEvents(ctx context.Context, runID string) ([]scheduler.ExecutionEvent, error) {
 	var rows []eventModel
 	if err := r.db.WithContext(ctx).Where("run_id = ?", runID).Order("id ASC").Find(&rows).Error; err != nil {
@@ -755,6 +1049,9 @@ func (r *Repository) MissingTables(ctx context.Context) ([]string, error) {
 		{name: "history_runs", model: &runModel{}},
 		{name: "history_tasks", model: &taskModel{}},
 		{name: "history_attempts", model: &attemptModel{}},
+		{name: "history_artifacts", model: &artifactModel{}},
+		{name: "schedule_occurrences", model: &scheduleOccurrenceModel{}},
+		{name: "webhook_deliveries", model: &webhookDeliveryModel{}},
 		{name: "history_counters", model: &counterModel{}},
 		{name: "schema_version", model: &schemaVersionModel{}},
 		{name: "execution_events", model: &eventModel{}},
@@ -780,6 +1077,9 @@ func (r *Repository) Clear(ctx context.Context) error {
 		if err := allowGlobalDelete.Delete(&attemptModel{}).Error; err != nil {
 			return err
 		}
+		if err := allowGlobalDelete.Delete(&artifactModel{}).Error; err != nil {
+			return err
+		}
 		if err := allowGlobalDelete.Delete(&taskModel{}).Error; err != nil {
 			return err
 		}
@@ -787,6 +1087,9 @@ func (r *Repository) Clear(ctx context.Context) error {
 			return err
 		}
 		if err := allowGlobalDelete.Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := allowGlobalDelete.Delete(&webhookDeliveryModel{}).Error; err != nil {
 			return err
 		}
 		return allowGlobalDelete.Delete(&counterModel{}).Error
@@ -829,6 +1132,9 @@ func (r *Repository) Purge(ctx context.Context, before *time.Time, all bool) (in
 			return err
 		}
 		if len(taskIDs) > 0 {
+			if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&artifactModel{}).Error; err != nil {
+				return err
+			}
 			if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&attemptModel{}).Error; err != nil {
 				return err
 			}
@@ -837,6 +1143,9 @@ func (r *Repository) Purge(ctx context.Context, before *time.Time, all bool) (in
 			return err
 		}
 		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&webhookDeliveryModel{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("run_row_id IN ?", ids).Delete(&taskModel{}).Error; err != nil {
@@ -1023,6 +1332,9 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 		return err
 	}
 	if len(taskIDs) > 0 {
+		if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&artifactModel{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("task_row_id IN ?", taskIDs).Delete(&attemptModel{}).Error; err != nil {
 			return err
 		}
@@ -1039,6 +1351,9 @@ func (r *Repository) prune(tx *gorm.DB, limit int) error {
 	}
 	if len(runIDs) > 0 {
 		if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id IN ?", runIDs).Delete(&webhookDeliveryModel{}).Error; err != nil {
 			return err
 		}
 	}
@@ -1068,6 +1383,12 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 	if err := db.Where("run_row_id IN ?", runIDs).Order("started ASC, id ASC").Find(&attempts).Error; err != nil {
 		return nil, err
 	}
+	var artifacts []artifactModel
+	if db.Migrator().HasTable(&artifactModel{}) {
+		if err := db.Where("task_row_id IN (SELECT id FROM history_tasks WHERE run_row_id IN ?)", runIDs).Order("id ASC").Find(&artifacts).Error; err != nil {
+			return nil, err
+		}
+	}
 	attemptsByTask := make(map[int64][]scheduler.Attempt)
 	for _, attempt := range attempts {
 		attemptsByTask[attempt.TaskRowID] = append(attemptsByTask[attempt.TaskRowID], attemptToRecord(attempt))
@@ -1075,6 +1396,12 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 	tasksByRun := make(map[int64][]taskModel)
 	for _, task := range tasks {
 		tasksByRun[task.RunRowID] = append(tasksByRun[task.RunRowID], task)
+	}
+	artifactsByTask := make(map[int64][]scheduler.Artifact)
+	for _, artifact := range artifacts {
+		artifactsByTask[artifact.TaskRowID] = append(artifactsByTask[artifact.TaskRowID], scheduler.Artifact{
+			Path: artifact.Path, Exists: artifact.Exists, Size: artifact.Size, SHA256: artifact.SHA256,
+		})
 	}
 
 	result := make([]scheduler.Record, 0, len(runs))
@@ -1099,11 +1426,14 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 			record.Tasks = append(record.Tasks, scheduler.TaskRecord{
 				RunID: task.TaskRunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
 				Command: task.Command, Args: decodeStrings(task.ArgsJSON), WorkingDir: task.WorkingDir,
-				EnvKeys: decodeStrings(task.EnvKeysJSON), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
-				Started: timeValue(task.Started), Finished: timeValue(task.Finished), DurationSeconds: task.DurationSeconds,
+				EnvKeys: decodeStrings(task.EnvKeysJSON), ArgsRedacted: task.ArgsRedacted, Status: task.Status, SkipReason: task.SkipReason,
+				Timeout: durationFromNanos(task.TimeoutNanos), RetryCount: intFromPointer(task.RetryCount),
+				RetryDelay: durationFromNanos(task.RetryDelayNanos), AllowFailure: boolFromPointer(task.AllowFailure),
+				PolicyResolved: boolFromPointer(task.PolicyResolved),
+				Started:        timeValue(task.Started), Finished: timeValue(task.Finished), DurationSeconds: task.DurationSeconds,
 				ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
 				StdoutPath: task.StdoutPath, StderrPath: task.StderrPath,
-				Attempts: cloneAttempts(attemptsByTask[task.ID]),
+				Attempts: cloneAttempts(attemptsByTask[task.ID]), Artifacts: append([]scheduler.Artifact(nil), artifactsByTask[task.ID]...),
 			})
 		}
 		result = append(result, record)
@@ -1140,11 +1470,41 @@ func taskModelFromRecord(runID int64, task scheduler.TaskRecord) taskModel {
 	return taskModel{
 		RunRowID: runID, TaskRunID: task.RunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
 		Command: task.Command, ArgsJSON: encodeStrings(task.Args), WorkingDir: task.WorkingDir,
-		EnvKeysJSON: encodeStrings(task.EnvKeys), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
-		Started: timePointer(task.Started), Finished: timePointer(task.Finished), DurationSeconds: task.DurationSeconds,
+		EnvKeysJSON: encodeStrings(task.EnvKeys), ArgsRedacted: task.ArgsRedacted, Status: task.Status, SkipReason: task.SkipReason,
+		TimeoutNanos: int64Pointer(int64(task.Timeout)), RetryCount: intPointer(task.RetryCount),
+		RetryDelayNanos: int64Pointer(int64(task.RetryDelay)), AllowFailure: boolPointer(task.AllowFailure),
+		PolicyResolved: boolPointer(task.PolicyResolved),
+		Started:        timePointer(task.Started), Finished: timePointer(task.Finished), DurationSeconds: task.DurationSeconds,
 		ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
 		StdoutPath: task.StdoutPath, StderrPath: task.StderrPath,
 	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func intPointer(value int) *int { return &value }
+
+func boolPointer(value bool) *bool { return &value }
+
+func durationFromNanos(value *int64) time.Duration {
+	if value == nil {
+		return 0
+	}
+	return time.Duration(*value)
+}
+
+func intFromPointer(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func boolFromPointer(value *bool) bool {
+	if value == nil {
+		return false
+	}
+	return *value
 }
 
 func createAttempts(tx *gorm.DB, runID, taskID int64, attempts []scheduler.Attempt) error {
@@ -1155,6 +1515,18 @@ func createAttempts(tx *gorm.DB, runID, taskID int64, attempts []scheduler.Attem
 			Error: attempt.Error, Stderr: attempt.Stderr,
 		}
 		if err := tx.Create(&model).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createArtifacts(tx *gorm.DB, taskID int64, artifacts []scheduler.Artifact) error {
+	for _, artifact := range artifacts {
+		if err := tx.Create(&artifactModel{
+			TaskRowID: taskID, Path: artifact.Path, Exists: artifact.Exists,
+			Size: artifact.Size, SHA256: artifact.SHA256,
+		}).Error; err != nil {
 			return err
 		}
 	}

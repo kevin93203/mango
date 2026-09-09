@@ -17,7 +17,7 @@ Kubernetes orchestration, or multi-host high availability.
 | [00 Foundation and Platform](00-foundation-and-platform.md) | Completed | None |
 | [01 Unified Execution and Persistence](01-unified-execution-and-persistence.md) | Completed | 00 |
 | [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Completed | 01 |
-| [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Not started | 01, 02 |
+| [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Completed | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Not started | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
 | [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |

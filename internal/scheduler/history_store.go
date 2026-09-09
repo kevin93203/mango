@@ -59,19 +59,109 @@ type historyClearer interface {
 }
 
 type memoryHistoryRepository struct {
-	mu         sync.Mutex
-	records    []Record
-	counters   map[string]uint64
-	executions map[string]Execution
-	events     map[string][]ExecutionEvent
+	mu                sync.Mutex
+	records           []Record
+	counters          map[string]uint64
+	executions        map[string]Execution
+	events            map[string][]ExecutionEvent
+	occurrences       map[string]ScheduleOccurrence
+	webhookDeliveries map[string]WebhookDelivery
 }
 
 func newMemoryHistoryRepository() HistoryRepository {
 	return &memoryHistoryRepository{
-		counters:   make(map[string]uint64),
-		executions: make(map[string]Execution),
-		events:     make(map[string][]ExecutionEvent),
+		counters:          make(map[string]uint64),
+		executions:        make(map[string]Execution),
+		events:            make(map[string][]ExecutionEvent),
+		occurrences:       make(map[string]ScheduleOccurrence),
+		webhookDeliveries: make(map[string]WebhookDelivery),
 	}
+}
+
+func (r *memoryHistoryRepository) ClaimWebhookDelivery(_ context.Context, delivery WebhookDelivery) (WebhookDelivery, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if delivery.WebhookKey == "" || delivery.IdempotencyKey == "" {
+		return WebhookDelivery{}, false, errors.New("webhook delivery identity is required")
+	}
+	key := delivery.WebhookKey + "\x00" + delivery.IdempotencyKey
+	if existing, ok := r.webhookDeliveries[key]; ok {
+		if existing.BodySHA256 != delivery.BodySHA256 || existing.BodySize != delivery.BodySize {
+			return WebhookDelivery{}, false, ErrWebhookDeliveryConflict
+		}
+		return existing, false, nil
+	}
+	if delivery.CreatedAt.IsZero() {
+		delivery.CreatedAt = time.Now().UTC()
+	}
+	r.webhookDeliveries[key] = delivery
+	return delivery, true, nil
+}
+
+func (r *memoryHistoryRepository) ClaimScheduleOccurrence(_ context.Context, occurrence ScheduleOccurrence) (ScheduleOccurrence, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if occurrence.ID == "" {
+		return ScheduleOccurrence{}, false, errors.New("schedule occurrence id is required")
+	}
+	if existing, ok := r.occurrences[occurrence.ID]; ok {
+		return existing, false, nil
+	}
+	if occurrence.Status == "" {
+		occurrence.Status = OccurrencePending
+	}
+	now := time.Now().UTC()
+	if occurrence.CreatedAt.IsZero() {
+		occurrence.CreatedAt = now
+	}
+	occurrence.UpdatedAt = now
+	r.occurrences[occurrence.ID] = occurrence
+	return occurrence, true, nil
+}
+
+func (r *memoryHistoryRepository) GetScheduleOccurrence(_ context.Context, id string) (ScheduleOccurrence, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	occurrence, ok := r.occurrences[id]
+	if !ok {
+		return ScheduleOccurrence{}, ErrScheduleOccurrenceNotFound
+	}
+	return occurrence, nil
+}
+
+func (r *memoryHistoryRepository) LatestScheduleOccurrence(_ context.Context, project, schedule string) (ScheduleOccurrence, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var latest ScheduleOccurrence
+	found := false
+	for _, occurrence := range r.occurrences {
+		if occurrence.Project != project || occurrence.Schedule != schedule {
+			continue
+		}
+		if !found || occurrence.ScheduledAt.After(latest.ScheduledAt) {
+			latest = occurrence
+			found = true
+		}
+	}
+	if !found {
+		return ScheduleOccurrence{}, ErrScheduleOccurrenceNotFound
+	}
+	return latest, nil
+}
+
+func (r *memoryHistoryRepository) UpdateScheduleOccurrence(_ context.Context, occurrence ScheduleOccurrence) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	previous, ok := r.occurrences[occurrence.ID]
+	if !ok {
+		return ErrScheduleOccurrenceNotFound
+	}
+	if occurrence.CreatedAt.IsZero() {
+		occurrence.CreatedAt = previous.CreatedAt
+	}
+	occurrence.UpdatedAt = time.Now().UTC()
+	r.occurrences[occurrence.ID] = occurrence
+	return nil
 }
 
 func (r *memoryHistoryRepository) Record(_ context.Context, record Record, limit int) error {
@@ -162,6 +252,7 @@ func (r *memoryHistoryRepository) Clear(_ context.Context) error {
 	r.counters = make(map[string]uint64)
 	r.executions = make(map[string]Execution)
 	r.events = make(map[string][]ExecutionEvent)
+	r.webhookDeliveries = make(map[string]WebhookDelivery)
 	return nil
 }
 
@@ -188,7 +279,13 @@ func (r *memoryHistoryRepository) pruneLocked(limit int) {
 	remove := make(map[int]bool, len(terminal)-limit)
 	for _, index := range terminal[:len(terminal)-limit] {
 		remove[index] = true
-		delete(r.executions, r.records[index].RunID)
+		runID := r.records[index].RunID
+		delete(r.executions, runID)
+		for key, delivery := range r.webhookDeliveries {
+			if delivery.RunID == runID {
+				delete(r.webhookDeliveries, key)
+			}
+		}
 	}
 	kept := make([]Record, 0, len(r.records)-len(remove))
 	for index, record := range r.records {
@@ -364,6 +461,11 @@ func (r *memoryHistoryRepository) Purge(_ context.Context, before *time.Time, al
 		purge := IsTerminalStatus(record.Status) && (all || record.Finished.Before(*before))
 		if purge {
 			delete(r.executions, record.RunID)
+			for key, delivery := range r.webhookDeliveries {
+				if delivery.RunID == record.RunID {
+					delete(r.webhookDeliveries, key)
+				}
+			}
 			delete(r.events, record.RunID)
 			removed++
 			continue
@@ -536,6 +638,7 @@ func cloneRecord(record Record) Record {
 		result.Tasks[index].Args = append([]string(nil), task.Args...)
 		result.Tasks[index].EnvKeys = append([]string(nil), task.EnvKeys...)
 		result.Tasks[index].Attempts = append([]Attempt(nil), task.Attempts...)
+		result.Tasks[index].Artifacts = append([]Artifact(nil), task.Artifacts...)
 	}
 	return result
 }

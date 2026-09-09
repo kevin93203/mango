@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,11 @@ import (
 )
 
 const defaultHistoryLimit = 0
+
+const (
+	OccurrencePending    = "pending"
+	OccurrenceDispatched = "dispatched"
+)
 
 type Record struct {
 	RunID                   string
@@ -56,8 +62,17 @@ type TaskRecord struct {
 	// intentionally never persisted in execution history.
 	EnvKeys []string
 	// ArgsRedacted indicates that command metadata contains redacted values.
-	ArgsRedacted    bool
-	Status          string
+	ArgsRedacted bool
+	Status       string
+	// SkipReason preserves the internal reason for a public skipped status.
+	// In particular, upstream_failed remains distinguishable without changing
+	// the existing status vocabulary exposed by older clients.
+	SkipReason      string
+	Timeout         time.Duration
+	RetryCount      int
+	RetryDelay      time.Duration
+	AllowFailure    bool
+	PolicyResolved  bool
 	Started         time.Time
 	Finished        time.Time
 	DurationSeconds float64
@@ -67,6 +82,16 @@ type TaskRecord struct {
 	StdoutPath      string
 	StderrPath      string
 	Attempts        []Attempt
+	Artifacts       []Artifact
+}
+
+// Artifact is metadata for a declared task output. Mango never stores the
+// file contents in execution history.
+type Artifact struct {
+	Path   string
+	Exists bool
+	Size   int64
+	SHA256 string
 }
 
 type Attempt struct {
@@ -85,6 +110,7 @@ type ExecutionResult struct {
 	Stderr     string
 	StdoutPath string
 	StderrPath string
+	Artifacts  []Artifact
 	// Record is set by the workflow executor for unified execution history.
 	// When nil, Scheduler builds the single-process record from the result.
 	Record *Record
@@ -126,6 +152,7 @@ type ExecutionQuery struct {
 }
 
 var ErrExecutionNotFound = errors.New("execution not found")
+var ErrScheduleOccurrenceNotFound = errors.New("schedule occurrence not found")
 
 // ErrTerminalExecutionImmutable is returned when a terminal execution is
 // written with a different terminal payload. Terminal records are canonical
@@ -163,6 +190,40 @@ type HistoryPurger interface {
 	Purge(context.Context, *time.Time, bool) (int, error)
 }
 
+type ScheduleOccurrence struct {
+	ID          string
+	Project     string
+	Schedule    string
+	ScheduledAt time.Time
+	Status      string
+	RunID       string
+	Misfire     string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type ScheduleOccurrenceStore interface {
+	ClaimScheduleOccurrence(context.Context, ScheduleOccurrence) (ScheduleOccurrence, bool, error)
+	GetScheduleOccurrence(context.Context, string) (ScheduleOccurrence, error)
+	LatestScheduleOccurrence(context.Context, string, string) (ScheduleOccurrence, error)
+	UpdateScheduleOccurrence(context.Context, ScheduleOccurrence) error
+}
+
+type WebhookDelivery struct {
+	WebhookKey     string
+	IdempotencyKey string
+	BodySHA256     string
+	BodySize       int64
+	RunID          string
+	CreatedAt      time.Time
+}
+
+type WebhookDeliveryStore interface {
+	ClaimWebhookDelivery(context.Context, WebhookDelivery) (WebhookDelivery, bool, error)
+}
+
+var ErrWebhookDeliveryConflict = errors.New("webhook idempotency key was reused with a different body")
+
 const (
 	StatusIdle        = "idle"
 	StatusRunning     = "running"
@@ -199,47 +260,55 @@ type ScheduleSnapshot struct {
 type Runner func(context.Context, config.EffectiveSchedule) ExecutionResult
 
 type Scheduler struct {
-	mu                 sync.Mutex
-	cron               *cron.Cron
-	entries            map[string]cron.EntryID
-	schedules          map[string]config.EffectiveSchedule
-	disabled           map[string]bool
-	running            map[string]int
-	active             map[string]map[uint64]time.Time
-	activeCancels      map[string]context.CancelFunc
-	nextExecutionID    uint64
-	executionStoreRepo ExecutionStore
-	historyReader      HistoryReader
-	historyPurger      HistoryPurger
-	historyPruner      historyPruner
-	historyClearer     historyClearer
-	historyLimit       int
-	executionWG        sync.WaitGroup
-	stopping           bool
-	started            bool
-	runner             Runner
-	ctx                context.Context
+	mu                   sync.Mutex
+	cron                 *cron.Cron
+	entries              map[string]cron.EntryID
+	schedules            map[string]config.EffectiveSchedule
+	disabled             map[string]bool
+	running              map[string]int
+	active               map[string]map[uint64]time.Time
+	activeCancels        map[string]context.CancelFunc
+	nextExecutionID      uint64
+	executionStoreRepo   ExecutionStore
+	historyReader        HistoryReader
+	historyPurger        HistoryPurger
+	historyPruner        historyPruner
+	historyClearer       historyClearer
+	occurrenceStore      ScheduleOccurrenceStore
+	webhookDeliveryStore WebhookDeliveryStore
+	historyLimit         int
+	executionWG          sync.WaitGroup
+	stopping             bool
+	started              bool
+	runner               Runner
+	ctx                  context.Context
+	clock                func() time.Time
+	parser               cron.Parser
 }
 
 func New(runner Runner) *Scheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	repo := newMemoryHistoryRepository()
 	return &Scheduler{
-		cron:               cron.New(cron.WithParser(parser)),
-		entries:            map[string]cron.EntryID{},
-		schedules:          map[string]config.EffectiveSchedule{},
-		disabled:           map[string]bool{},
-		running:            map[string]int{},
-		active:             map[string]map[uint64]time.Time{},
-		activeCancels:      map[string]context.CancelFunc{},
-		historyLimit:       defaultHistoryLimit,
-		executionStoreRepo: repo,
-		historyReader:      repo,
-		historyPurger:      repo.(HistoryPurger),
-		historyPruner:      repo.(historyPruner),
-		historyClearer:     repo.(historyClearer),
-		runner:             runner,
-		ctx:                context.Background(),
+		cron:                 cron.New(cron.WithParser(parser)),
+		parser:               parser,
+		entries:              map[string]cron.EntryID{},
+		schedules:            map[string]config.EffectiveSchedule{},
+		disabled:             map[string]bool{},
+		running:              map[string]int{},
+		active:               map[string]map[uint64]time.Time{},
+		activeCancels:        map[string]context.CancelFunc{},
+		historyLimit:         defaultHistoryLimit,
+		executionStoreRepo:   repo,
+		historyReader:        repo,
+		historyPurger:        repo.(HistoryPurger),
+		historyPruner:        repo.(historyPruner),
+		historyClearer:       repo.(historyClearer),
+		occurrenceStore:      repo.(ScheduleOccurrenceStore),
+		webhookDeliveryStore: repo.(WebhookDeliveryStore),
+		runner:               runner,
+		ctx:                  context.Background(),
+		clock:                time.Now,
 	}
 }
 
@@ -263,6 +332,8 @@ func (s *Scheduler) SetHistoryRepository(repo HistoryRepository) error {
 	s.historyPurger, _ = repo.(HistoryPurger)
 	s.historyPruner, _ = repo.(historyPruner)
 	s.historyClearer, _ = repo.(historyClearer)
+	s.occurrenceStore, _ = repo.(ScheduleOccurrenceStore)
+	s.webhookDeliveryStore, _ = repo.(WebhookDeliveryStore)
 	s.mu.Unlock()
 	return nil
 }
@@ -415,6 +486,16 @@ func (s *Scheduler) BeginExecution(ctx context.Context, record Record, idempoten
 	return store.BeginExecution(ctx, record, idempotencyKey, configurationGeneration)
 }
 
+func (s *Scheduler) ClaimWebhookDelivery(ctx context.Context, delivery WebhookDelivery) (WebhookDelivery, bool, error) {
+	s.mu.Lock()
+	store := s.webhookDeliveryStore
+	s.mu.Unlock()
+	if store == nil {
+		return delivery, true, nil
+	}
+	return store.ClaimWebhookDelivery(ctx, delivery)
+}
+
 func (s *Scheduler) GetExecution(ctx context.Context, runID string) (Execution, error) {
 	store := s.executionStore()
 	if store == nil {
@@ -490,6 +571,37 @@ func (s *Scheduler) Start() {
 	s.started = true
 	s.mu.Unlock()
 	s.cron.Start()
+}
+
+// ReconcileOccurrences scans each enabled schedule once after startup. It is
+// deliberately asynchronous so daemon startup is not blocked by a long-running
+// catch-up execution.
+func (s *Scheduler) ReconcileOccurrences(ctx context.Context) {
+	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return
+	}
+	schedules := make([]config.EffectiveSchedule, 0, len(s.schedules))
+	for key, schedule := range s.schedules {
+		if s.disabled[key] {
+			continue
+		}
+		schedules = append(schedules, schedule)
+	}
+	s.mu.Unlock()
+	sort.Slice(schedules, func(i, j int) bool {
+		left := schedules[i].Project + "/" + schedules[i].Name
+		right := schedules[j].Project + "/" + schedules[j].Name
+		return left < right
+	})
+	for _, schedule := range schedules {
+		s.executionWG.Add(1)
+		go func(schedule config.EffectiveSchedule) {
+			defer s.executionWG.Done()
+			s.executeDueMode(ctx, schedule, s.now(), true)
+		}(schedule)
+	}
 }
 
 func (s *Scheduler) Stop() context.Context {
@@ -656,6 +768,26 @@ func (s *Scheduler) run(schedule config.EffectiveSchedule) {
 	s.executionWG.Add(1)
 	s.mu.Unlock()
 	defer s.executionWG.Done()
+	s.executeDue(ctx, schedule, s.now())
+}
+
+func (s *Scheduler) executeOccurrence(ctx context.Context, schedule config.EffectiveSchedule, scheduledAt time.Time) {
+	store := s.occurrenceStoreSnapshot()
+	occurrenceID := ScheduleOccurrenceID(schedule.Project, schedule.Name, scheduledAt)
+	if store != nil {
+		occurrence, created, err := store.ClaimScheduleOccurrence(ctx, ScheduleOccurrence{
+			ID: occurrenceID, Project: schedule.Project, Schedule: schedule.Name,
+			ScheduledAt: scheduledAt.UTC(), Status: OccurrencePending, Misfire: schedule.Misfire,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: claim schedule occurrence %s: %v\n", occurrenceID, err)
+			return
+		}
+		if !created && occurrence.Status != OccurrencePending {
+			return
+		}
+	}
+	schedule.OccurrenceID = occurrenceID
 	s.execute(ctx, schedule)
 }
 
@@ -678,15 +810,26 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 	s.active[key][executionID] = started
 	s.mu.Unlock()
 	runID := NewRunID()
-	occurrenceID := fmt.Sprintf("%s:%d", key, started.UnixNano())
+	automaticOccurrence := schedule.OccurrenceID != ""
+	occurrenceID := schedule.OccurrenceID
+	if occurrenceID == "" {
+		occurrenceID = fmt.Sprintf("%s:%d", key, started.UnixNano())
+	}
 	trigger := ScheduleTrigger(schedule.Name)
 	trigger.EventID = occurrenceID
 	queuedRecord := Record{
 		RunID: runID, Project: schedule.Project, Name: schedule.Name,
 		TargetType: schedule.TargetType, Target: schedule.Target, Trigger: trigger,
-		Status: StatusQueued, Started: started, ConfigurationGeneration: schedule.ConfigurationGeneration,
+		Status: StatusQueued, Started: started, IdempotencyKey: func() string {
+			if automaticOccurrence {
+				return ScheduleOccurrenceIdempotencyKey(occurrenceID)
+			}
+			return ""
+		}(), ConfigurationGeneration: schedule.ConfigurationGeneration,
 	}
-	if _, _, err := s.BeginExecution(ctx, queuedRecord, "", schedule.ConfigurationGeneration); err != nil {
+	idempotencyKey := queuedRecord.IdempotencyKey
+	queuedExecution, created, err := s.BeginExecution(ctx, queuedRecord, idempotencyKey, schedule.ConfigurationGeneration)
+	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: create execution metadata: %v\n", err)
 		s.mu.Lock()
 		s.running[key]--
@@ -696,6 +839,20 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		}
 		s.mu.Unlock()
 		return
+	}
+	if !created {
+		runID = queuedExecution.Record.RunID
+		if automaticOccurrence {
+			s.updateOccurrence(ctx, occurrenceID, runID, queuedExecution.Record.Status)
+		}
+		return
+	}
+	if automaticOccurrence {
+		details, _ := json.Marshal(map[string]string{
+			"occurrence_id": occurrenceID, "misfire": schedule.Misfire,
+		})
+		_ = s.RecordExecutionEvent(ctx, ExecutionEvent{RunID: runID, Type: "schedule_occurrence", Status: OccurrenceDispatched, Details: string(details)})
+		s.updateOccurrence(ctx, occurrenceID, runID, OccurrenceDispatched)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
@@ -753,6 +910,9 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 		// the workflow executor supplies the richer task/node record.
 		record.Attempts = attempts
 		s.record(record)
+		if automaticOccurrence {
+			s.updateOccurrence(context.Background(), occurrenceID, runID, record.Status)
+		}
 		return
 	}
 	recordStarted := started
@@ -773,6 +933,23 @@ func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedu
 	}
 	record.Status = statusForResult(record.ExitCode, record.Error)
 	s.record(record)
+	if automaticOccurrence {
+		s.updateOccurrence(context.Background(), occurrenceID, runID, record.Status)
+	}
+}
+
+func (s *Scheduler) updateOccurrence(ctx context.Context, occurrenceID, runID, status string) {
+	store := s.occurrenceStoreSnapshot()
+	if store == nil {
+		return
+	}
+	occurrence, err := store.GetScheduleOccurrence(ctx, occurrenceID)
+	if err != nil {
+		return
+	}
+	occurrence.RunID = runID
+	occurrence.Status = status
+	_ = store.UpdateScheduleOccurrence(ctx, occurrence)
 }
 
 func statusForResult(exitCode int, errorText string) string {

@@ -339,8 +339,9 @@ mango history purge (--before RFC3339 | --all) --yes
 ```
 
 `task` and `workflow` are execution targets. `schedule`, `webhook`, and
-`manual` are trigger sources; this release models webhook triggers but does not
-start a webhook server. Use `task run` or `workflow run` for a manual run.
+`manual` are trigger sources. Webhook delivery is available when the optional
+listener is enabled in `daemon.yaml`; otherwise use `task run` or `workflow
+run` for a manual run.
 `history` is the terminal-only execution-history browser. Use `--json` for
 machine-readable history and status data.
 
@@ -372,6 +373,7 @@ mango config validate ./mango.yaml
 | `tasks` | mapping | no | One-off commands keyed by task name. |
 | `workflows` | mapping | no | DAGs of task nodes keyed by workflow name. |
 | `schedules` | sequence | no | Cron triggers targeting a task or workflow. |
+| `webhooks` | sequence | no | Authenticated HTTP triggers targeting a task or workflow. |
 
 ### `defaults`
 
@@ -573,6 +575,7 @@ tasks:
 | `timeout` | duration | no limit | Starts after the process starts. A timeout force-stops the process tree and records exit code `124`. |
 | `concurrency` | string | `forbid` | `forbid` queues overlapping invocations; `allow` runs them in parallel. |
 | `retry` | mapping | no retries | Retry settings for failed or timed-out attempts. |
+| `outputs` | sequence of relative paths | `[]` | Files to inspect after the task; history records existence, size, and SHA-256 metadata. |
 
 `retry` fields:
 
@@ -599,9 +602,14 @@ workflows:
       test:
         uses: test
         needs: [build]
+        timeout: 10m
+        retry:
+          retries: 2
+          delay: 5s
       publish:
         uses: publish
         needs: [test]
+        allow_failure: false
 ```
 
 | Field | Type | Default | Description |
@@ -612,11 +620,14 @@ workflows:
 | `<node-name>` | mapping key | — | Unique node name within the workflow. |
 | `uses` | string | — | Required name of a task in the same project. |
 | `needs` | sequence of strings | `[]` | Other node names that must finish successfully before this node runs. |
+| `timeout` | duration | task setting | Optional node-level timeout override. |
+| `retry` | mapping | task setting | Optional node-level retry override. |
+| `allow_failure` | boolean | `false` | Lets downstream nodes continue and does not fail the workflow when this node fails. |
 
-Independent nodes can run in parallel. If a node fails, its descendants are
-skipped while independent branches continue. Workflow and task definitions are
-validated for unknown references, duplicate dependencies, self-dependencies,
-and cycles.
+Independent nodes can run in parallel. If a required node fails, its descendants
+are skipped with an `upstream_failed` reason while independent branches
+continue. Workflow and task definitions are validated for unknown references,
+duplicate dependencies, self-dependencies, and cycles.
 
 ### `schedules`
 
@@ -629,6 +640,8 @@ schedules:
     timezone: Asia/Taipei
     target_type: workflow
     target: release
+    misfire: catch_up
+    max_catch_up: 2
 
   - name: hourly-cleanup
     cron: "0 * * * *"
@@ -643,11 +656,44 @@ schedules:
 | `timezone` | string | no | IANA time zone, such as `UTC` or `Asia/Taipei`; defaults to local time. |
 | `target_type` | string | yes | `task` or `workflow`. |
 | `target` | string | yes | Existing task or workflow name in the same project. |
+| `misfire` | string | no | `skip`, `run_once`, or `catch_up`; defaults to `skip`. |
+| `max_catch_up` | non-negative integer | no | Maximum missed activations to run for `catch_up`; capped at `1000`. |
 
-Schedules use the daemon's cron scheduler. Missed runs are not backfilled
-after the daemon has been offline. In v3, schedule-level `command`, `args`,
-`working_dir`, `timeout`, `retry`, and `concurrency` fields are not supported;
-put execution settings on the target task instead.
+Schedules use durable occurrence IDs and idempotency keys, so a daemon restart
+cannot create a duplicate logical run. `skip` (the default) records missed
+slots without backfilling them, `run_once` runs the latest missed slot once,
+and `catch_up` runs at most `max_catch_up` missed slots. A nonexistent local
+time during spring-forward is skipped; both UTC instants of an ambiguous
+fall-back time are distinct occurrences. In v3, schedule-level `command`,
+`args`, `working_dir`, `timeout`, `retry`, and `concurrency` fields are not
+supported; put execution settings on the target task instead.
+
+### `webhooks`
+
+Webhooks optionally trigger an existing task or workflow through an authenticated
+loopback HTTP listener:
+
+```yaml
+webhooks:
+  - name: release-hook
+    path: /hooks/release
+    target_type: workflow
+    target: release
+    secret_ref: env:MANGO_WEBHOOK_SECRET
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Unique webhook name within the project. |
+| `path` | string | yes | Unique absolute listener path; query strings and fragments are rejected. |
+| `target_type` | string | yes | `task` or `workflow`. |
+| `target` | string | yes | Existing task or workflow name in the same project. |
+| `secret_ref` | string | yes | Currently `env:NAME`; the secret is never stored in execution history. |
+
+The listener is disabled by default. Requests must be `POST`, include an
+`Idempotency-Key`, a recent `X-Mango-Timestamp`, and an HMAC-SHA256
+`X-Mango-Signature` over `timestamp + "." + raw_body`. Duplicate deliveries
+reuse the original run; reusing a key with a different body returns `409`.
 
 ### Value formats
 
@@ -1338,8 +1384,8 @@ MANGO_HOME/
         └── <project>/<generation>.json  # last and previous desired states
 ```
 
-The optional `daemon.yaml` supports execution-history retention and database
-configuration. SQLite is used by default. The metadata schema is maintained by
+The optional `daemon.yaml` supports execution-history retention, database, and
+webhook listener configuration. SQLite is used by default. The metadata schema is maintained by
 versioned migrations; before the first SQLite metadata migration Mango creates
 `history.db.bak` when it does not already exist.
 
@@ -1352,11 +1398,23 @@ history:
     driver: sqlite
     # Relative paths are resolved from MANGO_HOME.
     path: state/history.db
+
+webhook_server:
+  enabled: false
+  listen: 127.0.0.1:8787
+  max_body_bytes: 1048576
+  replay_window: 5m
+  rate_limit_per_minute: 60
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schedule_history_limit` | non-negative integer | `0` | Maximum number of terminal execution records to retain; active executions are never pruned. `0` keeps all records. |
+| `webhook_server.enabled` | boolean | `false` | Enables the optional authenticated webhook listener. |
+| `webhook_server.listen` | address | `127.0.0.1:8787` | Listener address; loopback is the safe default. |
+| `webhook_server.max_body_bytes` | positive integer | `1048576` | Maximum accepted raw request body size. |
+| `webhook_server.replay_window` | duration | `5m` | Allowed timestamp age/skew for signed requests. |
+| `webhook_server.rate_limit_per_minute` | positive integer | `60` | Per-client and per-path request limit. |
 
 Supported database drivers are `sqlite`, `postgres`, and `mysql`. PostgreSQL
 and MySQL require a DSN, preferably supplied through an environment variable:

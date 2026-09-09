@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kevin93203/mango/internal/api"
+	"github.com/kevin93203/mango/internal/artifact"
 	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/generation"
@@ -32,6 +33,7 @@ import (
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/shim"
+	"github.com/kevin93203/mango/internal/webhook"
 	"github.com/kevin93203/mango/internal/workflow"
 )
 
@@ -51,12 +53,14 @@ const (
 )
 
 type Daemon struct {
-	layout      paths.Layout
-	logs        *logging.Manager
-	metrics     *metrics.Collector
-	scheduler   *scheduler.Scheduler
-	historyRepo scheduler.HistoryRepository
-	workflow    *workflow.Executor
+	layout        paths.Layout
+	logs          *logging.Manager
+	metrics       *metrics.Collector
+	scheduler     *scheduler.Scheduler
+	historyRepo   scheduler.HistoryRepository
+	workflow      *workflow.Executor
+	webhookServer *webhook.Server
+	webhookMu     sync.Mutex
 
 	mu                      sync.RWMutex
 	applyMu                 sync.Mutex
@@ -227,6 +231,8 @@ func New(layout paths.Layout) *Daemon {
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	d.workflow = workflow.New(d.runTaskAttempt, d.recordExecution)
+	d.workflow.SetProgressSink(d.recordExecutionProgress)
+	d.webhookServer = webhook.New(webhook.Config{Enabled: false}, d.handleWebhook)
 	return d
 }
 
@@ -238,6 +244,12 @@ func (d *Daemon) recordExecution(record scheduler.Record) {
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+func (d *Daemon) recordExecutionProgress(record scheduler.Record) {
+	if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: write active workflow progress: %v\n", err)
 	}
 }
 
@@ -324,6 +336,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.reloadRegistryForStart(); err != nil {
 		return err
 	}
+	if d.webhookServer != nil {
+		replayWindow, _ := time.ParseDuration(daemonConfig.WebhookServer.ReplayWindow)
+		if err := d.webhookServer.Configure(webhook.Config{
+			Enabled: daemonConfig.WebhookServer.Enabled, Listen: daemonConfig.WebhookServer.Listen,
+			MaxBodyBytes: daemonConfig.WebhookServer.MaxBodyBytes, ReplayWindow: replayWindow,
+			RateLimitPerMinute: daemonConfig.WebhookServer.RateLimitPerMinute,
+		}); err != nil {
+			return err
+		}
+		if err := d.webhookServer.Start(d.ctx); err != nil {
+			return err
+		}
+	}
 	if err := d.scheduler.RefreshHistorySummary(d.ctx); err != nil {
 		return fmt.Errorf("load latest history summary: %w", err)
 	}
@@ -336,6 +361,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	d.scheduler.Start()
+	d.scheduler.ReconcileOccurrences(d.ctx)
 	serveErr := ipc.Serve(d.ctx, listener, d.Handle)
 	if ctx.Err() != nil {
 		// SIGINT/SIGTERM are intentional daemon shutdowns. The parent
@@ -374,6 +400,11 @@ func (d *Daemon) removePID() {
 func (d *Daemon) shutdown() {
 	if d.cancel != nil {
 		d.cancel()
+	}
+	if d.webhookServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = d.webhookServer.Shutdown(ctx)
+		cancel()
 	}
 	if d.scheduler != nil {
 		stopped := d.scheduler.Stop()
@@ -972,6 +1003,7 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, desiredStat
 	tasks := desiredState.Tasks
 	workflows := desiredState.Workflows
 	schedules := desiredState.Schedules
+	webhooks := desiredState.Webhooks
 	failures := make([]reconciliationFailure, 0)
 	recordFailure := func(key reconcile.ResourceKey, err error) {
 		if err != nil {
@@ -1100,6 +1132,11 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, desiredStat
 	}
 	if err := d.scheduler.Apply(d.allSchedulesWith(schedules, name, generationValue)); err != nil {
 		recordFailure(reconcile.ResourceKey{Kind: reconcile.KindSchedule}, err)
+	}
+	if d.webhookServer != nil {
+		if err := d.webhookServer.Apply(d.allWebhooksWith(webhooks, name)); err != nil {
+			recordFailure(reconcile.ResourceKey{Kind: reconcile.KindWebhook}, err)
+		}
 	}
 	if err := d.pruneScheduleStateForProject(name, schedules); err != nil {
 		recordFailure(reconcile.ResourceKey{Kind: reconcile.KindSchedule}, err)
@@ -1374,6 +1411,24 @@ func (d *Daemon) allWorkflowsWith(workflows map[string]config.EffectiveWorkflow,
 	return result
 }
 
+func (d *Daemon) allWebhooksWith(webhooks []config.EffectiveWebhook, projectName string) []config.EffectiveWebhook {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make([]config.EffectiveWebhook, 0)
+	for name, project := range d.projects {
+		if name == projectName {
+			result = append(result, webhooks...)
+			continue
+		}
+		items, err := project.file.WebhooksEffective(name)
+		if err != nil {
+			continue
+		}
+		result = append(result, items...)
+	}
+	return result
+}
+
 func (d *Daemon) removeProject(name string) {
 	d.mu.Lock()
 	project := d.projects[name]
@@ -1416,6 +1471,7 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 	tasks := make(map[string]config.EffectiveTask)
 	workflows := make(map[string]config.EffectiveWorkflow)
 	schedules := make([]config.EffectiveSchedule, 0)
+	webhooks := make([]config.EffectiveWebhook, 0)
 	for name, project := range d.projects {
 		if items, err := project.file.TasksEffective(name); err == nil {
 			for taskName, task := range items {
@@ -1430,12 +1486,20 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 		if items, err := project.file.SchedulesEffective(name); err == nil {
 			schedules = append(schedules, items...)
 		}
+		if items, err := project.file.WebhooksEffective(name); err == nil {
+			webhooks = append(webhooks, items...)
+		}
 	}
 	d.mu.RUnlock()
 	d.workflow.Apply(tasks, workflows)
 	if err := d.scheduler.Apply(schedules); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: apply schedules: %v\n", err)
 		return
+	}
+	if d.webhookServer != nil {
+		if err := d.webhookServer.Apply(webhooks); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: apply webhooks: %v\n", err)
+		}
 	}
 	if d.historyRepo != nil {
 		if err := d.scheduler.RefreshHistorySummary(d.executionContext()); err != nil {
@@ -3136,15 +3200,16 @@ func (d *Daemon) runTaskAttempt(ctx context.Context, task config.EffectiveTask, 
 	_ = executionStderr.Close()
 	_ = attemptStdout.Close()
 	_ = attemptStderr.Close()
+	artifacts, _ := artifact.Collect(task.WorkingDir, task.Outputs)
 	if timedOut {
 		return scheduler.ExecutionResult{
 			ExitCode:   124,
 			Err:        fmt.Errorf("task timed out after %s", task.Timeout),
 			Stderr:     capture.String(),
-			StdoutPath: executionStdoutPath, StderrPath: executionStderrPath,
+			StdoutPath: executionStdoutPath, StderrPath: executionStderrPath, Artifacts: artifacts,
 		}
 	}
-	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
+	return scheduler.ExecutionResult{ExitCode: result.ExitCode, Err: result.Err, Stderr: capture.String(), StdoutPath: executionStdoutPath, StderrPath: executionStderrPath, Artifacts: artifacts}
 }
 
 func taskLogName(invocation workflow.Invocation, taskName string) string {
@@ -3419,6 +3484,8 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) ipc.Response {
 				Timezone:        location.String(),
 				TargetType:      item.TargetType,
 				Target:          item.Target,
+				Misfire:         item.Misfire,
+				MaxCatchUp:      item.MaxCatchUp,
 				Runs:            snapshot.Runs,
 				Status:          snapshot.Status,
 				Disabled:        snapshot.Disabled,
@@ -3698,6 +3765,17 @@ func (d *Daemon) recoverActiveExecutions() error {
 		if record.Error == "" {
 			record.Error = "daemon restarted before execution completed"
 		}
+		for index := range record.Tasks {
+			if record.Tasks[index].Status != scheduler.StatusQueued && record.Tasks[index].Status != scheduler.StatusRunning {
+				continue
+			}
+			record.Tasks[index].Status = scheduler.StatusInterrupted
+			record.Tasks[index].Finished = record.Finished
+			record.Tasks[index].ExitCode = 125
+			if record.Tasks[index].Error == "" {
+				record.Tasks[index].Error = "daemon restarted before node completed"
+			}
+		}
 		if err := d.scheduler.UpdateExecution(context.Background(), record); err != nil {
 			return fmt.Errorf("mark %s interrupted: %w", record.RunID, err)
 		}
@@ -3724,6 +3802,13 @@ func (d *Daemon) registerExecutionCancel(runID string, cancel context.CancelFunc
 	}
 	d.executionCancels[runID] = cancel
 	d.mu.Unlock()
+}
+
+func (d *Daemon) executionIsActive(runID string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	_, ok := d.executionCancels[runID]
+	return ok
 }
 
 func (d *Daemon) cancelManualExecution(runID string) bool {
@@ -3796,6 +3881,110 @@ func (d *Daemon) beginManualExecution(project, name, targetType string, request 
 	return execution, true, nil
 }
 
+func (d *Daemon) handleWebhook(_ context.Context, delivery webhook.Delivery) (webhook.Result, error) {
+	definition := delivery.Webhook
+	if definition.TargetType == "workflow" {
+		if !d.workflow.HasWorkflow(definition.Project + "/" + definition.Target) {
+			return webhook.Result{}, &webhook.RequestError{Status: 422, Message: "webhook workflow target is not available"}
+		}
+	} else if definition.TargetType == "task" {
+		if !d.workflow.HasTask(definition.Project + "/" + definition.Target) {
+			return webhook.Result{}, &webhook.RequestError{Status: 422, Message: "webhook task target is not available"}
+		}
+	} else {
+		return webhook.Result{}, &webhook.RequestError{Status: 422, Message: "webhook target type is invalid"}
+	}
+	d.webhookMu.Lock()
+	defer d.webhookMu.Unlock()
+	configurationGeneration := d.projectGeneration(definition.Project)
+	if configurationGeneration == 0 {
+		configurationGeneration = d.currentConfigurationGeneration()
+	}
+	runID := scheduler.NewRunID()
+	now := time.Now().UTC()
+	trigger := scheduler.WebhookTrigger(definition.Name, delivery.IdempotencyKey)
+	idempotencyKey := "webhook:" + definition.Project + "/" + definition.Name + ":" + delivery.IdempotencyKey
+	claimedDelivery, _, err := d.scheduler.ClaimWebhookDelivery(context.Background(), scheduler.WebhookDelivery{
+		WebhookKey: definition.Project + "/" + definition.Name, IdempotencyKey: delivery.IdempotencyKey,
+		BodySHA256: delivery.BodySHA256, BodySize: delivery.BodySize, RunID: runID,
+	})
+	if err != nil {
+		if errors.Is(err, scheduler.ErrWebhookDeliveryConflict) {
+			return webhook.Result{}, &webhook.RequestError{Status: 409, Message: "webhook idempotency key conflicts with a different body"}
+		}
+		return webhook.Result{}, err
+	}
+	if claimedDelivery.RunID != "" {
+		runID = claimedDelivery.RunID
+	}
+	record := scheduler.Record{
+		RunID: runID, Project: definition.Project, Name: definition.Target, TargetType: definition.TargetType,
+		Target: definition.Target, Trigger: trigger, Status: scheduler.StatusQueued, Started: now,
+		IdempotencyKey: idempotencyKey, ConfigurationGeneration: configurationGeneration,
+	}
+	execution, created, err := d.scheduler.BeginExecution(context.Background(), record, idempotencyKey, configurationGeneration)
+	if err != nil {
+		return webhook.Result{}, err
+	}
+	if !created && scheduler.IsTerminalStatus(execution.Record.Status) {
+		_ = d.scheduler.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
+			RunID: execution.Record.RunID, Type: "webhook_duplicate", Status: execution.Record.Status,
+			Details: "duplicate idempotency key",
+		})
+		return webhook.Result{RunID: execution.Record.RunID, Status: execution.Record.Status, Duplicate: true}, nil
+	}
+	if !created {
+		runID = execution.Record.RunID
+		record = execution.Record
+		if d.executionIsActive(runID) {
+			_ = d.scheduler.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
+				RunID: runID, Type: "webhook_duplicate", Status: execution.Record.Status,
+				Details: "duplicate idempotency key",
+			})
+			return webhook.Result{RunID: runID, Status: execution.Record.Status, Duplicate: true}, nil
+		}
+		_ = d.scheduler.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
+			RunID: runID, Type: "webhook_resume", Status: execution.Record.Status,
+			Details: "resuming webhook execution after incomplete dispatch",
+		})
+	} else {
+		details, _ := json.Marshal(map[string]interface{}{
+			"webhook": definition.Name, "body_sha256": delivery.BodySHA256, "body_size": delivery.BodySize,
+		})
+		_ = d.scheduler.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
+			RunID: runID, Type: "webhook_received", Status: scheduler.StatusQueued, Details: string(details),
+		})
+	}
+	runningRecord := execution.Record
+	if runningRecord.Status != scheduler.StatusRunning {
+		runningRecord.Status = scheduler.StatusRunning
+		if err := d.scheduler.UpdateExecution(context.Background(), runningRecord); err != nil {
+			return webhook.Result{}, err
+		}
+	}
+	runCtx, cancel := context.WithCancel(d.executionContext())
+	d.registerExecutionCancel(runID, cancel)
+	var startErr error
+	if definition.TargetType == "workflow" {
+		startErr = d.workflow.RunNowWorkflowWithID(runCtx, definition.Project, definition.Target, trigger, runID)
+	} else {
+		startErr = d.workflow.RunNowTaskWithID(runCtx, definition.Project, definition.Target, trigger, runID)
+	}
+	if startErr != nil {
+		cancel()
+		d.mu.Lock()
+		delete(d.executionCancels, runID)
+		d.mu.Unlock()
+		runningRecord.Status = scheduler.StatusFailed
+		runningRecord.Finished = time.Now().UTC()
+		runningRecord.ExitCode = 1
+		runningRecord.Error = startErr.Error()
+		_ = d.scheduler.UpdateExecution(context.Background(), runningRecord)
+		return webhook.Result{}, startErr
+	}
+	return webhook.Result{RunID: runID, Status: scheduler.StatusQueued}, nil
+}
+
 func executionInfo(execution scheduler.Execution) api.ExecutionInfo {
 	record := execution.Record
 	info := api.ExecutionInfo{
@@ -3851,9 +4040,16 @@ func historyInfo(record scheduler.Record, includeDetails bool) api.HistoryInfo {
 		item := api.HistoryTaskInfo{
 			RunID: task.RunID, ParentRunID: task.ParentRunID, Node: task.Node, Task: task.Task,
 			Command: task.Command, Args: append([]string(nil), task.Args...), WorkingDir: task.WorkingDir,
-			EnvKeys: append([]string(nil), task.EnvKeys...), ArgsRedacted: task.ArgsRedacted, Status: task.Status,
+			EnvKeys: append([]string(nil), task.EnvKeys...), ArgsRedacted: task.ArgsRedacted, Status: task.Status, SkipReason: task.SkipReason,
+			TimeoutSeconds: task.Timeout.Seconds(), RetryCount: task.RetryCount, RetryDelaySeconds: task.RetryDelay.Seconds(),
+			AllowFailure: task.AllowFailure, PolicyResolved: task.PolicyResolved,
 			ExitCode: task.ExitCode, Error: task.Error, Stderr: task.Stderr,
 			StdoutPath: task.StdoutPath, StderrPath: task.StderrPath, Attempts: historyAttempts(task.Attempts),
+		}
+		for _, artifact := range task.Artifacts {
+			item.Artifacts = append(item.Artifacts, api.ArtifactInfo{
+				Path: artifact.Path, Exists: artifact.Exists, Size: artifact.Size, SHA256: artifact.SHA256,
+			})
 		}
 		if !task.Started.IsZero() {
 			value := task.Started

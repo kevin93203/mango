@@ -359,6 +359,83 @@ tasks:
 	}
 }
 
+func TestEffectiveWorkflowNodeOverridesTaskPolicy(t *testing.T) {
+	file := File{
+		Version: 3,
+		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
+		Tasks: map[string]Task{"deploy": {
+			Command: "deploy", Timeout: "1m", Retry: &TaskRetry{Retries: 4, Delay: "10s"},
+			Outputs: []string{"dist/release.tar.gz"},
+		}},
+		Workflows: map[string]Workflow{"release": {Tasks: map[string]WorkflowTask{
+			"deploy": {Uses: "deploy", Timeout: "30s", Retry: &TaskRetry{Retries: 2, Delay: "1s"}, AllowFailure: true},
+		}}},
+	}
+	workflows, err := file.WorkflowsEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := workflows["release"].Tasks["deploy"]
+	if node.Timeout != 30*time.Second || node.RetryCount != 2 || node.RetryDelay != time.Second || !node.AllowFailure || !node.PolicyResolved {
+		t.Fatalf("effective node = %+v, want resolved override policy", node)
+	}
+	tasks, err := file.TasksEffective("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks["deploy"].Outputs) != 1 || tasks["deploy"].Outputs[0] != "dist/release.tar.gz" {
+		t.Fatalf("effective outputs = %#v, want declared output", tasks["deploy"].Outputs)
+	}
+}
+
+func TestValidateRejectsUnsafeTaskOutputs(t *testing.T) {
+	for _, output := range []string{"../escape.txt", `/absolute.txt`, `C:\\absolute.txt`, ""} {
+		t.Run(output, func(t *testing.T) {
+			file := File{Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
+				"job": {Command: "echo", Outputs: []string{output}},
+			}}
+			if err := Validate(file); err == nil || !strings.Contains(err.Error(), "outputs") {
+				t.Fatalf("error = %v, want output validation error", err)
+			}
+		})
+	}
+}
+
+func TestValidateScheduleMisfireDefaultsAndCatchUpRules(t *testing.T) {
+	file := File{Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
+		"job": {Command: "echo"},
+	}, Schedules: []Schedule{{Name: "nightly", Cron: "0 2 * * *", TargetType: "task", Target: "job"}}}
+	if err := Validate(file); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := file.SchedulesEffective("demo")
+	if err != nil || len(effective) != 1 || effective[0].Misfire != DefaultScheduleMisfire || effective[0].MaxCatchUp != DefaultScheduleMaxCatchUp {
+		t.Fatalf("effective schedules = %+v, err = %v, want default misfire policy", effective, err)
+	}
+	file.Schedules[0].Misfire = "catch_up"
+	if err := Validate(file); err == nil || !strings.Contains(err.Error(), "max_catch_up") {
+		t.Fatalf("catch_up validation = %v, want positive max_catch_up error", err)
+	}
+}
+
+func TestEffectiveWebhooksAndValidation(t *testing.T) {
+	file := File{
+		Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"),
+		Tasks:    map[string]Task{"deploy": {Command: "deploy"}},
+		Webhooks: []Webhook{{Name: "deploy-hook", Path: "/hooks/deploy", TargetType: "task", Target: "deploy", SecretRef: "env:DEPLOY_SECRET"}},
+	}
+	hooks, err := file.WebhooksEffective("demo")
+	if err != nil || len(hooks) != 1 || hooks[0].Project != "demo" || hooks[0].SecretRef != "env:DEPLOY_SECRET" {
+		t.Fatalf("effective webhooks = %+v, err=%v", hooks, err)
+	}
+	for _, path := range []string{"hooks/deploy", "/hooks//deploy", "/hooks/deploy?x=1", "/hooks/../deploy"} {
+		file.Webhooks[0].Path = path
+		if err := Validate(file); err == nil || !strings.Contains(err.Error(), "webhook") {
+			t.Fatalf("path %q validation = %v, want webhook path error", path, err)
+		}
+	}
+}
+
 func TestEffectiveTaskTimeoutDefaultsToDisabled(t *testing.T) {
 	file := File{
 		Version: 3,

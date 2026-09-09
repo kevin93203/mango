@@ -246,6 +246,8 @@ type ScheduleInfo struct {
 	Timezone        string
 	TargetType      string
 	Target          string
+	Misfire         string
+	MaxCatchUp      int
 	TimeoutSeconds  float64
 	Runs            uint64
 	Status          string
@@ -310,25 +312,39 @@ type HistoryInfo struct {
 }
 
 type HistoryTaskInfo struct {
-	RunID          string               `json:"run_id"`
-	ParentRunID    string               `json:"parent_run_id,omitempty"`
-	Node           string               `json:"node,omitempty"`
-	Task           string               `json:"task"`
-	Command        string               `json:"command,omitempty"`
-	Args           []string             `json:"args,omitempty"`
-	WorkingDir     string               `json:"working_dir,omitempty"`
-	EnvKeys        []string             `json:"env_keys,omitempty"`
-	ArgsRedacted   bool                 `json:"args_redacted,omitempty"`
-	Status         string               `json:"status"`
-	StartedAt      *time.Time           `json:"started_at,omitempty"`
-	FinishedAt     *time.Time           `json:"finished_at,omitempty"`
-	ElapsedSeconds float64              `json:"elapsed_seconds,omitempty"`
-	ExitCode       int                  `json:"exit_code"`
-	Error          string               `json:"error,omitempty"`
-	Stderr         string               `json:"stderr,omitempty"`
-	StdoutPath     string               `json:"stdout_path,omitempty"`
-	StderrPath     string               `json:"stderr_path,omitempty"`
-	Attempts       []HistoryAttemptInfo `json:"attempts,omitempty"`
+	RunID             string               `json:"run_id"`
+	ParentRunID       string               `json:"parent_run_id,omitempty"`
+	Node              string               `json:"node,omitempty"`
+	Task              string               `json:"task"`
+	Command           string               `json:"command,omitempty"`
+	Args              []string             `json:"args,omitempty"`
+	WorkingDir        string               `json:"working_dir,omitempty"`
+	EnvKeys           []string             `json:"env_keys,omitempty"`
+	ArgsRedacted      bool                 `json:"args_redacted,omitempty"`
+	Status            string               `json:"status"`
+	SkipReason        string               `json:"skip_reason,omitempty"`
+	TimeoutSeconds    float64              `json:"timeout_seconds,omitempty"`
+	RetryCount        int                  `json:"retry_count,omitempty"`
+	RetryDelaySeconds float64              `json:"retry_delay_seconds,omitempty"`
+	AllowFailure      bool                 `json:"allow_failure,omitempty"`
+	PolicyResolved    bool                 `json:"policy_resolved,omitempty"`
+	StartedAt         *time.Time           `json:"started_at,omitempty"`
+	FinishedAt        *time.Time           `json:"finished_at,omitempty"`
+	ElapsedSeconds    float64              `json:"elapsed_seconds,omitempty"`
+	ExitCode          int                  `json:"exit_code"`
+	Error             string               `json:"error,omitempty"`
+	Stderr            string               `json:"stderr,omitempty"`
+	StdoutPath        string               `json:"stdout_path,omitempty"`
+	StderrPath        string               `json:"stderr_path,omitempty"`
+	Attempts          []HistoryAttemptInfo `json:"attempts,omitempty"`
+	Artifacts         []ArtifactInfo       `json:"artifacts,omitempty"`
+}
+
+type ArtifactInfo struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type HistoryAttemptInfo struct {

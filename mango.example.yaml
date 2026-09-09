@@ -368,6 +368,8 @@ schedules:
     timezone: Asia/Taipei
     target_type: workflow
     target: demo-linear
+    misfire: catch_up
+    max_catch_up: 2
 
   - name: demo-parallel-every-10m
     cron: "*/10 * * * *"
@@ -392,3 +394,10 @@ schedules:
     timezone: Asia/Taipei
     target_type: task
     target: demo-direct
+
+webhooks:
+  - name: demo-linear-hook
+    path: /hooks/demo-linear
+    target_type: workflow
+    target: demo-linear
+    secret_ref: env:MANGO_WEBHOOK_SECRET

@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	StatusIdle      = scheduler.StatusIdle
-	StatusRunning   = scheduler.StatusRunning
-	StatusSuccess   = scheduler.StatusSuccess
-	StatusFailed    = scheduler.StatusFailed
-	StatusSkipped   = scheduler.StatusSkipped
-	StatusCancelled = scheduler.StatusCancelled
+	StatusIdle               = scheduler.StatusIdle
+	StatusRunning            = scheduler.StatusRunning
+	StatusSuccess            = scheduler.StatusSuccess
+	StatusFailed             = scheduler.StatusFailed
+	StatusSkipped            = scheduler.StatusSkipped
+	StatusCancelled          = scheduler.StatusCancelled
+	nodeStatusUpstreamFailed = "upstream_failed"
 )
 
 // Invocation describes the execution context of a task. It is also used by
@@ -39,6 +40,7 @@ type Invocation struct {
 
 type TaskRunner func(context.Context, config.EffectiveTask, Invocation) scheduler.ExecutionResult
 type HistorySink func(scheduler.Record)
+type ProgressSink func(scheduler.Record)
 
 type TaskSnapshot struct {
 	Task            config.EffectiveTask
@@ -71,9 +73,10 @@ type Executor struct {
 	taskLatest     map[string]scheduler.TaskRecord
 	wfLatest       map[string]scheduler.Record
 
-	runner TaskRunner
-	sink   HistorySink
-	runs   sync.WaitGroup
+	runner   TaskRunner
+	sink     HistorySink
+	progress ProgressSink
+	runs     sync.WaitGroup
 }
 
 func New(runner TaskRunner, sink HistorySink) *Executor {
@@ -90,6 +93,15 @@ func New(runner TaskRunner, sink HistorySink) *Executor {
 	}
 }
 
+// SetProgressSink installs a callback for active workflow snapshots. The
+// callback is intentionally separate from the terminal history sink so active
+// node state can be persisted without creating terminal history rows.
+func (e *Executor) SetProgressSink(sink ProgressSink) {
+	e.mu.Lock()
+	e.progress = sink
+	e.mu.Unlock()
+}
+
 // Apply replaces the definitions used by future runs. Existing runs retain
 // the effective task definitions they already received.
 func (e *Executor) Apply(tasks map[string]config.EffectiveTask, workflows map[string]config.EffectiveWorkflow) {
@@ -97,6 +109,7 @@ func (e *Executor) Apply(tasks map[string]config.EffectiveTask, workflows map[st
 	deferred := make(map[string]config.EffectiveTask, len(tasks))
 	for key, task := range tasks {
 		task.Args = append([]string(nil), task.Args...)
+		task.Outputs = append([]string(nil), task.Outputs...)
 		task.Env = maps.Clone(task.Env)
 		task.DeclaredEnv = maps.Clone(task.DeclaredEnv)
 		deferred[key] = task
@@ -260,7 +273,7 @@ func (e *Executor) RunTaskWithID(ctx context.Context, project, taskName string, 
 	if len(attempts) > 0 {
 		started = attempts[0].Started
 	}
-	taskRecord := makeTaskRecord(taskName, task, taskRunID, rootRunID, started, now, result, attempts, taskStatus(ctx, result))
+	taskRecord := makeTaskRecord(taskName, task, taskRunID, rootRunID, started, now, result, attempts, taskStatus(ctx, result), false)
 	e.setTaskLatest(key, taskRecord)
 	record := scheduler.Record{
 		RunID: rootRunID, Project: project, Name: taskName, TargetType: "task", Target: taskName, Trigger: trigger,
@@ -337,44 +350,56 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 				state.status = StatusCancelled
 				state.record = cancelledTaskRecord(node, wf.Tasks[node].Uses, runID)
 				nodes[node] = state
+				e.emitProgress(workflowProgressRecord(wf, runID, trigger, started, nodes, StatusRunning))
 				progress = true
 				continue
 			}
-			ready, blocked := nodeReadiness(node, wf, nodes)
+			ready, blocked, upstreamFailed := nodeReadiness(node, wf, nodes)
 			if blocked {
-				state.status = StatusSkipped
-				state.record = skippedTaskRecord(node, wf.Tasks[node].Uses, runID)
+				if upstreamFailed {
+					state.status = nodeStatusUpstreamFailed
+					state.record = upstreamFailedTaskRecord(node, wf.Tasks[node].Uses, runID)
+				} else {
+					state.status = StatusSkipped
+					state.record = skippedTaskRecord(node, wf.Tasks[node].Uses, runID)
+				}
 				nodes[node] = state
+				e.emitProgress(workflowProgressRecord(wf, runID, trigger, started, nodes, StatusRunning))
 				progress = true
 				continue
 			}
 			if !ready {
 				continue
 			}
-			task, ok := e.taskFor(wf.Project, wf.Tasks[node].Uses)
+			nodeSpec := wf.Tasks[node]
+			task, ok := e.taskFor(wf.Project, nodeSpec.Uses)
 			if !ok {
 				state.status = StatusFailed
-				state.record = failedTaskRecord(node, wf.Tasks[node].Uses, runID, fmt.Errorf("task %s/%s not found", wf.Project, wf.Tasks[node].Uses))
+				state.record = failedTaskRecord(node, nodeSpec.Uses, runID, fmt.Errorf("task %s/%s not found", wf.Project, nodeSpec.Uses))
 				nodes[node] = state
+				e.emitProgress(workflowProgressRecord(wf, runID, trigger, started, nodes, StatusRunning))
 				progress = true
 				continue
 			}
+			task = applyNodePolicy(task, nodeSpec)
 			state.status = StatusRunning
+			taskRunID := scheduler.NewRunID()
+			state.record = runningTaskRecord(node, task, taskRunID, runID, time.Now(), nodeSpec.AllowFailure)
 			nodes[node] = state
+			e.emitProgress(workflowProgressRecord(wf, runID, trigger, started, nodes, StatusRunning))
 			active++
 			progress = true
-			taskRunID := scheduler.NewRunID()
-			go func(node string, task config.EffectiveTask, taskRunID string) {
+			go func(node string, task config.EffectiveTask, taskRunID string, allowFailure bool) {
 				result, attempts := e.executeTask(ctx, task, Invocation{Project: wf.Project, Workflow: wf.Name, Node: node, RunID: taskRunID, Trigger: trigger, ParentRunID: runID})
 				now := time.Now()
 				begin := now
 				if len(attempts) > 0 {
 					begin = attempts[0].Started
 				}
-				taskRecord := makeTaskRecord(node, task, taskRunID, runID, begin, now, result, attempts, taskStatus(ctx, result))
+				taskRecord := makeTaskRecord(node, task, taskRunID, runID, begin, now, result, attempts, taskStatus(ctx, result), allowFailure)
 				e.setTaskLatest(wf.Project+"/"+task.Name, taskRecord)
 				results <- nodeResult{node: node, record: taskRecord}
-			}(node, task, taskRunID)
+			}(node, task, taskRunID, nodeSpec.AllowFailure)
 		}
 
 		if active == 0 {
@@ -396,6 +421,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 		state.status = result.record.Status
 		state.record = result.record
 		nodes[result.node] = state
+		e.emitProgress(workflowProgressRecord(wf, runID, trigger, started, nodes, StatusRunning))
 		active--
 	}
 
@@ -420,6 +446,9 @@ func (e *Executor) executeWorkflow(ctx context.Context, wf config.EffectiveWorkf
 				errorText = state.record.Error
 			}
 		case StatusFailed:
+			if wf.Tasks[node].AllowFailure {
+				continue
+			}
 			if status != StatusCancelled {
 				status = StatusFailed
 			}
@@ -517,23 +546,49 @@ func (e *Executor) taskFor(project, name string) (config.EffectiveTask, bool) {
 	return task, ok
 }
 
+func (e *Executor) emitProgress(record scheduler.Record) {
+	e.mu.Lock()
+	sink := e.progress
+	e.mu.Unlock()
+	if sink != nil {
+		sink(record)
+	}
+}
+
 func (e *Executor) setTaskLatest(key string, record scheduler.TaskRecord) {
 	e.mu.Lock()
 	e.taskLatest[key] = record
 	e.mu.Unlock()
 }
 
-func nodeReadiness(node string, wf config.EffectiveWorkflow, states map[string]nodeState) (ready, blocked bool) {
+func nodeReadiness(node string, wf config.EffectiveWorkflow, states map[string]nodeState) (ready, blocked, upstreamFailed bool) {
 	for _, dependency := range wf.Tasks[node].Needs {
 		state := states[dependency].status
 		switch state {
-		case StatusFailed, StatusSkipped, StatusCancelled:
-			return false, true
+		case StatusFailed:
+			if wf.Tasks[dependency].AllowFailure {
+				continue
+			}
+			return false, true, true
+		case nodeStatusUpstreamFailed:
+			return false, true, true
+		case StatusSkipped, StatusCancelled:
+			return false, true, false
 		case "pending", StatusRunning:
-			return false, false
+			return false, false, false
 		}
 	}
-	return true, false
+	return true, false, false
+}
+
+func applyNodePolicy(task config.EffectiveTask, node config.EffectiveWorkflowTask) config.EffectiveTask {
+	if !node.PolicyResolved {
+		return task
+	}
+	task.Timeout = node.Timeout
+	task.RetryCount = node.RetryCount
+	task.RetryDelay = node.RetryDelay
+	return task
 }
 
 func sortedWorkflowNodes(wf config.EffectiveWorkflow) []string {
@@ -545,18 +600,47 @@ func sortedWorkflowNodes(wf config.EffectiveWorkflow) []string {
 	return result
 }
 
-func makeTaskRecord(node string, task config.EffectiveTask, taskRunID, parentRunID string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string) scheduler.TaskRecord {
+func makeTaskRecord(node string, task config.EffectiveTask, taskRunID, parentRunID string, started, finished time.Time, result scheduler.ExecutionResult, attempts []scheduler.Attempt, status string, allowFailure bool) scheduler.TaskRecord {
 	metadata := scheduler.SafeTaskMetadata(task.Command, task.Args, task.WorkingDir, task.DeclaredEnv)
 	record := scheduler.TaskRecord{
 		RunID: taskRunID, ParentRunID: parentRunID,
 		Node: node, Task: task.Name, Command: metadata.Command, Args: metadata.Args,
 		WorkingDir: metadata.WorkingDir, EnvKeys: metadata.EnvKeys, ArgsRedacted: metadata.ArgsRedacted,
 		Status: status, Started: started, Finished: finished,
+		Timeout: task.Timeout, RetryCount: task.RetryCount, RetryDelay: task.RetryDelay,
+		AllowFailure: allowFailure, PolicyResolved: true,
 		DurationSeconds: nonNegativeSeconds(finished.Sub(started)), ExitCode: result.ExitCode,
 		Stderr: result.Stderr, StdoutPath: result.StdoutPath, StderrPath: result.StderrPath, Attempts: attempts,
+		Artifacts: append([]scheduler.Artifact(nil), result.Artifacts...),
 	}
 	if result.Err != nil {
 		record.Error = result.Err.Error()
+	}
+	return record
+}
+
+func runningTaskRecord(node string, task config.EffectiveTask, taskRunID, parentRunID string, started time.Time, allowFailure bool) scheduler.TaskRecord {
+	metadata := scheduler.SafeTaskMetadata(task.Command, task.Args, task.WorkingDir, task.DeclaredEnv)
+	return scheduler.TaskRecord{
+		RunID: taskRunID, ParentRunID: parentRunID, Node: node, Task: task.Name,
+		Command: metadata.Command, Args: metadata.Args, WorkingDir: metadata.WorkingDir,
+		EnvKeys: metadata.EnvKeys, ArgsRedacted: metadata.ArgsRedacted,
+		Status: StatusRunning, Started: started,
+		Timeout: task.Timeout, RetryCount: task.RetryCount, RetryDelay: task.RetryDelay,
+		AllowFailure: allowFailure, PolicyResolved: true,
+	}
+}
+
+func workflowProgressRecord(wf config.EffectiveWorkflow, runID string, trigger scheduler.TriggerRef, started time.Time, nodes map[string]nodeState, status string) scheduler.Record {
+	ordered := sortedWorkflowNodes(wf)
+	record := scheduler.Record{
+		RunID: runID, Project: wf.Project, Name: wf.Name, TargetType: "workflow", Target: wf.Name,
+		Trigger: trigger, Status: status, Started: started, Tasks: make([]scheduler.TaskRecord, 0, len(ordered)),
+	}
+	for _, node := range ordered {
+		if nodes[node].record.RunID != "" {
+			record.Tasks = append(record.Tasks, nodes[node].record)
+		}
 	}
 	return record
 }
@@ -574,6 +658,13 @@ func taskStatus(ctx context.Context, result scheduler.ExecutionResult) string {
 func skippedTaskRecord(node, task, parentRunID string) scheduler.TaskRecord {
 	now := time.Now()
 	return scheduler.TaskRecord{RunID: scheduler.NewRunID(), ParentRunID: parentRunID, Node: node, Task: task, Status: StatusSkipped, Started: now, Finished: now, ExitCode: 0}
+}
+
+func upstreamFailedTaskRecord(node, task, parentRunID string) scheduler.TaskRecord {
+	now := time.Now()
+	return scheduler.TaskRecord{RunID: scheduler.NewRunID(), ParentRunID: parentRunID, Node: node, Task: task,
+		Status: StatusSkipped, SkipReason: nodeStatusUpstreamFailed, Started: now, Finished: now, ExitCode: 0,
+		Error: "upstream node failed"}
 }
 
 func cancelledTaskRecord(node, task, parentRunID string) scheduler.TaskRecord {
