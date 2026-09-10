@@ -35,7 +35,10 @@ func TestRustShimClientStartOrAttach(t *testing.T) {
 		Autostart: true, Restart: "never", StopTimeout: time.Second,
 		RestartWindow: time.Minute, StableAfter: time.Minute, LogMaxSize: 1 << 20, LogMaxFiles: 2,
 	}
-	bootstrap := NewBootstrap(spec, "demo/api", "demo/api", "", filepath.Join(root, "logs", "stdout.log"), filepath.Join(root, "logs", "stderr.log"), true)
+	bootstrap, err := NewBootstrap(spec, "demo/api", "demo/api", "", filepath.Join(root, "logs", "stdout.log"), filepath.Join(root, "logs", "stderr.log"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

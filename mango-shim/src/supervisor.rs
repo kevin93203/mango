@@ -7,7 +7,7 @@ use crate::state::{
 };
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::{
@@ -32,6 +32,7 @@ struct Runtime {
     tree: Option<platform::TreeHandle>,
     child_started: Option<Instant>,
     failures: Vec<Instant>,
+    forwarders: Option<Vec<thread::JoinHandle<io::Result<()>>>>,
 }
 
 pub struct Supervisor {
@@ -44,6 +45,24 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(paths: StatePaths, bootstrap: Bootstrap) -> io::Result<Arc<Self>> {
+        if bootstrap.schema_version != crate::state::BOOTSTRAP_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported bootstrap schema version {}",
+                    bootstrap.schema_version
+                ),
+            ));
+        }
+        if bootstrap.protocol_version != PROTOCOL_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported bootstrap protocol version {}",
+                    bootstrap.protocol_version
+                ),
+            ));
+        }
         platform::prepare_subreaper()?;
         fs::create_dir_all(&paths.dir)?;
         set_private_directory(&paths.dir)?;
@@ -95,6 +114,7 @@ impl Supervisor {
                 tree: None,
                 child_started: None,
                 failures: Vec::new(),
+                forwarders: None,
             }),
             stop_server: Arc::new(AtomicBool::new(false)),
         });
@@ -184,7 +204,16 @@ impl Supervisor {
         }
         let data = HelloResponse {
             protocol_version: PROTOCOL_VERSION,
-            capabilities: vec!["status", "start", "stop", "restart", "shutdown"],
+            capabilities: vec![
+                "status",
+                "start",
+                "stop",
+                "restart",
+                "shutdown",
+                "secret_refs",
+                "run_as_posix",
+                "resources_tree",
+            ],
             instance_id: runtime.status.instance_id.clone(),
             service_key: runtime.status.service_key.clone(),
             config_fingerprint: runtime.status.config_fingerprint.clone(),
@@ -350,6 +379,7 @@ impl Supervisor {
                             }
                             platform::cleanup_tree(tree);
                         }
+                        join_forwarders(&mut runtime);
                         record_exit(&mut runtime, &self.bootstrap, status, descendants_cleaned);
                         if let Some(exit) = runtime.status.last_exit.as_ref() {
                             let _ = write_json(&self.paths.exit, exit);
@@ -430,7 +460,14 @@ fn spawn_runtime(
     )?;
     let stdout = open_log(&bootstrap.stdout_path)?;
     let stderr = open_log(&bootstrap.stderr_path)?;
-    let spawned = platform::spawn(bootstrap, stdout, stderr)?;
+    let spawned = platform::spawn(bootstrap)?;
+    let forwarders = start_log_forwarders(
+        spawned.stdout,
+        spawned.stderr,
+        stdout,
+        stderr,
+        spawned.secrets,
+    );
     runtime.child = Some(spawned.child);
     runtime.tree = Some(spawned.tree);
     runtime.child_started = Some(Instant::now());
@@ -442,6 +479,7 @@ fn spawn_runtime(
     runtime.status.updated_at = now_string();
     runtime.status.next_restart_at = None;
     runtime.status.last_error = None;
+    runtime.forwarders = Some(forwarders);
     if let Err(error) = write_json(&paths.status, &runtime.status) {
         stop_runtime(
             runtime,
@@ -518,6 +556,7 @@ fn stop_runtime(runtime: &mut Runtime, bootstrap: &Bootstrap, timeout: Duration)
         }
         platform::cleanup_tree(tree);
     }
+    join_forwarders(runtime);
     if let Some(status) = exit_status {
         record_exit(runtime, bootstrap, status, descendants_cleaned);
         if let Some(exit) = runtime.status.last_exit.as_mut() {
@@ -534,6 +573,126 @@ fn stop_runtime(runtime: &mut Runtime, bootstrap: &Bootstrap, timeout: Duration)
     runtime.status.next_restart_at = None;
     runtime.status.state = STATE_STOPPED.to_string();
     runtime.status.updated_at = now_string();
+}
+
+fn start_log_forwarders(
+    stdout: impl Read + Send + 'static,
+    stderr: impl Read + Send + 'static,
+    stdout_log: File,
+    stderr_log: File,
+    secrets: Vec<Vec<u8>>,
+) -> Vec<thread::JoinHandle<io::Result<()>>> {
+    let stderr_secrets = secrets.clone();
+    vec![
+        thread::spawn(move || forward_log(stdout, stdout_log, secrets)),
+        thread::spawn(move || forward_log(stderr, stderr_log, stderr_secrets)),
+    ]
+}
+
+fn join_forwarders(runtime: &mut Runtime) {
+    let Some(forwarders) = runtime.forwarders.take() else {
+        return;
+    };
+    for forwarder in forwarders {
+        if let Ok(Err(error)) = forwarder.join() {
+            runtime.status.last_error = Some(format!("write service log: {error}"));
+        }
+    }
+}
+
+fn forward_log<R: Read>(mut reader: R, mut log: File, secrets: Vec<Vec<u8>>) -> io::Result<()> {
+    let mut redactor = StreamingRedactor::new(secrets);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let redacted = redactor.push(&buffer[..count]);
+        log.write_all(&redacted)?;
+    }
+    log.write_all(&redactor.finish())?;
+    log.flush()
+}
+
+struct StreamingRedactor {
+    patterns: Vec<Vec<u8>>,
+    pending: Vec<u8>,
+    max_pattern: usize,
+}
+
+impl StreamingRedactor {
+    fn new(mut patterns: Vec<Vec<u8>>) -> Self {
+        patterns.retain(|pattern| !pattern.is_empty());
+        patterns.sort_by_key(|pattern| std::cmp::Reverse(pattern.len()));
+        let max_pattern = patterns.iter().map(Vec::len).max().unwrap_or(0);
+        Self {
+            patterns,
+            pending: Vec::new(),
+            max_pattern,
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(data);
+        if self.max_pattern == 0 {
+            return std::mem::take(&mut self.pending);
+        }
+        let safe_limit = self.pending.len().saturating_sub(self.max_pattern - 1);
+        let mut output = Vec::new();
+        let mut index = 0;
+        loop {
+            let next = self.find_match(index, safe_limit);
+            let Some((start, end)) = next else {
+                output.extend_from_slice(&self.pending[index..safe_limit]);
+                index = safe_limit;
+                break;
+            };
+            if end > safe_limit {
+                output.extend_from_slice(&self.pending[index..start]);
+                index = start;
+                break;
+            }
+            output.extend_from_slice(&self.pending[index..start]);
+            output.extend_from_slice(b"[REDACTED]");
+            index = end;
+        }
+        self.pending = self.pending[index..].to_vec();
+        output
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let mut output = std::mem::take(&mut self.pending);
+        for pattern in &self.patterns {
+            let mut redacted = Vec::with_capacity(output.len());
+            let mut index = 0;
+            while let Some(relative) = output[index..]
+                .windows(pattern.len())
+                .position(|window| window == pattern)
+            {
+                let start = index + relative;
+                redacted.extend_from_slice(&output[index..start]);
+                redacted.extend_from_slice(b"[REDACTED]");
+                index = start + pattern.len();
+            }
+            redacted.extend_from_slice(&output[index..]);
+            output = redacted;
+        }
+        output
+    }
+
+    fn find_match(&self, from: usize, before: usize) -> Option<(usize, usize)> {
+        self.patterns
+            .iter()
+            .filter_map(|pattern| {
+                self.pending[from..]
+                    .windows(pattern.len())
+                    .position(|window| window == pattern)
+                    .map(|offset| (from + offset, from + offset + pattern.len()))
+            })
+            .filter(|(start, _)| *start < before)
+            .min_by_key(|(start, _)| *start)
+    }
 }
 
 fn record_exit(
@@ -677,4 +836,27 @@ fn parse_millis_timestamp(value: &str) -> Option<SystemTime> {
     let seconds = millis / 1000;
     let nanos = ((millis % 1000) * 1_000_000) as u32;
     Some(SystemTime::UNIX_EPOCH + Duration::new(seconds as u64, nanos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamingRedactor;
+
+    #[test]
+    fn redacts_secret_split_across_pipe_chunks() {
+        let mut redactor = StreamingRedactor::new(vec![b"secret-value".to_vec()]);
+        let mut output = redactor.push(b"prefix secret-");
+        output.extend(redactor.push(b"value suffix"));
+        output.extend(redactor.finish());
+        assert_eq!(output, b"prefix [REDACTED] suffix");
+    }
+
+    #[test]
+    fn keeps_plain_values_and_redacts_multiple_occurrences() {
+        let mut redactor = StreamingRedactor::new(vec![b"abc".to_vec()]);
+        let mut output = redactor.push(b"abc x ");
+        output.extend(redactor.push(b"abc"));
+        output.extend(redactor.finish());
+        assert_eq!(output, b"[REDACTED] x [REDACTED]");
+    }
 }

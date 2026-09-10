@@ -53,7 +53,7 @@ try {
         throw "manifest build date is missing"
     }
     $manifestBuildDate = $buildDateMatch.Groups[1].Value
-    if ($manifest.compatibility.ipc_version -ne 2 -or $manifest.compatibility.shim_protocol_version -ne 2 -or $manifest.compatibility.bootstrap_schema_version -ne 1 -or $manifest.compatibility.metadata_schema_version -ne 11 -or $manifest.compatibility.yaml_schema_version -ne 3) {
+    if ($manifest.compatibility.ipc_version -ne 3 -or $manifest.compatibility.shim_protocol_version -ne 3 -or $manifest.compatibility.bootstrap_schema_version -ne 2 -or $manifest.compatibility.metadata_schema_version -ne 11 -or $manifest.compatibility.yaml_schema_version -ne 4) {
         throw "manifest compatibility metadata does not match the supported release contract"
     }
     foreach ($binary in $manifest.binaries) {

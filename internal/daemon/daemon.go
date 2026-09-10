@@ -1041,16 +1041,21 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
 	for _, service := range desired.Services {
-		if service.Supervisor == "shim" && (len(service.EnvironmentRefs) > 0 || service.RunAs != nil || service.Resources != nil) {
-			return api.ApplyResult{}, fmt.Errorf("project %s service %s: secret references, run_as, and resources require the legacy supervisor", name, service.Name)
-		}
 		if service.RunAs != nil {
 			if err := resources.ValidateIdentity(service.RunAs); err != nil {
 				return api.ApplyResult{}, fmt.Errorf("project %s service %s: %w", name, service.Name, err)
 			}
 		}
-		if service.Resources != nil && resources.Status(service.Resources).Overall == api.CapabilityUnsupported {
-			return api.ApplyResult{}, fmt.Errorf("project %s service %s: resource policy is unsupported on this platform", name, service.Name)
+		if service.Resources != nil {
+			normalized, err := resources.NormalizePolicy(service.Resources)
+			if err != nil {
+				return api.ApplyResult{}, fmt.Errorf("project %s service %s: %w", name, service.Name, err)
+			}
+			if normalized != (resources.Policy{}) {
+				if status := resources.Status(service.Resources); status.Overall != api.CapabilitySupported {
+					return api.ApplyResult{}, fmt.Errorf("project %s service %s: resource policy cannot be enforced: %s", name, service.Name, status.Detail)
+				}
+			}
 		}
 	}
 	d.mu.RLock()
@@ -1711,6 +1716,30 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 		return nil
 	}
 	managed.state = StateStarting
+	identity, identityErr := resources.NormalizeIdentity(managed.spec.RunAs)
+	if identityErr != nil {
+		managed.state = StateFailed
+		managed.lastError = identityErr.Error()
+		d.mu.Unlock()
+		return identityErr
+	}
+	normalizedResourcePolicy, resourceErr := normalizedResources(managed.spec.Resources)
+	if resourceErr != nil {
+		managed.state = StateFailed
+		managed.lastError = resourceErr.Error()
+		d.mu.Unlock()
+		return resourceErr
+	}
+	if managed.spec.Resources != nil && normalizedResourcePolicy != nil {
+		status := resources.Status(managed.spec.Resources)
+		if status.Overall != api.CapabilitySupported {
+			err := fmt.Errorf("resource policy cannot be enforced: %s", status.Detail)
+			managed.state = StateFailed
+			managed.lastError = err.Error()
+			d.mu.Unlock()
+			return err
+		}
+	}
 	env, redactor, resolveErr := d.resolveEnvironment(context.Background(), serviceEnvironment(managed.spec), managed.spec.EnvironmentRefs)
 	if resolveErr != nil {
 		managed.state = StateFailed
@@ -1736,7 +1765,9 @@ func (d *Daemon) startManaged(projectName string, managed *managedProcess) error
 	handle, err := process.Start(process.Spec{
 		Command: managed.spec.Command, Args: managed.spec.Args, WorkingDir: managed.spec.WorkingDir,
 		Env: env, User: serviceRunAsUser(managed.spec), Group: serviceRunAsGroup(managed.spec),
-		Stdout: redactor.Wrap(stdout), Stderr: redactor.Wrap(stderr),
+		Identity:  identity,
+		Resources: normalizedResourcePolicy,
+		Stdout:    redactor.Wrap(stdout), Stderr: redactor.Wrap(stderr),
 	})
 	if err != nil {
 		_ = stdout.Close()
@@ -1803,28 +1834,6 @@ func (d *Daemon) startShimManaged(projectName string, managed *managedProcess) e
 	generation := managed.generation
 	spec := managed.spec
 	d.mu.Unlock()
-	if len(spec.EnvironmentRefs) > 0 {
-		err := fmt.Errorf("service %s uses secret environment references; legacy supervisor is required for log redaction", spec.Name)
-		d.mu.Lock()
-		managed.state, managed.lastError = StateFailed, err.Error()
-		d.mu.Unlock()
-		return err
-	}
-	if spec.RunAs != nil {
-		err := fmt.Errorf("service %s uses run_as; the shim supervisor does not support identity execution", spec.Name)
-		d.mu.Lock()
-		managed.state, managed.lastError = StateFailed, err.Error()
-		d.mu.Unlock()
-		return err
-	}
-	if spec.Resources != nil {
-		err := fmt.Errorf("service %s uses resources; the shim supervisor does not support resource policies", spec.Name)
-		d.mu.Lock()
-		managed.state, managed.lastError = StateFailed, err.Error()
-		d.mu.Unlock()
-		return err
-	}
-
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -1903,7 +1912,21 @@ func (d *Daemon) shimBootstrap(projectName string, spec config.EffectiveService,
 	stdoutPath := d.logs.Path(projectName, spec.Name, "stdout")
 	stderrPath := d.logs.Path(projectName, spec.Name, "stderr")
 	serviceKey := projectName + "/" + spec.Name
-	return shim.NewBootstrap(spec, serviceKey, serviceKey, "", stdoutPath, stderrPath, autostart), nil
+	return shim.NewBootstrap(spec, serviceKey, serviceKey, "", stdoutPath, stderrPath, autostart)
+}
+
+func normalizedResources(policy *config.ResourcePolicy) (*resources.Policy, error) {
+	if policy == nil {
+		return nil, nil
+	}
+	normalized, err := resources.NormalizePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == (resources.Policy{}) {
+		return nil, nil
+	}
+	return &normalized, nil
 }
 
 func (d *Daemon) adoptShimServices(projectName string) {

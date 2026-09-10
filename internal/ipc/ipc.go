@@ -13,10 +13,10 @@ import (
 
 var ErrDaemonUnavailable = errors.New("daemon is not running; start it with: mango daemon start")
 
-// ProtocolVersion is the daemon/shim local IPC contract version. Version 2
-// introduces active-default execution listing, terminal-only history methods,
-// and the explicit history purge/show operations.
-const ProtocolVersion = 2
+// ProtocolVersion is the coordinated daemon/shim and CLI/daemon IPC contract.
+// Version 3 carries the policy-parity bootstrap contract and is intentionally
+// breaking: v2 clients and shims are not accepted.
+const ProtocolVersion = 3
 
 type EndpointState uint8
 
@@ -137,6 +137,13 @@ func serveConn(ctx context.Context, conn net.Conn, handler Handler) {
 	}
 	if request.Version == 0 {
 		request.Version = ProtocolVersion
+	}
+	if request.Version != ProtocolVersion {
+		_ = encoder.Encode(Response{Version: ProtocolVersion, ID: request.ID, OK: false, Error: &Error{
+			Code:    "UNSUPPORTED_VERSION",
+			Message: fmt.Sprintf("unsupported daemon IPC version %d; requires version %d", request.Version, ProtocolVersion),
+		}})
+		return
 	}
 	response := handler(ctx, request)
 	if response.Version == 0 {

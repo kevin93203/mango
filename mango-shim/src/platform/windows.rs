@@ -1,5 +1,4 @@
 use crate::state::Bootstrap;
-use std::fs::File;
 use std::io;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -7,8 +6,8 @@ use std::ptr::null;
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
@@ -34,13 +33,15 @@ impl Drop for TreeHandle {
     }
 }
 
-pub fn spawn_platform(
-    bootstrap: &Bootstrap,
-    stdout: File,
-    stderr: File,
-) -> io::Result<super::Spawned> {
+pub fn spawn_platform(bootstrap: &Bootstrap) -> io::Result<super::Spawned> {
+    if bootstrap.run_as.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "run_as is unsupported on Windows",
+        ));
+    }
     let mut command = Command::new(&bootstrap.command);
-    let environment = super::resolved_environment(bootstrap)?;
+    let resolved = super::resolved_environment(bootstrap)?;
     command
         .args(&bootstrap.args)
         .current_dir(if bootstrap.working_dir.is_empty() {
@@ -49,10 +50,10 @@ pub fn spawn_platform(
             &bootstrap.working_dir
         })
         .env_clear()
-        .envs(&environment)
+        .envs(&resolved.values)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     let mut child = command.spawn()?;
     let pid = child.id();
@@ -60,7 +61,7 @@ pub fn spawn_platform(
     let job_name_w = to_wide(&job_name);
     let mut job = unsafe { CreateJobObjectW(null(), job_name_w.as_ptr()) };
     if job.is_null() {
-        let _ = child.kill();
+        abort_child(pid);
         let _ = child.wait();
         return Err(io::Error::last_os_error());
     }
@@ -71,13 +72,34 @@ pub fn spawn_platform(
         unsafe { CloseHandle(job) };
         job = unsafe { CreateJobObjectW(null(), job_name_w.as_ptr()) };
         if job.is_null() {
-            let _ = child.kill();
+            abort_child(pid);
             let _ = child.wait();
             return Err(io::Error::last_os_error());
         }
     }
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if let Some(policy) = bootstrap.resources.as_ref() {
+        if policy.process_limit > 0 {
+            info.BasicLimitInformation.LimitFlags |=
+                windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            info.BasicLimitInformation.ActiveProcessLimit = policy.process_limit;
+        }
+        if policy.memory_bytes > 0 {
+            if policy.memory_bytes > usize::MAX as u64 {
+                unsafe { CloseHandle(job) };
+                abort_child(pid);
+                let _ = child.wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "job memory limit is too large for this platform",
+                ));
+            }
+            info.BasicLimitInformation.LimitFlags |=
+                windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = policy.memory_bytes as usize;
+        }
+    }
     let set = unsafe {
         SetInformationJobObject(
             job,
@@ -88,9 +110,31 @@ pub fn spawn_platform(
     };
     if set == 0 {
         unsafe { CloseHandle(job) };
-        let _ = child.kill();
+        abort_child(pid);
         let _ = child.wait();
         return Err(io::Error::last_os_error());
+    }
+    if let Some(policy) = bootstrap.resources.as_ref()
+        && policy.cpu_percent > 0
+    {
+        let cpu = JobObjectCpuRateControlInformationNative {
+            control_flags: CPU_RATE_CONTROL_ENABLE | CPU_RATE_CONTROL_HARD_CAP,
+            cpu_rate: policy.cpu_percent * 100,
+        };
+        let set = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectCpuRateControlInformation,
+                &cpu as *const _ as *mut _,
+                std::mem::size_of::<JobObjectCpuRateControlInformationNative>() as u32,
+            )
+        };
+        if set == 0 {
+            unsafe { CloseHandle(job) };
+            abort_child(pid);
+            let _ = child.wait();
+            return Err(io::Error::last_os_error());
+        }
     }
     let process = unsafe {
         OpenProcess(
@@ -101,7 +145,7 @@ pub fn spawn_platform(
     };
     if process.is_null() {
         unsafe { CloseHandle(job) };
-        let _ = child.kill();
+        abort_child(pid);
         let _ = child.wait();
         return Err(io::Error::last_os_error());
     }
@@ -109,18 +153,44 @@ pub fn spawn_platform(
     unsafe { CloseHandle(process) };
     if assigned == 0 {
         unsafe { CloseHandle(job) };
-        let _ = child.kill();
+        abort_child(pid);
         let _ = child.wait();
         return Err(io::Error::last_os_error());
     }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("child stdout pipe was not created"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("child stderr pipe was not created"))?;
     Ok(super::Spawned {
         child,
+        stdout,
+        stderr,
+        secrets: resolved.secrets,
         tree: TreeHandle { job },
         pid,
         process_start_token: process_start_token(pid),
         job_object: Some(job_name),
     })
 }
+
+fn abort_child(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
+#[repr(C)]
+struct JobObjectCpuRateControlInformationNative {
+    control_flags: u32,
+    cpu_rate: u32,
+}
+
+const CPU_RATE_CONTROL_ENABLE: u32 = 0x1;
+const CPU_RATE_CONTROL_HARD_CAP: u32 = 0x4;
 
 fn job_object_name(bootstrap: &Bootstrap) -> String {
     let mut hash = 0xcbf29ce484222325u64;

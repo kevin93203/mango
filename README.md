@@ -310,13 +310,15 @@ services:
 ```
 
 Mango reports each configured policy as `supported`, `degraded`, or
-`unsupported` in service status and `mango doctor`. Linux uses cgroup
-availability and process-group boundaries, Windows uses Job Object primitives,
-and macOS reports the CPU/memory adapter as unsupported. These controls are
-resource boundaries, not container isolation or a security sandbox.
-Secret references and `run_as`/`resources` policies currently require the
-legacy daemon-owned supervisor; shim services are rejected during apply/start
-validation rather than silently dropping a security control.
+`unsupported` in service status and `mango doctor`. Linux requires delegated
+cgroup v2 controllers and applies `pids.max`, `memory.max`, and `cpu.max` to
+the complete service tree. Windows uses Job Object active-process, memory, and
+CPU hard-cap limits. macOS rejects configured resource policies as unsupported.
+These controls are resource boundaries, not container isolation or a security
+sandbox; a policy that cannot be applied prevents the service from starting.
+Both supervisors resolve `from_env`/`from_file` secret references at spawn,
+redact child stdout/stderr, and apply POSIX `run_as`; Windows `run_as` remains
+unsupported.
 
 ## Command overview
 
@@ -1582,7 +1584,7 @@ subreaper path, and cgroup availability; macOS reports the process-group
 escape limitation and the absence of a portable Mango resource-limit adapter.
 
 The control plane and shim use versioned local JSON IPC by default. Protocol
-version `2` is carried in every request and response, and `request_id` is
+version `3` is carried in every request and response, and `request_id` is
 echoed so callers can correlate a response. The optional management API uses
 the same operations under `/api/v1`; it is disabled unless configured and
 binds to loopback by default. Non-loopback listeners require a bearer token
@@ -1647,7 +1649,7 @@ the README, plus a companion `.sha256` file.
 
 All binaries support `--version`. Go build metadata is injected with ldflags;
 the Rust shim receives the same values through its build environment. The
-daemon health response keeps numeric IPC `version: 2` and adds a `build` object
+daemon health response keeps numeric IPC `version: 3` and adds a `build` object
 for version, commit, and build date. Product SemVer major versions are not
 startup gates yet; IPC, shim, YAML, and metadata schema compatibility are.
 

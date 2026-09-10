@@ -17,7 +17,7 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 )
 
-func TestPhase2IPCResponsesUseProtocolV2(t *testing.T) {
+func TestIPCResponsesUseProtocolV3(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	response := d.Handle(context.Background(), requestForMethod(t, "health"))
 	if response.Version != ipc.ProtocolVersion {

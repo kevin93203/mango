@@ -5,6 +5,16 @@ named; they are not production `AutoMigrate` operations. Every step is
 idempotent, runs in its own transaction where the database supports that
 guarantee, and writes a fixed checksum to `schema_migrations`.
 
+## IPC and shim policy migration
+
+IPC v3 and bootstrap schema v2 are a coordinated breaking release. Before
+replacing binaries, use the old `mango` CLI to stop `mangod` and all services.
+Then install the matching `mango`, `mangod`, and `mango-shim` artifacts and
+start the daemon. A live v2 shim is rejected with an actionable migration
+error; dead v2 state is removed during reconciliation. The v3 shim never
+falls back to the legacy supervisor when secret, identity, or resource policy
+application fails.
+
 ## SQLite
 
 For `MANGO_HOME/state/history.db`, the runner uses:

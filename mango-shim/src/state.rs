@@ -5,7 +5,30 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const BOOTSTRAP_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SecretReference {
+    pub provider: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Identity {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ResourceLimits {
+    #[serde(default)]
+    pub process_limit: u32,
+    #[serde(default)]
+    pub memory_bytes: u64,
+    #[serde(default)]
+    pub cpu_percent: u32,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Bootstrap {
@@ -22,6 +45,12 @@ pub struct Bootstrap {
     pub working_dir: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secret_refs: BTreeMap<String, SecretReference>,
+    #[serde(default)]
+    pub run_as: Option<Identity>,
+    #[serde(default)]
+    pub resources: Option<ResourceLimits>,
     #[serde(default)]
     pub autostart: bool,
     #[serde(default = "default_restart")]

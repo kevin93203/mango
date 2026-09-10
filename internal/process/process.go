@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/kevin93203/mango/internal/resources"
 )
 
 type Spec struct {
@@ -17,8 +19,10 @@ type Spec struct {
 	Env        map[string]string
 	User       string
 	Group      string
+	Identity   *resources.Identity
 	Stdout     io.Writer
 	Stderr     io.Writer
+	Resources  *resources.Policy
 }
 
 type Result struct {
@@ -65,7 +69,11 @@ func Start(spec Spec) (*Handle, error) {
 		return nil, err
 	}
 	h := &Handle{cmd: cmd, startedAt: startedAt, done: make(chan struct{})}
-	attachProcessTree(h)
+	if err := attachProcessTree(h, spec); err != nil {
+		abortProcessTree(cmd.Process.Pid)
+		_, _ = cmd.Process.Wait()
+		return nil, err
+	}
 	go h.wait()
 	return h, nil
 }

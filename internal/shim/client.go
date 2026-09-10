@@ -21,36 +21,58 @@ import (
 	"github.com/kevin93203/mango/internal/instance"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/resources"
 )
 
-const ProtocolVersion = 2
+const ProtocolVersion = 3
+const BootstrapSchemaVersion = 2
 
 var (
 	ErrUnavailable = errors.New("mango-shim is unavailable")
 	ErrOrphaned    = errors.New("mango-shim has an orphaned service process")
+	ErrMigration   = errors.New("mango-shim requires the coordinated v3 migration")
 )
 
 type Bootstrap struct {
-	SchemaVersion     int               `json:"schema_version"`
-	ProtocolVersion   int               `json:"protocol_version"`
-	ServiceKey        string            `json:"service_key"`
-	InstanceID        string            `json:"instance_id"`
-	Incarnation       string            `json:"incarnation"`
-	ConfigFingerprint string            `json:"config_fingerprint"`
-	Command           string            `json:"command"`
-	Args              []string          `json:"args,omitempty"`
-	WorkingDir        string            `json:"working_dir,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Autostart         bool              `json:"autostart"`
-	Restart           string            `json:"restart"`
-	StopTimeoutMS     int64             `json:"stop_timeout_ms"`
-	MaxRestarts       int               `json:"max_restarts"`
-	RestartWindowMS   int64             `json:"restart_window_ms"`
-	StableAfterMS     int64             `json:"stable_after_ms"`
-	StdoutPath        string            `json:"stdout_path"`
-	StderrPath        string            `json:"stderr_path"`
-	LogMaxSize        int64             `json:"log_max_size"`
-	LogMaxFiles       int               `json:"log_max_files"`
+	SchemaVersion     int                        `json:"schema_version"`
+	ProtocolVersion   int                        `json:"protocol_version"`
+	ServiceKey        string                     `json:"service_key"`
+	InstanceID        string                     `json:"instance_id"`
+	Incarnation       string                     `json:"incarnation"`
+	ConfigFingerprint string                     `json:"config_fingerprint"`
+	Command           string                     `json:"command"`
+	Args              []string                   `json:"args,omitempty"`
+	WorkingDir        string                     `json:"working_dir,omitempty"`
+	Env               map[string]string          `json:"env,omitempty"`
+	SecretRefs        map[string]SecretReference `json:"secret_refs,omitempty"`
+	RunAs             *Identity                  `json:"run_as,omitempty"`
+	Resources         *ResourceLimits            `json:"resources,omitempty"`
+	Autostart         bool                       `json:"autostart"`
+	Restart           string                     `json:"restart"`
+	StopTimeoutMS     int64                      `json:"stop_timeout_ms"`
+	MaxRestarts       int                        `json:"max_restarts"`
+	RestartWindowMS   int64                      `json:"restart_window_ms"`
+	StableAfterMS     int64                      `json:"stable_after_ms"`
+	StdoutPath        string                     `json:"stdout_path"`
+	StderrPath        string                     `json:"stderr_path"`
+	LogMaxSize        int64                      `json:"log_max_size"`
+	LogMaxFiles       int                        `json:"log_max_files"`
+}
+
+type SecretReference struct {
+	Provider string `json:"provider"`
+	Name     string `json:"name"`
+}
+
+type Identity struct {
+	UID uint32 `json:"uid"`
+	GID uint32 `json:"gid"`
+}
+
+type ResourceLimits struct {
+	ProcessLimit uint32 `json:"process_limit,omitempty"`
+	MemoryBytes  uint64 `json:"memory_bytes,omitempty"`
+	CPUPercent   uint32 `json:"cpu_percent,omitempty"`
 }
 
 type ExitRecord struct {
@@ -97,20 +119,37 @@ type Client struct {
 	ConfigFingerprint string
 }
 
-func NewBootstrap(spec config.EffectiveService, serviceKey, instanceID, incarnation, stdoutPath, stderrPath string, autostart bool) Bootstrap {
+func NewBootstrap(spec config.EffectiveService, serviceKey, instanceID, incarnation, stdoutPath, stderrPath string, autostart bool) (Bootstrap, error) {
 	env := serviceEnvironment(spec)
+	secretRefs := make(map[string]SecretReference, len(spec.EnvironmentRefs))
 	for key, reference := range spec.EnvironmentRefs {
-		env[key] = "__MANGO_SECRET_REF__:" + reference.Provider + ":" + reference.Name
+		secretRefs[key] = SecretReference{Provider: strings.TrimSpace(reference.Provider), Name: strings.TrimSpace(reference.Name)}
+	}
+	identity, err := resources.NormalizeIdentity(spec.RunAs)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	var shimIdentity *Identity
+	if identity != nil {
+		shimIdentity = &Identity{UID: identity.UID, GID: identity.GID}
+	}
+	policy, err := resources.NormalizePolicy(spec.Resources)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	var resourceLimits *ResourceLimits
+	if policy != (resources.Policy{}) {
+		resourceLimits = &ResourceLimits{ProcessLimit: policy.ProcessLimit, MemoryBytes: policy.MemoryBytes, CPUPercent: policy.CPUPercent}
 	}
 	return Bootstrap{
-		SchemaVersion: 1, ProtocolVersion: ProtocolVersion, ServiceKey: serviceKey,
+		SchemaVersion: BootstrapSchemaVersion, ProtocolVersion: ProtocolVersion, ServiceKey: serviceKey,
 		InstanceID: instanceID, Incarnation: incarnation, ConfigFingerprint: fingerprintFor(spec),
 		Command: spec.Command, Args: append([]string(nil), spec.Args...), WorkingDir: spec.WorkingDir,
-		Env: env, Autostart: autostart, Restart: spec.Restart,
+		Env: env, SecretRefs: secretRefs, RunAs: shimIdentity, Resources: resourceLimits, Autostart: autostart, Restart: spec.Restart,
 		StopTimeoutMS: spec.StopTimeout.Milliseconds(), MaxRestarts: spec.MaxRestarts,
 		RestartWindowMS: spec.RestartWindow.Milliseconds(), StableAfterMS: spec.StableAfter.Milliseconds(),
 		StdoutPath: stdoutPath, StderrPath: stderrPath, LogMaxSize: spec.LogMaxSize, LogMaxFiles: spec.LogMaxFiles,
-	}
+	}, nil
 }
 
 func (c *Client) Hello(ctx context.Context) error {
@@ -127,8 +166,17 @@ func (c *Client) Hello(ctx context.Context) error {
 	}, &result); err != nil {
 		return err
 	}
-	if result.ProtocolVersion != ProtocolVersion || result.InstanceID != c.InstanceID || result.ServiceKey != c.ServiceKey {
+	if result.ProtocolVersion != ProtocolVersion || result.InstanceID != c.InstanceID || result.ServiceKey != c.ServiceKey || result.ConfigFingerprint != c.ConfigFingerprint {
 		return fmt.Errorf("shim handshake mismatch")
+	}
+	capabilities := map[string]bool{}
+	for _, capability := range result.Capabilities {
+		capabilities[capability] = true
+	}
+	for _, required := range []string{"secret_refs", "run_as_posix", "resources_tree"} {
+		if !capabilities[required] {
+			return fmt.Errorf("shim does not advertise required capability %q", required)
+		}
 	}
 	return nil
 }
@@ -386,6 +434,20 @@ func findMatching(ctx context.Context, root string, desired Bootstrap) (*Client,
 			ConfigFingerprint: existing.ConfigFingerprint,
 		}
 		status, statusErr := readStatus(stateDir)
+		if existing.SchemaVersion != BootstrapSchemaVersion || existing.ProtocolVersion != ProtocolVersion {
+			shimAlive := statusErr == nil && status.ShimPID > 0 && processIsAlive(status.ShimPID)
+			if pid, pidErr := readPID(filepath.Join(stateDir, "shim.pid")); pidErr == nil && processIsAlive(pid) {
+				shimAlive = true
+			}
+			if shimAlive {
+				return nil, Status{}, false, fmt.Errorf("%w: service %s still has a live v%d/schema v%d shim; stop it with the previous mango CLI before upgrading", ErrMigration, desired.ServiceKey, existing.ProtocolVersion, existing.SchemaVersion)
+			}
+			if statusErr == nil && status.ServicePID > 0 && processIsAliveWithToken(status.ServicePID, status.ProcessStartToken) {
+				return nil, Status{}, false, fmt.Errorf("%w: old shim state for %s has a live orphaned service process", ErrMigration, desired.ServiceKey)
+			}
+			cleanupDeadState(stateDir, endpoint)
+			continue
+		}
 		if existing.ConfigFingerprint == desired.ConfigFingerprint {
 			helloCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 			helloErr := client.Hello(helloCtx)

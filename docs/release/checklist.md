@@ -11,6 +11,10 @@
 
 ## Compatibility and migration
 
+- [ ] Verify the coordinated IPC v3, shim protocol v3, and bootstrap schema v2
+      contract; v2 clients and live shims are rejected with migration guidance.
+- [ ] Stop the old daemon with the old CLI before installing the new package;
+      confirm dead v2 shim state is cleaned and no legacy fallback occurs.
 - [ ] Confirm YAML v4 starter and advanced fixtures validate; v3 is rejected
       without modifying the source file.
 - [ ] Test SQLite fresh creation and upgrades from schema 1, 3, 9, and 10.
@@ -28,6 +32,9 @@
       artifact metadata, history, schedules, webhooks, events, audit, metrics,
       and `/api/v1/health`.
 - [ ] Verify shim start, daemon restart, reattach, and fail-closed mismatch.
+- [ ] Verify secret references and cross-chunk stdout/stderr redaction, POSIX
+      normalized `run_as`, and tree-wide resource enforcement on each supported
+      platform; configured macOS resources are rejected.
 - [ ] Verify startup integration status/install/uninstall or an explicit
       unsupported/degraded result on the platform.
 - [ ] Publish the migration guide, rollback guide, and this checklist with the

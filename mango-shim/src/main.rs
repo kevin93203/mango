@@ -4,7 +4,7 @@ mod protocol;
 mod state;
 mod supervisor;
 
-use crate::state::{StatePaths, load_bootstrap, write_text};
+use crate::state::{BOOTSTRAP_SCHEMA_VERSION, StatePaths, load_bootstrap, write_text};
 use crate::supervisor::Supervisor;
 use std::env;
 use std::io;
@@ -43,6 +43,15 @@ fn run() -> io::Result<()> {
         .unwrap_or_else(|| state_dir.join("endpoint.sock"));
     let paths = StatePaths::new(&state_dir);
     let bootstrap = load_bootstrap(&paths)?;
+    if bootstrap.schema_version != BOOTSTRAP_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported bootstrap schema version {}; requires version {}",
+                bootstrap.schema_version, BOOTSTRAP_SCHEMA_VERSION
+            ),
+        ));
+    }
     if bootstrap.protocol_version != protocol::PROTOCOL_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

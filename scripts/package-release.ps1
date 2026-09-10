@@ -78,7 +78,7 @@ try {
         format_version = 1
         build = [ordered]@{ version = $Version; commit = $Commit; build_date = $BuildDate }
         target = [ordered]@{ os = $osName; architecture = $architecture }
-        compatibility = [ordered]@{ ipc_version = 2; shim_protocol_version = 2; bootstrap_schema_version = 1; metadata_schema_version = 11; yaml_schema_version = 3 }
+        compatibility = [ordered]@{ ipc_version = 3; shim_protocol_version = 3; bootstrap_schema_version = 2; metadata_schema_version = 11; yaml_schema_version = 4 }
         binaries = $binaryManifest
     }
     $json = $manifest | ConvertTo-Json -Depth 8

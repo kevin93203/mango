@@ -41,6 +41,7 @@ jobs:
         run: |
           go test ./internal/capability -count=1
           go test ./internal/process -count=1
+          go test ./internal/resources -count=1
           go test ./internal/startup -count=1
 
       - name: Build CLI and daemon

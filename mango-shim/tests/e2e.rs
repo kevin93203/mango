@@ -20,8 +20,8 @@ fn root_exit_cleans_process_group_and_writes_exit_state() {
     let fixture = env!("CARGO_BIN_EXE_mango-test-fixture");
     fs::create_dir_all(&state_dir).expect("state directory");
     let bootstrap = json!({
-        "schema_version": 1,
-        "protocol_version": 2,
+        "schema_version": 2,
+        "protocol_version": 3,
         "service_key": "test/service",
         "instance_id": "test/service",
         "incarnation": "test-incarnation",
@@ -89,8 +89,8 @@ fn always_restart_uses_backoff_and_crash_loop_guard() {
     let fixture = env!("CARGO_BIN_EXE_mango-test-fixture");
     fs::create_dir_all(&state_dir).expect("state directory");
     let bootstrap = json!({
-        "schema_version": 1,
-        "protocol_version": 2,
+        "schema_version": 2,
+        "protocol_version": 3,
         "service_key": "test/restart",
         "instance_id": "test/restart",
         "incarnation": "test-incarnation",
@@ -140,7 +140,7 @@ fn always_restart_uses_backoff_and_crash_loop_guard() {
 fn request(endpoint: &PathBuf, method: &str, params: Value) -> Value {
     let mut stream = UnixStream::connect(endpoint).expect("connect shim");
     let request = json!({
-        "version": 2,
+        "version": 3,
         "request_id": "test-request",
         "method": method,
         "params": params
@@ -156,7 +156,7 @@ fn request(endpoint: &PathBuf, method: &str, params: Value) -> Value {
 fn try_request(endpoint: &PathBuf, method: &str, params: Value) -> Result<Value, ()> {
     let mut stream = UnixStream::connect(endpoint).map_err(|_| ())?;
     let request = json!({
-        "version": 2,
+        "version": 3,
         "request_id": "test-request",
         "method": method,
         "params": params

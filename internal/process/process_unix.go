@@ -8,12 +8,20 @@ import (
 	"os/user"
 	"strconv"
 	"syscall"
+
+	"github.com/kevin93203/mango/internal/resources"
 )
 
-type platformState struct{}
+type platformState struct {
+	resource *resources.Handle
+}
 
 func prepareCommand(cmd *exec.Cmd, spec Spec) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if spec.Identity != nil {
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: spec.Identity.UID, Gid: spec.Identity.GID}
+		return nil
+	}
 	if spec.User == "" && spec.Group == "" {
 		return nil
 	}
@@ -61,9 +69,29 @@ func prepareCommand(cmd *exec.Cmd, spec Spec) error {
 	return nil
 }
 
-func attachProcessTree(h *Handle) {}
+func attachProcessTree(h *Handle, spec Spec) error {
+	if spec.Resources == nil {
+		return nil
+	}
+	resource, err := resources.Apply(h.PID(), *spec.Resources)
+	if err != nil {
+		return fmt.Errorf("apply resource policy: %w", err)
+	}
+	h.platform.resource = resource
+	return nil
+}
 
-func releaseProcessTree(h *Handle) {}
+func releaseProcessTree(h *Handle) {
+	h.mu.Lock()
+	resource := h.platform.resource
+	h.platform.resource = nil
+	h.mu.Unlock()
+	_ = resources.Cleanup(resource)
+}
+
+func abortProcessTree(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}
 
 func gracefulStop(h *Handle) error {
 	return syscall.Kill(-h.PID(), syscall.SIGTERM)
