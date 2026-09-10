@@ -28,6 +28,22 @@ type DesiredState struct {
 	Webhooks  []config.EffectiveWebhook
 }
 
+// Equal reports whether two desired states contain the same effective
+// resources. Resource fingerprints already normalize runtime-only fields and
+// are ordered deterministically by Resources.
+func (state DesiredState) Equal(other DesiredState) bool {
+	left, right := state.Resources(), other.Resources()
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Key != right[index].Key || left[index].Fingerprint != right[index].Fingerprint {
+			return false
+		}
+	}
+	return true
+}
+
 func Compile(file config.File, project string) (DesiredState, error) {
 	services, err := file.ServicesEffective(project)
 	if err != nil {

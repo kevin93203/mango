@@ -167,6 +167,41 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestUpCommandRequiresRunningDaemonBeforeRegistryWrite(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "mango.yaml")
+	if err := os.WriteFile(configPath, []byte("version: 4\nname: demo\nservices:\n  api:\n    command: go\n    autostart: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	layout := paths.Layout{
+		Root:       root,
+		Registry:   filepath.Join(root, "projects.json"),
+		SocketPath: filepath.Join(root, "runtime", "missing.sock"),
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipc.SetEndpoint(layout.SocketPath)
+	t.Cleanup(func() { ipc.SetEndpoint("") })
+	err = upCommand(layout, composeProjectOptions{File: configPath})
+	if !errors.Is(err, ipc.ErrDaemonUnavailable) {
+		t.Fatalf("up error = %v, want %v", err, ipc.ErrDaemonUnavailable)
+	}
+	after, err := os.ReadFile(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("registry changed while daemon was unavailable: before=%q after=%q", before, after)
+	}
+}
+
 func TestInitCommandCreatesParentDirectoriesAndValidatesCustomConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config", "custom.yaml")
 	if err := initCommand(initOptions{Path: path}); err != nil {

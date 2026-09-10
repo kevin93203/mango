@@ -1054,10 +1054,24 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 		}
 	}
 	d.mu.RLock()
-	_, registered := d.registry.Projects[name]
+	projectRecord, registered := d.registry.Projects[name]
 	d.mu.RUnlock()
 	if !registered {
 		return api.ApplyResult{}, fmt.Errorf("project %q is not registered", name)
+	}
+	if projectRecord.ConfigurationGeneration > 0 {
+		current, err := d.loadAcceptedDesiredState(name, projectRecord)
+		if err != nil {
+			return api.ApplyResult{}, err
+		}
+		if current.Equal(desired) {
+			d.ensureReconciler(name)
+			acceptedAt := time.Time{}
+			if projectRecord.LastApplied != nil {
+				acceptedAt = *projectRecord.LastApplied
+			}
+			return api.ApplyResult{Project: name, Generation: projectRecord.ConfigurationGeneration, Status: "accepted", AcceptedAt: acceptedAt}, nil
+		}
 	}
 	d.mu.Lock()
 	d.configurationGeneration++
@@ -1077,7 +1091,7 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 		baseRegistry.Projects = map[string]registry.Project{}
 	}
 	nextRegistry := cloneRegistry(baseRegistry)
-	projectRecord := nextRegistry.Projects[name]
+	projectRecord = nextRegistry.Projects[name]
 	projectRecord.Name = name
 	projectRecord.ConfigPath = file.Path
 	projectRecord.Enabled = true

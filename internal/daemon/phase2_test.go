@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,92 @@ func TestDaemonRestartRestoresAcceptedGenerationInsteadOfReloadingYAML(t *testin
 	second.mu.RUnlock()
 	if command != "original-command" {
 		t.Fatalf("restored command = %q, want original-command", command)
+	}
+}
+
+func TestApplyUnchangedReusesGenerationAndProcess(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "project.yaml")
+	content := fmt.Sprintf(`version: 4
+
+services:
+  api:
+    command: %s
+    args: [-test.run, TestExecutionCancelHelper, --]
+    environment:
+      MANGO_EXECUTION_CANCEL_HELPER: "1"
+    autostart: true
+    restart: never
+`, yamlSingleQuote(os.Args[0]))
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatalf("initial reload = %v", err)
+	}
+	t.Cleanup(func() { d.removeProject("demo") })
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Ready })
+
+	firstGeneration := d.projectGeneration("demo")
+	firstItems := d.ListProcesses("demo")
+	if len(firstItems) != 1 || firstItems[0].PID <= 0 || firstItems[0].State != StateRunning {
+		t.Fatalf("initial services = %+v", firstItems)
+	}
+	firstPID := firstItems[0].PID
+	firstGenerations, err := generation.ListAcceptedProjectGenerations(layout.State, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(configPath, []byte("# formatting-only change\n\n"+content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := d.ApplyProjectResult("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Generation != firstGeneration {
+		t.Fatalf("unchanged generation = %d, want %d", unchanged.Generation, firstGeneration)
+	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool {
+		return status.Ready && status.Generation == firstGeneration
+	})
+	unchangedItems := d.ListProcesses("demo")
+	if len(unchangedItems) != 1 || unchangedItems[0].PID != firstPID {
+		t.Fatalf("services after unchanged apply = %+v, want PID %d", unchangedItems, firstPID)
+	}
+	unchangedGenerations, err := generation.ListAcceptedProjectGenerations(layout.State, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchangedGenerations) != len(firstGenerations) {
+		t.Fatalf("accepted generations after unchanged apply = %v, want %v", unchangedGenerations, firstGenerations)
+	}
+
+	changedContent := strings.Replace(content, "restart: never", "restart: on-failure", 1)
+	if err := os.WriteFile(configPath, []byte(changedContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := d.ApplyProjectResult("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Generation != firstGeneration+1 {
+		t.Fatalf("changed generation = %d, want %d", changed.Generation, firstGeneration+1)
+	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool {
+		return status.Ready && status.Generation == changed.Generation
+	})
+	changedItems := d.ListProcesses("demo")
+	if len(changedItems) != 1 || changedItems[0].PID == firstPID {
+		t.Fatalf("services after changed apply = %+v, want a new PID", changedItems)
 	}
 }
 

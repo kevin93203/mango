@@ -124,11 +124,13 @@ cargo build --release --manifest-path mango-shim/Cargo.toml
 Copy-Item mango-shim/target/release/mango-shim.exe bin/mango-shim.exe
 ```
 
-Generate and start the example project. `mango up` starts or connects to the
-daemon, registers the YAML, applies it, and waits for services to become ready:
+Start the daemon explicitly, then generate and start the example project.
+`mango up` connects to the running daemon, registers the YAML, applies it, and
+waits for services to become ready:
 
 ```sh
 ./bin/mango init
+./bin/mango daemon start
 ./bin/mango up
 ./bin/mango ps
 ./bin/mango down
@@ -146,8 +148,9 @@ Inspect the sample service and its logs:
 ./bin/mango logs demo/api --follow
 ```
 
-To run the daemon in the background, use `mango daemon start`. This command
-expects `mangod` next to `mango` or somewhere on `PATH`.
+`mango up` does not start the daemon automatically. To run the daemon in the
+background, use `mango daemon start`. This command expects `mangod` next to
+`mango` or somewhere on `PATH`.
 
 The starter configuration contains one service, one task, one schedule, and a
 single healthcheck. See
@@ -212,9 +215,11 @@ mango down [--project NAME] [--file PATH]
 ```
 
 With no `--file`, Mango reads `./mango.yaml`. Project resolution is
-`--project`, then YAML `name`, then the YAML directory name. `up` registers or
-updates the project, applies the configuration, enables schedules, starts
-autostart services, and waits up to 60 seconds for readiness. A readiness
+`--project`, then YAML `name`, then the YAML directory name. The daemon must
+already be running; `up` registers or updates the project, applies the
+configuration, enables schedules, starts autostart services, and waits up to
+60 seconds for readiness. If the effective configuration is unchanged, apply
+reuses the current generation and does not restart services. A readiness
 timeout returns a non-zero status while background reconciliation continues.
 
 `down` stops services, disables schedules, and marks the project disabled. It
@@ -361,10 +366,12 @@ mango project remove NAME
 `project add` stores the absolute YAML path in the registry. It does not copy
 or modify the configuration file. `project plan` explicitly reads the YAML and
 previews the changes. `project apply` accepts a validated and compiled desired
-snapshot immediately, then reconciles the daemon in the background. Use
-`project status` to inspect convergence; `--wait` waits for readiness without a
-timeout. A daemon restart restores the latest accepted generation; editing the
-YAML alone does not change running or restored services.
+snapshot when the effective configuration changes, then reconciles the daemon
+in the background. An unchanged effective configuration reuses the current
+generation. Use `project status` to inspect convergence; `--wait` waits for
+readiness without a timeout. A daemon restart restores the latest accepted
+generation; editing the YAML alone does not change running or restored
+services.
 
 ### Services
 
@@ -905,7 +912,7 @@ mango project ls [--json]
 | `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
 | `plan` | `PROJECT` | Reads the current YAML and shows the deterministic plan v2 resources for services, tasks, workflows, and schedules without changing runtime or metadata state. |
 | `status` | `PROJECT` | Shows the accepted generation, reconciliation phase, readiness, last project error, and resource status. |
-| `apply` | `NAME`, optional `--wait` | Validates and compiles the YAML, stores an immutable accepted generation, and starts background reconciliation. Runtime failures are shown by `status`; `--wait` waits until ready. |
+| `apply` | `NAME`, optional `--wait` | Validates and compiles the YAML, stores an immutable accepted generation when the effective configuration changes, and starts background reconciliation. Unchanged effective configuration reuses the current generation. Runtime failures are shown by `status`; `--wait` waits until ready. |
 | `rollback` | `PROJECT`, optional `GENERATION`, `--wait` | Accepts an earlier accepted snapshot as a new generation and starts background reconciliation. `--wait` waits until ready. |
 | `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last accepted time. Requires the daemon. |
 

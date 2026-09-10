@@ -22,6 +22,16 @@ func observationFor(state DesiredState, active map[string]bool) ObservedState {
 	return observed
 }
 
+func TestDesiredStateEqualUsesEffectiveResourceIdentity(t *testing.T) {
+	current := DesiredState{Services: []config.EffectiveService{service("api", "same", true)}}
+	if !current.Equal(DesiredState{Services: []config.EffectiveService{service("api", "same", true)}}) {
+		t.Fatal("identical desired states are not equal")
+	}
+	if current.Equal(DesiredState{Services: []config.EffectiveService{service("api", "changed", true)}}) {
+		t.Fatal("changed desired states are equal")
+	}
+}
+
 func TestBuildProducesDeterministicResources(t *testing.T) {
 	current := DesiredState{Services: []config.EffectiveService{
 		service("web", "old", true), service("removed", "gone", false),

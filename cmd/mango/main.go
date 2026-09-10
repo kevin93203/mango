@@ -456,7 +456,7 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 		existing.Enabled = true
 		reg.Projects[projectName] = existing
 	}
-	if err := startDaemon(layout); err != nil {
+	if _, err := call("health", nil); err != nil {
 		return err
 	}
 	if _, ok := reg.Projects[projectName]; !ok {
