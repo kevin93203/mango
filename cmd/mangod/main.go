@@ -10,6 +10,7 @@ import (
 
 	"github.com/kevin93203/mango/internal/daemon"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,7 @@ func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "mangod",
 		Short:         "Mango daemon",
+		Version:       version.String(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args:          cobra.NoArgs,

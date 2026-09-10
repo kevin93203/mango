@@ -20,6 +20,7 @@ shell-based process definition.
 - [Runtime files](#runtime-files)
 - [Platform behavior](#platform-behavior)
 - [Security and observability](#security-and-observability)
+- [Release, migration, and rollback](#release-migration-and-rollback)
 - [Development](#development)
 
 ## What Mango provides
@@ -1453,7 +1454,10 @@ MANGO_HOME/
 ├── logs/
 └── state/
     ├── history.db
-    ├── history.db.bak        # migration backup when first created
+    ├── history.db.bak        # first compatible SQLite backup; never overwritten
+    ├── history.db.migration.lock
+    ├── history.db.migration.json
+    ├── history.db.migration-<run-id>.bak  # backup for an actual schema upgrade
     ├── schedules.json       # persisted schedule enable/disable state
     ├── apply-operations.json     # legacy file, ignored if present
     └── generations/
@@ -1466,9 +1470,10 @@ provider/policy metadata only; resolved secret values are never persisted.
 
 The optional `daemon.yaml` supports execution-history and event retention,
 database, webhook listener, and management HTTP API configuration. SQLite is
-used by default. The metadata schema is maintained by
-versioned migrations; before the first SQLite metadata migration Mango creates
-`history.db.bak` when it does not already exist.
+used by default. The metadata schema is maintained by explicit, named,
+checksum-verified migrations. A fresh database does not need a backup; an
+actual SQLite upgrade creates a run-specific backup and preserves the first
+`history.db.bak` compatibility backup when it does not already exist.
 
 ```yaml
 # MANGO_HOME/daemon.yaml
@@ -1523,10 +1528,13 @@ For SQLite, omitting `path` uses `MANGO_HOME/state/history.db`. Existing
 `state/execution-history.json` files are preserved as backups but are not
 imported or read.
 
-If a metadata migration fails, do not delete the database. Keep the daemon
-stopped, inspect the migration error, and restore `history.db.bak` to
-`history.db` before retrying. The daemon deliberately refuses to start while a
-required migration is incomplete.
+If a metadata migration fails, do not delete or edit the database. Keep the
+daemon stopped and run `mango doctor --json`. The migration marker identifies
+the verified backup and the last error. A consistent `running` or `failed`
+marker can be retried; a checksum mismatch or inconsistent marker is blocked
+until the operator restores the marker's backup. PostgreSQL and MySQL require
+an operator-managed backup before migration; Mango never performs an
+automatic schema downgrade or rollback.
 
 ## Platform behavior
 
@@ -1617,6 +1625,28 @@ POST /api/v1/executions/RUN_ID/cancel
 The API is intended for local administration or a trusted reverse proxy; Mango
 does not provide public-network exposure, TLS certificate management, RBAC,
 container isolation, or a security sandbox.
+
+## Release, migration, and rollback
+
+The formal release output is a per-platform CI artifact, not a GitHub Release.
+Tagging `v*` or manually dispatching `.github/workflows/release-artifacts.yml`
+builds native Windows, Linux, and macOS packages. Each archive contains the
+three binaries together with `manifest.json`, the example configuration, and
+the README, plus a companion `.sha256` file.
+
+All binaries support `--version`. Go build metadata is injected with ldflags;
+the Rust shim receives the same values through its build environment. The
+daemon health response keeps numeric IPC `version: 2` and adds a `build` object
+for version, commit, and build date. Product SemVer major versions are not
+startup gates yet; IPC, shim, YAML, and metadata schema compatibility are.
+
+Before upgrading, read [the migration guide](docs/release/migration.md). If a
+database migration fails, keep the daemon stopped and use `mango doctor --json`
+to inspect the marker and verified backup. Configuration rollback is
+documented separately in [the rollback guide](docs/release/rollback.md) and
+does not downgrade the database. The full operator checklist is in
+[docs/release/checklist.md](docs/release/checklist.md), with the contract in
+[docs/release/compatibility.md](docs/release/compatibility.md).
 
 ## Development
 

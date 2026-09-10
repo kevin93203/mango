@@ -1,0 +1,96 @@
+name: Release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve release metadata
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $releaseVersion = $env:GITHUB_REF_NAME
+          } else {
+            $releaseVersion = "dev-$env:GITHUB_RUN_NUMBER"
+          }
+          $releaseCommit = $env:GITHUB_SHA
+          $releaseDate = (Get-Date).ToUniversalTime().ToString("o")
+          "RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_COMMIT=$releaseCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_DATE=$releaseDate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Go CLI and daemon
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build, dist | Out-Null
+          $ldflags = "-s -w -X github.com/kevin93203/mango/internal/version.Version=$env:RELEASE_VERSION -X github.com/kevin93203/mango/internal/version.Commit=$env:RELEASE_COMMIT -X github.com/kevin93203/mango/internal/version.BuildDate=$env:RELEASE_DATE"
+          $extension = if ($IsWindows) { ".exe" } else { "" }
+          go build -trimpath -tags timetzdata -ldflags $ldflags -o "build/mango$extension" ./cmd/mango
+          go build -trimpath -tags timetzdata -ldflags $ldflags -o "build/mangod$extension" ./cmd/mangod
+
+      - name: Build Rust shim
+        shell: pwsh
+        run: |
+          $env:MANGO_VERSION = $env:RELEASE_VERSION
+          $env:MANGO_COMMIT = $env:RELEASE_COMMIT
+          $env:MANGO_BUILD_DATE = $env:RELEASE_DATE
+          cargo build --release --manifest-path mango-shim/Cargo.toml
+          $extension = if ($IsWindows) { ".exe" } else { "" }
+          Copy-Item -LiteralPath "mango-shim/target/release/mango-shim$extension" -Destination "build/mango-shim$extension"
+
+      - name: Run Go verification before packaging
+        env:
+          GOCACHE: ${{ github.workspace }}/.gocache
+        run: go test ./...
+
+      - name: Create archive, manifest, and checksum
+        shell: pwsh
+        run: |
+          ./scripts/package-release.ps1 `
+            -BinaryDirectory "${{ github.workspace }}/build" `
+            -OutputDirectory "${{ github.workspace }}/dist" `
+            -Version "$env:RELEASE_VERSION" `
+            -Commit "$env:RELEASE_COMMIT" `
+            -BuildDate "$env:RELEASE_DATE" `
+            -RepositoryRoot "${{ github.workspace }}"
+
+      - name: Verify packaged binaries and smoke test
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath dist -File | Where-Object { $_.Extension -in @(".zip", ".gz") } | Select-Object -First 1
+          if ($null -eq $archive) { throw "release archive was not created" }
+          ./scripts/verify-release.ps1 -ArchivePath $archive.FullName
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mango-${{ matrix.os }}-${{ runner.arch }}
+          if-no-files-found: error
+          path: dist/*

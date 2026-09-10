@@ -12,6 +12,7 @@ import (
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/tui"
+	"github.com/kevin93203/mango/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -65,6 +66,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "mango",
 		Short:         "Cross-platform service manager",
+		Version:       version.String(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args:          cobra.NoArgs,

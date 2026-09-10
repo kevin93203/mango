@@ -161,6 +161,15 @@ type schemaVersionModel struct {
 
 func (schemaVersionModel) TableName() string { return "schema_version" }
 
+type schemaMigrationModel struct {
+	Version   int       `gorm:"primaryKey;autoIncrement:false"`
+	Name      string    `gorm:"size:255;not null"`
+	Checksum  string    `gorm:"size:64;not null"`
+	AppliedAt time.Time `gorm:"index"`
+}
+
+func (schemaMigrationModel) TableName() string { return "schema_migrations" }
+
 type eventModel struct {
 	ID        int64     `gorm:"primaryKey;autoIncrement"`
 	RunID     string    `gorm:"index;size:255;not null"`
@@ -225,7 +234,7 @@ type resourcePolicyModel struct {
 
 func (resourcePolicyModel) TableName() string { return "resource_policies" }
 
-const currentSchemaVersion = 10
+const currentSchemaVersion = 11
 
 func Open(config Config) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
@@ -287,44 +296,11 @@ func Open(config Config) (*Repository, error) {
 	return repository, nil
 }
 
-// migrate applies the metadata schema explicitly. Keeping migration steps in
-// code rather than calling AutoMigrate on every open makes upgrades
-// reviewable, repeatable, and fail closed when a step cannot be applied.
+// migrate applies the metadata schema through the release migration
+// coordinator. Keeping migration steps explicit rather than using
+// AutoMigrate makes upgrades reviewable, repeatable, and fail closed.
 func migrate(db *gorm.DB, driver, path string) error {
-	if driver == "sqlite" {
-		if err := backupBeforeMigration(path); err != nil {
-			return err
-		}
-	}
-	migrator := db.Migrator()
-	if !migrator.HasTable(&schemaVersionModel{}) {
-		if err := migrator.CreateTable(&schemaVersionModel{}); err != nil {
-			return fmt.Errorf("create schema version table: %w", err)
-		}
-	}
-	versionRow := schemaVersionModel{ID: 1}
-	result := db.Where("id = ?", 1).First(&versionRow)
-	version := 0
-	if result.Error == nil {
-		version = versionRow.Version
-	} else if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return result.Error
-	}
-	if version > currentSchemaVersion {
-		return fmt.Errorf("history schema version %d is newer than supported version %d", version, currentSchemaVersion)
-	}
-	for next := version + 1; next <= currentSchemaVersion; next++ {
-		if err := applyMigration(db, next); err != nil {
-			return fmt.Errorf("apply history migration %d: %w", next, err)
-		}
-		versionRow.ID = 1
-		versionRow.Version = next
-		versionRow.AppliedAt = time.Now().UTC()
-		if err := db.Save(&versionRow).Error; err != nil {
-			return fmt.Errorf("record history migration %d: %w", next, err)
-		}
-	}
-	return nil
+	return runMigrationCoordinator(db, driver, path)
 }
 
 func applyMigration(db *gorm.DB, version int) error {
@@ -447,6 +423,13 @@ func applyMigration(db *gorm.DB, version int) error {
 			}
 		}
 		return backfillScheduleOccurrences(db)
+	case 11:
+		if !migrator.HasTable(&schemaMigrationModel{}) {
+			if err := migrator.CreateTable(&schemaMigrationModel{}); err != nil {
+				return fmt.Errorf("create schema migration ledger: %w", err)
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown history migration %d", version)
 	}
@@ -502,36 +485,6 @@ func legacyScheduleOccurrenceTime(eventID string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, nanos).UTC(), true
-}
-
-func backupBeforeMigration(path string) error {
-	if path == "" {
-		return nil
-	}
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Size() == 0 {
-		return nil
-	}
-	backup := path + ".bak"
-	if _, err := os.Stat(backup); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read SQLite database for backup: %w", err)
-	}
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return fmt.Errorf("write SQLite migration backup: %w", err)
-	}
-	return nil
 }
 
 func (r *Repository) Record(ctx context.Context, record scheduler.Record, limit int) error {
@@ -1265,6 +1218,7 @@ func (r *Repository) MissingTables(ctx context.Context) ([]string, error) {
 		{name: "webhook_deliveries", model: &webhookDeliveryModel{}},
 		{name: "history_counters", model: &counterModel{}},
 		{name: "schema_version", model: &schemaVersionModel{}},
+		{name: "schema_migrations", model: &schemaMigrationModel{}},
 		{name: "execution_events", model: &eventModel{}},
 		{name: "events", model: &observabilityEventModel{}},
 		{name: "audit_entries", model: &auditModel{}},

@@ -21,7 +21,12 @@ fn main() {
 fn run() -> io::Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     if arguments.len() == 1 && arguments[0] == "--version" {
-        println!("mango-shim {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "mango-shim {} (commit={}, build_date={})",
+            build_version(),
+            option_env!("MANGO_COMMIT").unwrap_or("unknown"),
+            option_env!("MANGO_BUILD_DATE").unwrap_or("unknown")
+        );
         return Ok(());
     }
     if arguments.first().map(String::as_str) != Some("run") {
@@ -68,6 +73,10 @@ fn run() -> io::Result<()> {
     let finish_result = supervisor.finish();
     serve_result?;
     finish_result
+}
+
+fn build_version() -> &'static str {
+    option_env!("MANGO_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 fn argument_value(arguments: &[String], name: &str) -> io::Result<Option<String>> {

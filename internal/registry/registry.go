@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -77,6 +78,9 @@ func Save(path string, registry File) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	if err := backupExisting(path); err != nil {
+		return fmt.Errorf("backup registry before update: %w", err)
+	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".projects-*.tmp")
 	if err != nil {
 		return err
@@ -95,4 +99,60 @@ func Save(path string, registry File) error {
 		return err
 	}
 	return os.Rename(tempName, path)
+}
+
+// backupExisting keeps the first known-good registry contents available for
+// manual recovery. It intentionally never overwrites an existing backup or
+// deletes legacy registry state automatically.
+func backupExisting(path string) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+	backup := path + ".bak"
+	if _, err := os.Stat(backup); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	input, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	temp, err := os.CreateTemp(filepath.Dir(backup), ".projects-backup-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempName := temp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = temp.Close()
+			_ = os.Remove(tempName)
+		}
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := io.Copy(temp, input); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempName, backup); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }

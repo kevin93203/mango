@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,36 @@ func TestSaveAndLoadShimInstanceMetadata(t *testing.T) {
 	instance := got.Projects["demo"].ShimInstances["api"]
 	if instance.ServiceKey != "demo/api" || instance.Incarnation != "inc-1" || instance.StateDir != "/tmp/shim-state" {
 		t.Fatalf("loaded shim metadata = %+v", instance)
+	}
+}
+
+func TestSavePreservesFirstRegistryBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projects.json")
+	first := File{Version: 1, Projects: map[string]Project{"first": {Name: "first"}}}
+	second := File{Version: 1, Projects: map[string]Project{"second": {Name: "second"}}}
+	third := File{Version: 1, Projects: map[string]Project{"third": {Name: "third"}}}
+	if err := Save(path, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, second); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := path + ".bak"
+	backup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(backup), `"first"`) || strings.Contains(string(backup), `"second"`) {
+		t.Fatalf("first registry backup = %s", backup)
+	}
+	if err := Save(path, third); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchanged) != string(backup) {
+		t.Fatal("registry backup was overwritten")
 	}
 }

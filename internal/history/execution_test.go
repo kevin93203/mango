@@ -188,7 +188,10 @@ func TestScheduleOccurrenceMigrationBackfillsLegacyTriggerEvent(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", currentSchemaVersion-1).Error; err != nil {
+	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", 9).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".migration.json"); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.Close(); err != nil {
@@ -252,10 +255,16 @@ func TestExecutionPersistsNodeSkipReasonAndArtifacts(t *testing.T) {
 	}
 }
 
-func TestSQLiteMigrationCreatesBackupBeforeReopen(t *testing.T) {
+func TestSQLiteMigrationCreatesBackupBeforeUpgrade(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.db")
 	repository, err := Open(Config{Driver: "sqlite", Path: path})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", currentSchemaVersion-1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".migration.json"); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.Close(); err != nil {
@@ -283,6 +292,9 @@ func TestSQLiteMigrationRemovesRetiredExecutionOperationsTable(t *testing.T) {
 	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", 3).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(path + ".migration.json"); err != nil {
+		t.Fatal(err)
+	}
 	if err := repository.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +318,9 @@ func TestSQLiteMigrationRejectsNewerSchemaVersion(t *testing.T) {
 	if err := repository.db.Model(&schemaVersionModel{}).Where("id = ?", 1).Update("version", currentSchemaVersion+1).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(path + ".migration.json"); err != nil {
+		t.Fatal(err)
+	}
 	if err := repository.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +328,7 @@ func TestSQLiteMigrationRejectsNewerSchemaVersion(t *testing.T) {
 	if _, err := Open(Config{Driver: "sqlite", Path: path}); err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("Open with newer schema version = %v, want fail-closed migration error", err)
 	}
-	if _, err := os.Stat(path + ".bak"); err != nil {
-		t.Fatalf("migration backup missing after refused upgrade: %v", err)
+	if _, err := os.Stat(path + ".bak"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected migration backup after refused upgrade: %v", err)
 	}
 }

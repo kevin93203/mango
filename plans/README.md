@@ -19,7 +19,7 @@ Kubernetes orchestration, or multi-host high availability.
 | [02 Desired State and Service Reliability](02-desired-state-and-service-reliability.md) | Completed | 01 |
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Completed | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Completed | 01, 02, 03 |
-| [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Not started | 00–04 |
+| [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Completed | 00–04 |
 | [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |
 
 ## Implementation Audit
@@ -65,6 +65,17 @@ Kubernetes orchestration, or multi-host high availability.
   string environment values, webhook HMAC behavior, local IPC permissions,
   YAML v3, and execution-history records remain compatible. Go and Rust
   formatting, unit/integration tests, and static checks pass.
+- **Phase 05 — Completed.** Added explicit schema-versioned migration
+  coordination through metadata schema 11, SQLite migration locking,
+  run-specific backups, atomic markers, checksum validation, fail-closed
+  recovery, and read-only `mango doctor` inspection. Added shared Go/Rust build
+  metadata, health reporting, registry preservation backups, compatibility and
+  rollback documentation, and a native Windows/Linux/macOS artifact workflow
+  that packages the CLI, daemon, and shim together with a manifest and
+  checksums. Packaged-binary smoke verification covers version output,
+  sibling resolution, YAML v3 validation, daemon startup, health, and clean
+  shutdown; broader feature coverage remains in the existing cross-platform
+  integration suite.
 
 ## Dependency Flow
 

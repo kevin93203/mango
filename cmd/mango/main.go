@@ -22,6 +22,7 @@ import (
 	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/observability"
@@ -31,6 +32,7 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
 	"github.com/kevin93203/mango/internal/tui"
+	"github.com/kevin93203/mango/internal/version"
 	"golang.org/x/term"
 )
 
@@ -2176,6 +2178,16 @@ func doctorCommand(layout paths.Layout) error {
 	if daemonDatabase.ConnectionInfo.Status == "" {
 		daemonDatabase.ConnectionInfo.Status = daemonDatabase.Status
 	}
+	if !daemonAvailable && historyDriver == config.DefaultHistoryDatabaseDriver {
+		if migration, migrationErr := history.InspectSQLiteMigration(historyLocation); migrationErr == nil {
+			daemonDatabase.Migration = api.HistoryMigrationHealth{
+				Status: migration.Status, CurrentVersion: migration.CurrentVersion,
+				TargetVersion: migration.TargetVersion, MarkerPath: migration.MarkerPath,
+				BackupPath: migration.BackupPath, ChecksumMismatch: migration.ChecksumMismatch,
+				Error: migration.Error, Recovery: migration.Recovery,
+			}
+		}
+	}
 	daemonData["history_database"] = daemonDatabase
 	daemonExecutable, daemonExecutableErr := resolveDaemonExecutable()
 	startupStatus, startupErr := startup.GetStatus()
@@ -2249,6 +2261,7 @@ func doctorCommand(layout paths.Layout) error {
 		{Name: "port", Value: displayDoctorPort(daemonDatabase.ConnectionInfo.Port)},
 		{Name: "connection", Value: doctorDatabaseConnection(daemonDatabase), Style: doctorDatabaseStyle(daemonDatabase)},
 		{Name: "history schema", Value: doctorSchemaStatus(daemonDatabase.Schema), Style: doctorSchemaStyle(daemonDatabase.Schema)},
+		{Name: "migration", Value: doctorMigrationStatus(daemonDatabase.Migration), Style: doctorMigrationStyle(daemonDatabase.Migration)},
 	})
 	capabilityFields := make([]doctorField, 0, len(capabilityReport.Capabilities))
 	for name, info := range capabilityReport.Capabilities {
@@ -2285,6 +2298,7 @@ func doctorCommand(layout paths.Layout) error {
 		{Name: "status", Value: daemonStatus, Style: daemonStatusStyle},
 		{Name: "pid", Value: doctorPID(daemonHealth, daemonAvailable)},
 		{Name: "api version", Value: doctorAPIVersion(daemonHealth, daemonAvailable)},
+		{Name: "build", Value: doctorBuild(daemonHealth, daemonAvailable)},
 		{Name: "daemon binary", Value: daemonBinary, Style: daemonBinaryStyle},
 		{Name: "startup", Value: startupValue, Style: startupStyle},
 		{Name: "config errors", Value: configErrors, Style: configErrorsStyle},
@@ -2342,6 +2356,7 @@ type doctorDatabaseJSON struct {
 	HistorySchemaError  string                     `json:"history_schema_error,omitempty"`
 	MissingSchemaTables []string                   `json:"missing_schema_tables,omitempty"`
 	ConnectionInfo      api.DatabaseConnectionInfo `json:"connection_info"`
+	Migration           api.HistoryMigrationHealth `json:"migration"`
 }
 
 func doctorDatabaseReport(database api.HistoryDatabaseHealth) doctorDatabaseJSON {
@@ -2362,6 +2377,32 @@ func doctorDatabaseReport(database api.HistoryDatabaseHealth) doctorDatabaseJSON
 		HistorySchemaError:  database.Schema.Error,
 		MissingSchemaTables: append([]string(nil), database.Schema.Missing...),
 		ConnectionInfo:      database.ConnectionInfo,
+		Migration:           database.Migration,
+	}
+}
+
+func doctorMigrationStatus(migration api.HistoryMigrationHealth) string {
+	status := migration.Status
+	if status == "" {
+		status = "unknown"
+	}
+	if migration.CurrentVersion > 0 || migration.TargetVersion > 0 {
+		status += fmt.Sprintf(" (%d/%d)", migration.CurrentVersion, migration.TargetVersion)
+	}
+	if migration.Error != "" {
+		status += ": " + migration.Error
+	}
+	return status
+}
+
+func doctorMigrationStyle(migration api.HistoryMigrationHealth) cliui.Style {
+	switch migration.Status {
+	case "complete", "completed", "managed_externally", "not_created":
+		return cliui.StyleSuccess
+	case "blocked", "failed":
+		return cliui.StyleError
+	default:
+		return cliui.StyleWarning
 	}
 }
 
@@ -2446,6 +2487,13 @@ func doctorAPIVersion(health daemonHealthData, available bool) string {
 		return "-"
 	}
 	return strconv.Itoa(health.Version)
+}
+
+func doctorBuild(health daemonHealthData, available bool) string {
+	if !available || health.Build.Version == "" {
+		return version.Version
+	}
+	return health.Build.Version
 }
 
 func doctorStatusStyle(ok bool, detail string) cliui.Style {
@@ -2646,6 +2694,7 @@ type daemonHealthData struct {
 	Version         int                       `json:"version"`
 	ConfigErrors    map[string]string         `json:"config_errors"`
 	HistoryDatabase api.HistoryDatabaseHealth `json:"history_database"`
+	Build           api.Build                 `json:"build"`
 }
 
 func decodeDaemonHealth(data interface{}) (daemonHealthData, error) {

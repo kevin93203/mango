@@ -38,6 +38,7 @@ import (
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/secrets"
 	"github.com/kevin93203/mango/internal/shim"
+	"github.com/kevin93203/mango/internal/version"
 	"github.com/kevin93203/mango/internal/webhook"
 	"github.com/kevin93203/mango/internal/workflow"
 )
@@ -729,6 +730,7 @@ func historyDatabaseInfo(layout paths.Layout, database config.DatabaseConfig) ap
 		Driver: driver, Location: location, Status: "unknown",
 		ConnectionInfo: databaseConnectionInfo(driver, "", database.DSNEnv),
 		Schema:         api.HistorySchemaHealth{Status: "unknown"},
+		Migration:      api.HistoryMigrationHealth{Status: "unknown", TargetVersion: history.CurrentSchemaVersion()},
 	}
 }
 
@@ -746,7 +748,31 @@ func openHistoryRepositoryWithInfo(layout paths.Layout, database config.Database
 	if err != nil {
 		return nil, api.HistoryDatabaseHealth{}, err
 	}
+	info.Migration = migrationHealthForDatabase(resolved)
 	return repository, info, nil
+}
+
+func migrationHealthForDatabase(database history.Config) api.HistoryMigrationHealth {
+	if database.Driver == "sqlite" {
+		status, err := history.InspectSQLiteMigration(database.Path)
+		if err != nil {
+			return api.HistoryMigrationHealth{
+				Status: "unknown", TargetVersion: history.CurrentSchemaVersion(),
+				Error: err.Error(), Recovery: "inspect the SQLite migration marker and backup",
+			}
+		}
+		return api.HistoryMigrationHealth{
+			Status: status.Status, CurrentVersion: status.CurrentVersion,
+			TargetVersion: status.TargetVersion, MarkerPath: status.MarkerPath,
+			BackupPath: status.BackupPath, ChecksumMismatch: status.ChecksumMismatch,
+			Error: status.Error, Recovery: status.Recovery,
+		}
+	}
+	return api.HistoryMigrationHealth{
+		Status: "managed_externally", CurrentVersion: history.CurrentSchemaVersion(),
+		TargetVersion: history.CurrentSchemaVersion(),
+		Recovery:      "database backups and migration recovery are managed by the database operator",
+	}
 }
 
 func resolveHistoryDatabase(layout paths.Layout, database config.DatabaseConfig) (history.Config, api.HistoryDatabaseHealth, error) {
@@ -3546,7 +3572,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		}
 		return success(request, map[string]interface{}{
 			"status": status, "pid": os.Getpid(), "version": ipc.ProtocolVersion, "config_errors": configErrors,
-			"history_database": database, "capabilities": capabilities, "metrics": d.metrics.Prometheus(),
+			"build": version.Current(), "history_database": database, "capabilities": capabilities, "metrics": d.metrics.Prometheus(),
 		})
 	case "events.list":
 		var p struct {

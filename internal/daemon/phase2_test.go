@@ -24,6 +24,16 @@ func TestPhase2IPCResponsesUseProtocolV2(t *testing.T) {
 	}
 }
 
+func TestPhase05RejectsUnsupportedIPCVersion(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	request := requestForMethod(t, "health")
+	request.Version = ipc.ProtocolVersion + 1
+	response := d.Handle(context.Background(), request)
+	if response.OK || response.Error == nil || response.Error.Code != "UNSUPPORTED_VERSION" {
+		t.Fatalf("unsupported IPC response = %+v, want UNSUPPORTED_VERSION", response.Error)
+	}
+}
+
 func TestPhase2ExecutionListRejectsAllAndStatusTogether(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	request := requestForMethod(t, "execution.ls")

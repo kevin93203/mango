@@ -1,7 +1,11 @@
 // Package api contains the data exchanged between mango clients and mangod.
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/kevin93203/mango/internal/version"
+)
 
 const (
 	StateStopped    = "stopped"
@@ -186,6 +190,7 @@ type HistoryDatabaseHealth struct {
 	LatencyMS      int64                  `json:"latency_ms,omitempty"`
 	ConnectionInfo DatabaseConnectionInfo `json:"connection_info"`
 	Schema         HistorySchemaHealth    `json:"schema"`
+	Migration      HistoryMigrationHealth `json:"migration"`
 }
 
 // DatabaseConnectionInfo contains safe, non-secret connection metadata.
@@ -207,6 +212,22 @@ type HistorySchemaHealth struct {
 	Missing []string `json:"missing,omitempty"`
 	Error   string   `json:"error,omitempty"`
 }
+
+// HistoryMigrationHealth reports migration state without exposing database
+// credentials. Paths are included only for local SQLite databases.
+type HistoryMigrationHealth struct {
+	Status           string `json:"status"`
+	CurrentVersion   int    `json:"current_version"`
+	TargetVersion    int    `json:"target_version"`
+	MarkerPath       string `json:"marker_path,omitempty"`
+	BackupPath       string `json:"backup_path,omitempty"`
+	ChecksumMismatch bool   `json:"checksum_mismatch,omitempty"`
+	Error            string `json:"error,omitempty"`
+	Recovery         string `json:"recovery,omitempty"`
+}
+
+// Build is the non-secret build metadata reported by health endpoints.
+type Build = version.BuildInfo
 
 type ChildProcessInfo struct {
 	PID           int
