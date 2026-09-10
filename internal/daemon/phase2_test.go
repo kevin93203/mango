@@ -280,12 +280,3 @@ func writePhase2Project(t *testing.T, path, command string) {
 		t.Fatal(err)
 	}
 }
-
-func mustJSON(t *testing.T, value interface{}) []byte {
-	t.Helper()
-	data, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
-}

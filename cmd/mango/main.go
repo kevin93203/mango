@@ -286,10 +286,6 @@ func splitDaemonLogLines(data string) []string {
 
 type daemonLogReader func(path string, offset int64, maxBytes int) (string, int64, error)
 
-func followDaemonLogs(path string, tail int) error {
-	return followDaemonLogsWithContext(cliCommandContext, path, tail)
-}
-
 func followDaemonLogsWithContext(ctx context.Context, path string, tail int) error {
 	writer := newDaemonLogWriter()
 	return followDaemonLogsWithReaderContext(ctx, path, tail, logging.ReadSince, writer.write, waitForDaemonLogFollowInterval)
@@ -599,10 +595,6 @@ func configValidateCommand(path string) error {
 	return nil
 }
 
-func applyProjectCommand(project string) error {
-	return applyProjectCommandWithCaller(project, call)
-}
-
 func applyProjectCommandWithCaller(project string, caller func(string, interface{}) (ipc.Response, error)) error {
 	return applyProjectCommandWithCallerAndOptions(project, false, caller)
 }
@@ -684,10 +676,6 @@ func projectStatusCommand(project string) error {
 		cliOutput.Table([]string{"KIND", "NAME", "PHASE", "HEALTHY", "OBSERVED", "ERROR"}, rows)
 	}
 	return nil
-}
-
-func projectRollbackCommand(project string, generation uint64) error {
-	return projectRollbackCommandWithOptions(project, generation, false)
 }
 
 func projectRollbackCommandWithOptions(project string, generation uint64, wait bool) error {
@@ -802,10 +790,6 @@ func lsCommand() error {
 	return nil
 }
 
-func statusCommand(key string) error {
-	return statusCommandWithOptions(cliCommandContext, key, false)
-}
-
 func statusCommandWithOptions(ctx context.Context, key string, watch bool) error {
 	if !watch {
 		return statusCommandOnce(ctx, key)
@@ -859,7 +843,7 @@ func eventsCommandWithContext(ctx context.Context, limit int, follow bool) error
 			return err
 		}
 		if jsonOutput {
-			if len(events) > 0 && len(events) > 0 {
+			if len(events) > 0 {
 				if err := cliOutput.JSON(events); err != nil {
 					return err
 				}
@@ -1038,10 +1022,6 @@ func rejectJSON(command string) error {
 	return nil
 }
 
-func logsCommand(targets []string, options logsOptions) error {
-	return logsCommandWithContext(cliCommandContext, targets, options)
-}
-
 func logsCommandWithContext(ctx context.Context, targets []string, options logsOptions) error {
 	return logsCommandWithCallerAndContext(ctx, targets, options, logsCall)
 }
@@ -1172,10 +1152,6 @@ func logStreams(targets []resolvedLogTarget, stream string) []*logStream {
 	return result
 }
 
-func readLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
-	return readLogsTargetsWithContext(context.Background(), targets, stream, tail, caller)
-}
-
 func readLogsTargetsWithContext(ctx context.Context, targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
 	streams := logStreams(targets, stream)
 	events, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
@@ -1270,18 +1246,6 @@ func clearLogsCommand(target string) error {
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Logs cleared for %s", result["key"])))
 	return nil
-}
-
-func followLogs(key, stream string, tail int) error {
-	resolved, err := resolveLogTargetsWithContext(cliCommandContext, []string{key}, logsCall)
-	if err != nil {
-		return err
-	}
-	return followLogsTargetsWithContext(cliCommandContext, resolved, stream, tail, logsCall, newLogWriter())
-}
-
-func followLogsTargets(targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
-	return followLogsTargetsWithContext(context.Background(), targets, stream, tail, caller, newLogWriter())
 }
 
 func followLogsTargetsWithContext(ctx context.Context, targets []resolvedLogTarget, stream string, tail int, caller logsCaller, writer *logWriter) error {
@@ -1799,10 +1763,6 @@ type historyOptions struct {
 	Target      string
 }
 
-func historyListCommand(options historyOptions) error {
-	return historyListCommandWithCaller(options, call, false)
-}
-
 func historyListCommandWithCaller(options historyOptions, caller func(string, interface{}) (ipc.Response, error), scheduleOnly bool) error {
 	if options.Tail < 0 {
 		return errors.New("history tail must be non-negative")
@@ -1853,10 +1813,6 @@ func historyListCommandWithCaller(options historyOptions, caller func(string, in
 		printUnifiedHistory(records)
 	}
 	return nil
-}
-
-func historyClearCommand() error {
-	return historyClearCommandWithCaller(call)
 }
 
 func historyClearCommandWithCaller(caller func(string, interface{}) (ipc.Response, error)) error {
@@ -2666,10 +2622,6 @@ func healthStatus(info *api.HealthInfo) string {
 	return info.Status
 }
 
-func formatBytes(value uint64) string {
-	return cliui.FormatBytes(value)
-}
-
 func printDaemonStatus(data interface{}) error {
 	health, err := decodeDaemonHealth(data)
 	if err != nil {
@@ -3100,27 +3052,6 @@ func printStartupStatus(status startup.Status) {
 		{{Text: "status"}, {Text: state, Style: style}},
 		{{Text: "detail"}, {Text: status.Detail, Style: zeroStyle(status.Detail)}},
 	})
-}
-
-func printLogBlock(stream, content string) {
-	printLogLabel(stream)
-	printLogContent(stream, content)
-}
-
-func printLogLabel(stream string) {
-	style := cliui.StyleStdout
-	if stream == "stderr" {
-		style = cliui.StyleStderr
-	}
-	cliOutput.Printf("%s\n", cliOutput.Text(style, "["+stream+"]"))
-}
-
-func printLogContent(stream, content string) {
-	style := cliui.StyleNone
-	if stream == "stderr" {
-		style = cliui.StyleStderr
-	}
-	cliOutput.PrintStyled(style, content)
 }
 
 func decodeMap(data interface{}) (map[string]interface{}, error) {

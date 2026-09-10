@@ -3072,13 +3072,6 @@ func childProcessInfos(snapshots []metrics.ProcessSnapshot) []api.ChildProcessIn
 	return result
 }
 
-func healthDisplay(info *HealthInfo) string {
-	if info == nil {
-		return ""
-	}
-	return info.Status
-}
-
 func aggregatePorts(snapshot metrics.ProcessSnapshot) []string {
 	seen := map[string]bool{}
 	result := make([]string, 0)
@@ -3220,8 +3213,8 @@ func (d *Daemon) runLegacyScheduleTask(ctx context.Context, schedule config.Effe
 		_ = attemptStdout.Close()
 		return scheduler.ExecutionResult{ExitCode: 1, Err: err, StdoutPath: executionStdoutPath, StderrPath: executionStderrPath}
 	}
-	stdoutWriter := io.Writer(stdout)
-	stderrWriter := io.Writer(stderr)
+	var stdoutWriter io.Writer
+	var stderrWriter io.Writer
 	if executionStdout != stdout {
 		stdoutWriter = io.MultiWriter(stdout, executionStdout, attemptStdout)
 	} else {
@@ -4201,7 +4194,6 @@ func (d *Daemon) handleWebhook(_ context.Context, delivery webhook.Delivery) (we
 	}
 	if !created {
 		runID = execution.Record.RunID
-		record = execution.Record
 		if d.executionIsActive(runID) {
 			_ = d.scheduler.RecordExecutionEvent(context.Background(), scheduler.ExecutionEvent{
 				RunID: runID, Type: "webhook_duplicate", Status: execution.Record.Status,

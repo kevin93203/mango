@@ -319,15 +319,6 @@ func (a *cliApp) monitorCmd() *cobra.Command {
 	})
 }
 
-func addHistoryFlags(cmd *cobra.Command, tail *int, attempts *bool, triggerType, trigger, targetType, target *string) {
-	cmd.Flags().IntVar(tail, "tail", 100, "number of history records")
-	cmd.Flags().BoolVar(attempts, "attempts", false, "show attempt details")
-	cmd.Flags().StringVar(triggerType, "trigger-type", "", "filter by trigger type")
-	cmd.Flags().StringVar(trigger, "trigger", "", "filter by trigger name")
-	cmd.Flags().StringVar(targetType, "target-type", "", "filter by target type")
-	cmd.Flags().StringVar(target, "target", "", "filter by target")
-}
-
 func (a *cliApp) scheduleCmd() *cobra.Command {
 	cmd := a.namespaceCmd("schedule", "Manage schedules")
 	cmd.AddCommand(a.simpleCmd("ls", "List schedules", scheduleListCommand))

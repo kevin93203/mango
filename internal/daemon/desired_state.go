@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/kevin93203/mango/internal/config"
@@ -90,20 +89,6 @@ func (d *Daemon) observedProjectState(name string) reconcile.ObservedState {
 		}
 	}
 	return observed
-}
-
-func sortResourceKeys(keys map[reconcile.ResourceKey]bool) []reconcile.ResourceKey {
-	result := make([]reconcile.ResourceKey, 0, len(keys))
-	for key := range keys {
-		result = append(result, key)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Kind != result[j].Kind {
-			return result[i].Kind < result[j].Kind
-		}
-		return result[i].Name < result[j].Name
-	})
-	return result
 }
 
 func scheduleTimezones(schedules []config.EffectiveSchedule) map[string]string {
