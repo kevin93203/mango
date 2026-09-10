@@ -35,29 +35,32 @@ type ScheduleRef struct {
 	Name    string
 }
 
-// HistoryReader is the narrow read boundary for terminal history and lifetime
-// summaries. It never owns active execution transitions.
-type HistoryReader interface {
+// HistoryRepository is the scheduler's single persistence boundary. Both the
+// in-memory test store and the durable history repository implement it.
+type HistoryRepository interface {
+	observability.Store
+	PruneEvents(context.Context, int) error
+	ReplaceSecurityMetadata(context.Context, string, []observability.SecretReferenceMetadata, []observability.ResourcePolicyMetadata) error
+	Record(context.Context, Record, int) error
+	BeginExecution(context.Context, Record, string, uint64) (Execution, bool, error)
+	GetExecution(context.Context, string) (Execution, error)
+	ListActiveExecutions(context.Context) ([]Execution, error)
+	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
+	UpdateExecution(context.Context, Record) error
+	RecordExecutionEvent(context.Context, ExecutionEvent) error
+	ListExecutionEvents(context.Context, string) ([]ExecutionEvent, error)
+	Purge(context.Context, *time.Time, bool) (int, error)
+	Clear(context.Context) error
+	Prune(context.Context, int) error
+	ClaimScheduleOccurrence(context.Context, ScheduleOccurrence) (ScheduleOccurrence, bool, error)
+	GetScheduleOccurrence(context.Context, string) (ScheduleOccurrence, error)
+	LatestScheduleOccurrence(context.Context, string, string) (ScheduleOccurrence, error)
+	UpdateScheduleOccurrence(context.Context, ScheduleOccurrence) error
+	ClaimWebhookDelivery(context.Context, WebhookDelivery) (WebhookDelivery, bool, error)
 	Query(context.Context, HistoryQuery) ([]Record, error)
 	Counters(context.Context) (map[string]uint64, error)
 	LatestSchedules(context.Context, []ScheduleRef) (map[string]Record, error)
-}
-
-// HistoryRepository is the compatibility composite accepted by Scheduler.
-// New code should depend on ExecutionStore, HistoryReader, and HistoryPurger
-// separately.
-type HistoryRepository interface {
-	ExecutionStore
-	HistoryReader
 	Close() error
-}
-
-type historyPruner interface {
-	Prune(context.Context, int) error
-}
-
-type historyClearer interface {
-	Clear(context.Context) error
 }
 
 type memoryHistoryRepository struct {

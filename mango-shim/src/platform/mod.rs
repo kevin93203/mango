@@ -2,7 +2,7 @@ use crate::state::Bootstrap;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::process::{Child, ExitStatus};
+use std::process::Child;
 
 #[cfg(unix)]
 mod unix;
@@ -68,9 +68,4 @@ pub fn resolved_environment(bootstrap: &Bootstrap) -> io::Result<BTreeMap<String
         }
     }
     Ok(result)
-}
-
-#[allow(dead_code)]
-pub fn status_success(status: &ExitStatus) -> bool {
-    status.success()
 }

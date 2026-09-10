@@ -4,8 +4,6 @@ package observability
 
 import (
 	"context"
-	"encoding/json"
-	"sync"
 	"time"
 )
 
@@ -48,10 +46,6 @@ type Store interface {
 	ListAudit(context.Context, int) ([]AuditEntry, error)
 }
 
-type EventPruner interface {
-	PruneEvents(context.Context, int) error
-}
-
 type SecretReferenceMetadata struct {
 	Project   string
 	Target    string
@@ -67,61 +61,6 @@ type ResourcePolicyMetadata struct {
 	Memory       string
 	CPUPercent   int
 	Status       string
-}
-
-type MetadataStore interface {
-	ReplaceSecurityMetadata(context.Context, string, []SecretReferenceMetadata, []ResourcePolicyMetadata) error
-}
-
-type Bus struct {
-	mu          sync.RWMutex
-	subscribers map[int]chan Event
-	nextID      int
-}
-
-func NewBus() *Bus { return &Bus{subscribers: map[int]chan Event{}} }
-
-func (b *Bus) Subscribe(buffer int) (<-chan Event, func()) {
-	if buffer <= 0 {
-		buffer = 32
-	}
-	b.mu.Lock()
-	if b.subscribers == nil {
-		b.subscribers = map[int]chan Event{}
-	}
-	b.nextID++
-	id := b.nextID
-	channel := make(chan Event, buffer)
-	b.subscribers[id] = channel
-	b.mu.Unlock()
-	return channel, func() {
-		b.mu.Lock()
-		if current := b.subscribers[id]; current != nil {
-			delete(b.subscribers, id)
-			close(current)
-		}
-		b.mu.Unlock()
-	}
-}
-
-func (b *Bus) Publish(event Event) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, subscriber := range b.subscribers {
-		select {
-		case subscriber <- event:
-		default:
-			// A slow observer must not block service execution or IPC.
-		}
-	}
-}
-
-func MarshalMetadata(values map[string]interface{}) string {
-	data, err := json.Marshal(values)
-	if err != nil {
-		return "{}"
-	}
-	return string(data)
 }
 
 type actorKey struct{}

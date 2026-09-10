@@ -21,10 +21,7 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	}
 	defer repository.Close()
 
-	store, ok := interface{}(repository).(scheduler.ExecutionStore)
-	if !ok {
-		t.Fatal("history repository does not implement execution store")
-	}
+	store := scheduler.HistoryRepository(repository)
 	started := time.Now().UTC()
 	execution, created, err := store.BeginExecution(context.Background(), scheduler.Record{
 		RunID: "durable-run", Project: "demo", TargetType: "task", Target: "job",
@@ -58,7 +55,7 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	if err != nil || counters["task|demo|job"] != 1 {
 		t.Fatalf("counters = %+v, err=%v", counters, err)
 	}
-	listed, err := store.(scheduler.ExecutionStore).ListExecutions(context.Background(), scheduler.ExecutionQuery{
+	listed, err := store.ListExecutions(context.Background(), scheduler.ExecutionQuery{
 		Status: scheduler.StatusSuccess, Project: "demo", TargetType: "task", Target: "job", Limit: 10,
 	})
 	if err != nil || len(listed) != 1 || listed[0].Record.RunID != "durable-run" {
@@ -105,10 +102,7 @@ func TestScheduleOccurrencePersistenceIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer repository.Close()
-	store, ok := interface{}(repository).(scheduler.ScheduleOccurrenceStore)
-	if !ok {
-		t.Fatal("history repository does not implement schedule occurrence store")
-	}
+	store := scheduler.HistoryRepository(repository)
 	scheduledAt := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
 	input := scheduler.ScheduleOccurrence{ID: "occ-test", Project: "demo", Schedule: "nightly", ScheduledAt: scheduledAt, Status: scheduler.OccurrencePending}
 	created, wasCreated, err := store.ClaimScheduleOccurrence(context.Background(), input)
@@ -136,10 +130,7 @@ func TestWebhookDeliveryPersistenceIsIdempotentAndBodyBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, ok := interface{}(repository).(scheduler.WebhookDeliveryStore)
-	if !ok {
-		t.Fatal("history repository does not implement webhook delivery store")
-	}
+	store := scheduler.HistoryRepository(repository)
 	input := scheduler.WebhookDelivery{
 		WebhookKey: "demo/deploy", IdempotencyKey: "delivery-1", BodySHA256: "abc", BodySize: 3, RunID: "run-1",
 	}

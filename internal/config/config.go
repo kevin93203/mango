@@ -133,10 +133,6 @@ func (s *Service) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Process is retained as an internal compatibility alias while the public
-// configuration and API use service terminology.
-type Process = Service
-
 type Dependency struct {
 	Condition string `yaml:"condition"`
 	Restart   bool   `yaml:"restart"`
@@ -171,13 +167,13 @@ type Schedule struct {
 	// Deprecated source-compatibility fields. They are deliberately excluded
 	// from YAML decoding so the breaking v3 schema cannot silently accept the
 	// former schedule action/command model.
-	Action      string         `yaml:"-"`
-	Command     string         `yaml:"-"`
-	Args        []string       `yaml:"-"`
-	WorkingDir  string         `yaml:"-"`
-	Concurrency string         `yaml:"-"`
-	Timeout     string         `yaml:"-"`
-	Retry       *ScheduleRetry `yaml:"-"`
+	Action      string     `yaml:"-"`
+	Command     string     `yaml:"-"`
+	Args        []string   `yaml:"-"`
+	WorkingDir  string     `yaml:"-"`
+	Concurrency string     `yaml:"-"`
+	Timeout     string     `yaml:"-"`
+	Retry       *TaskRetry `yaml:"-"`
 }
 
 type Task struct {
@@ -290,10 +286,6 @@ type TaskRetry struct {
 	Retries int    `yaml:"retries"`
 	Delay   string `yaml:"delay"`
 }
-
-// ScheduleRetry is retained as a source-compatibility alias for embedders;
-// v3 retry settings belong to Task.
-type ScheduleRetry = TaskRetry
 
 type Workflow struct {
 	Concurrency string                  `yaml:"concurrency"`
@@ -962,12 +954,6 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		})
 	}
 	return result, nil
-}
-
-// ProcessesEffective is retained as an internal compatibility alias for code
-// that has not yet migrated its terminology; it reads the services map.
-func (f File) ProcessesEffective(projectName string) ([]EffectiveProcess, error) {
-	return f.ServicesEffective(projectName)
 }
 
 func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, error) {

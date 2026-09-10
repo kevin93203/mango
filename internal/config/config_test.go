@@ -204,7 +204,7 @@ func TestLoadAndEffectiveProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := file.ProcessesEffective("demo")
+	items, err := file.ServicesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,9 +517,9 @@ func TestValidateRejectsInvalidTaskRetry(t *testing.T) {
 		retry TaskRetry
 		want  string
 	}{
-		{name: "negative retries", retry: ScheduleRetry{Retries: -1}, want: "retry.retries"},
-		{name: "invalid delay", retry: ScheduleRetry{Delay: "not-a-duration"}, want: "retry.delay"},
-		{name: "negative delay", retry: ScheduleRetry{Delay: "-1s"}, want: "non-negative"},
+		{name: "negative retries", retry: TaskRetry{Retries: -1}, want: "retry.retries"},
+		{name: "invalid delay", retry: TaskRetry{Delay: "not-a-duration"}, want: "retry.delay"},
+		{name: "negative delay", retry: TaskRetry{Delay: "-1s"}, want: "non-negative"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -550,7 +550,7 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 		},
 	}
 
-	processes, err := file.ProcessesEffective("demo")
+	processes, err := file.ServicesEffective("demo")
 	if err != nil {
 		t.Fatal(err)
 	}

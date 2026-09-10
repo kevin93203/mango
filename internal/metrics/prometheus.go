@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,4 +111,4 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return result
 }
 
-func (r *Registry) String() string { return fmt.Sprintf("%s", r.Prometheus()) }
+func (r *Registry) String() string { return r.Prometheus() }

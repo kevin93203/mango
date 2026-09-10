@@ -37,7 +37,7 @@ func TestScheduleOccurrenceIsStableAcrossRepeatedDispatchAndRestart(t *testing.T
 		ID: ScheduleOccurrenceID("demo", "minute", now.Add(-time.Minute)), Project: "demo", Schedule: "minute",
 		ScheduledAt: now.Add(-time.Minute), Status: StatusSuccess,
 	}
-	if _, _, err := repo.(ScheduleOccurrenceStore).ClaimScheduleOccurrence(context.Background(), previous); err != nil {
+	if _, _, err := repo.ClaimScheduleOccurrence(context.Background(), previous); err != nil {
 		t.Fatal(err)
 	}
 	first.executeDue(context.Background(), schedule, now)
@@ -51,14 +51,14 @@ func TestScheduleOccurrenceIsStableAcrossRepeatedDispatchAndRestart(t *testing.T
 		t.Fatalf("restart dispatch runs = %d, want no duplicate", runs.Load())
 	}
 	occurrenceID := ScheduleOccurrenceID("demo", "minute", time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC))
-	occurrence, err := repo.(ScheduleOccurrenceStore).GetScheduleOccurrence(context.Background(), occurrenceID)
+	occurrence, err := repo.GetScheduleOccurrence(context.Background(), occurrenceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if occurrence.Status != StatusSuccess || occurrence.RunID == "" {
 		t.Fatalf("occurrence = %+v, want completed occurrence with run id", occurrence)
 	}
-	events, err := repo.(ExecutionEventReader).ListExecutionEvents(context.Background(), occurrence.RunID)
+	events, err := repo.ListExecutionEvents(context.Background(), occurrence.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestScheduleCatchUpIsBounded(t *testing.T) {
 
 func TestScheduleMisfirePoliciesSkipOrRunOnce(t *testing.T) {
 	base := time.Date(2026, time.January, 2, 2, 0, 0, 0, time.UTC)
-	newScheduler := func(policy string) (*Scheduler, ScheduleOccurrenceStore, *atomic.Int32) {
+	newScheduler := func(policy string) (*Scheduler, HistoryRepository, *atomic.Int32) {
 		runs := &atomic.Int32{}
 		s := New(func(context.Context, config.EffectiveSchedule) ExecutionResult {
 			runs.Add(1)

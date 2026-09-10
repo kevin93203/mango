@@ -162,9 +162,6 @@ pub fn terminate(tree: &TreeHandle, _force: bool) -> io::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn drain_children() {}
-
 pub fn cleanup_tree(_tree: &TreeHandle) {}
 
 pub fn process_is_alive(pid: u32, _token: Option<&str>) -> bool {

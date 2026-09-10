@@ -20,7 +20,7 @@ func TestExecutionListDefaultsToActiveAndSeparatesTerminalRows(t *testing.T) {
 	}).Record(context.Background(), terminal, 0); err != nil {
 		t.Fatal(err)
 	}
-	lister := store.(ExecutionStore)
+	lister := store
 	activeRows, err := lister.ListExecutions(context.Background(), ExecutionQuery{})
 	if err != nil || len(activeRows) != 1 || activeRows[0].Record.RunID != "active" {
 		t.Fatalf("default execution list = %+v, err %v", activeRows, err)

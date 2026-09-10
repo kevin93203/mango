@@ -65,7 +65,6 @@ type Daemon struct {
 	secretResolver *secrets.Resolver
 	redactor       *secrets.Redactor
 	structuredLog  *logging.JSONLogger
-	events         *observability.Bus
 	httpServer     *http.Server
 	httpListener   net.Listener
 	scheduler      *scheduler.Scheduler
@@ -161,16 +160,10 @@ type restartCandidate struct {
 
 // Aliases preserve the daemon's internal implementation while keeping
 // client-facing data types in the dependency-free internal/api package.
-type ProcessInfo = api.ServiceInfo
-type ServiceInfo = api.ServiceInfo
 type DependencyStatus = api.DependencyStatus
 type HealthInfo = api.HealthInfo
 type HealthCheckInfo = api.HealthCheckInfo
 type HistoryDatabaseHealth = api.HistoryDatabaseHealth
-type ChildProcessInfo = api.ChildProcessInfo
-type ChildServiceInfo = api.ChildProcessInfo
-type ProcessListRow = api.ServiceListRow
-type ServiceListRow = api.ServiceListRow
 type ScheduleInfo = api.ScheduleInfo
 
 type logRequest struct {
@@ -238,7 +231,6 @@ func New(layout paths.Layout) *Daemon {
 		metrics:                 metrics.NewCollector(),
 		secretResolver:          secrets.NewResolver(),
 		redactor:                secrets.NewRedactor(),
-		events:                  observability.NewBus(),
 		projects:                map[string]*projectRuntime{},
 		configErrors:            map[string]string{},
 		disabledSchedules:       map[string]bool{},
@@ -252,10 +244,6 @@ func New(layout paths.Layout) *Daemon {
 	return d
 }
 
-type observabilityStore interface {
-	observability.Store
-}
-
 func (d *Daemon) appendEvent(ctx context.Context, event observability.Event) observability.Event {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
@@ -264,7 +252,7 @@ func (d *Daemon) appendEvent(ctx context.Context, event observability.Event) obs
 		event.Actor = observability.Actor(ctx)
 	}
 	d.mu.RLock()
-	store, _ := d.historyRepo.(observabilityStore)
+	store := d.historyRepo
 	retention := d.eventRetentionLimit
 	d.mu.RUnlock()
 	if store != nil {
@@ -272,13 +260,8 @@ func (d *Daemon) appendEvent(ctx context.Context, event observability.Event) obs
 			event = stored
 		}
 		if retention > 0 {
-			if pruner, ok := store.(observability.EventPruner); ok {
-				_ = pruner.PruneEvents(ctx, retention)
-			}
+			_ = store.PruneEvents(ctx, retention)
 		}
-	}
-	if d.events != nil {
-		d.events.Publish(event)
 	}
 	return event
 }
@@ -291,7 +274,7 @@ func (d *Daemon) appendAudit(ctx context.Context, entry observability.AuditEntry
 		entry.Actor = observability.Actor(ctx)
 	}
 	d.mu.RLock()
-	store, _ := d.historyRepo.(observabilityStore)
+	store := d.historyRepo
 	d.mu.RUnlock()
 	if store != nil {
 		_, _ = store.AppendAudit(ctx, entry)
@@ -303,7 +286,7 @@ func (d *Daemon) appendAudit(ctx context.Context, entry observability.AuditEntry
 
 func (d *Daemon) listEvents(ctx context.Context, query observability.EventQuery) ([]observability.Event, error) {
 	d.mu.RLock()
-	store, _ := d.historyRepo.(observabilityStore)
+	store := d.historyRepo
 	d.mu.RUnlock()
 	if store == nil {
 		return []observability.Event{}, nil
@@ -633,10 +616,6 @@ func (d *Daemon) stopAllServices(shutdownShims bool) {
 	}
 }
 
-type historyPinger interface {
-	Ping(context.Context) error
-}
-
 func (d *Daemon) historyDatabaseHealth(parent context.Context) api.HistoryDatabaseHealth {
 	d.mu.RLock()
 	result := d.historyDatabase
@@ -658,7 +637,9 @@ func (d *Daemon) historyDatabaseHealth(parent context.Context) api.HistoryDataba
 		}
 		return result
 	}
-	pinger, ok := repository.(historyPinger)
+	pinger, ok := repository.(interface {
+		Ping(context.Context) error
+	})
 	if !ok {
 		result.Status = "unknown"
 		result.ConnectionInfo.Status = result.Status
@@ -732,11 +713,6 @@ func historyDatabaseInfo(layout paths.Layout, database config.DatabaseConfig) ap
 		Schema:         api.HistorySchemaHealth{Status: "unknown"},
 		Migration:      api.HistoryMigrationHealth{Status: "unknown", TargetVersion: history.CurrentSchemaVersion()},
 	}
-}
-
-func openHistoryRepository(layout paths.Layout, database config.DatabaseConfig) (scheduler.HistoryRepository, error) {
-	repository, _, err := openHistoryRepositoryWithInfo(layout, database)
-	return repository, err
 }
 
 func openHistoryRepositoryWithInfo(layout paths.Layout, database config.DatabaseConfig) (scheduler.HistoryRepository, api.HistoryDatabaseHealth, error) {
@@ -1165,7 +1141,7 @@ func (d *Daemon) persistSecurityMetadata(project string, desired reconcile.Desir
 			Status: status.Overall})
 	}
 	d.mu.RLock()
-	store, _ := d.historyRepo.(observability.MetadataStore)
+	store := d.historyRepo
 	d.mu.RUnlock()
 	if store != nil {
 		if err := store.ReplaceSecurityMetadata(context.Background(), project, refs, policies); err != nil && d.structuredLog != nil {
@@ -2615,8 +2591,6 @@ func (d *Daemon) StartProcess(key string) error {
 	return d.startService(project, managed)
 }
 
-func (d *Daemon) StartService(key string) error { return d.StartProcess(key) }
-
 func (d *Daemon) StopProcess(key string, disable bool) error {
 	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
@@ -2642,8 +2616,6 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 	return d.stopManaged(managed)
 }
 
-func (d *Daemon) StopService(key string, disable bool) error { return d.StopProcess(key, disable) }
-
 func (d *Daemon) RestartProcess(key string) error {
 	project, name, err := d.resolveServiceRef(key)
 	if err != nil {
@@ -2664,8 +2636,6 @@ func (d *Daemon) RestartProcess(key string) error {
 	}
 	return nil
 }
-
-func (d *Daemon) RestartService(key string) error { return d.RestartProcess(key) }
 
 // BulkServiceOperation expands project targets and executes lifecycle actions
 // in dependency order. It deliberately operates only on the explicit target
@@ -2953,7 +2923,7 @@ func (d *Daemon) ClearLogs(key string) error {
 	return d.logs.Clear(project, name)
 }
 
-func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
+func (d *Daemon) ListProcesses(projectFilter string) []api.ServiceInfo {
 	d.mu.RLock()
 	items := make([]struct {
 		project        string
@@ -2973,11 +2943,11 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 		}
 	}
 	d.mu.RUnlock()
-	result := make([]ProcessInfo, 0, len(items))
+	result := make([]api.ServiceInfo, 0, len(items))
 	for _, item := range items {
 		managed := item.managed
 		d.mu.RLock()
-		info := ProcessInfo{
+		info := api.ServiceInfo{
 			ID: managed.id, Project: item.project, Name: managed.spec.Name, Supervisor: managed.spec.Supervisor, State: managed.state, Disabled: managed.disabled,
 			StartedAt: managed.startedAt, RestartCount: managed.restarts, LastExitCode: managed.lastExit,
 			LastError: managed.lastError, StdoutPath: managed.stdoutPath, StderrPath: managed.stderrPath,
@@ -3032,10 +3002,6 @@ func (d *Daemon) ListProcesses(projectFilter string) []ProcessInfo {
 	return result
 }
 
-func (d *Daemon) ListServices(projectFilter string) []ServiceInfo {
-	return d.ListProcesses(projectFilter)
-}
-
 func waitingDependencies(project *projectRuntime, managed *managedProcess) []DependencyStatus {
 	if project == nil || managed == nil || len(managed.spec.DependsOn) == 0 {
 		return nil
@@ -3064,10 +3030,10 @@ func waitingDependencies(project *projectRuntime, managed *managedProcess) []Dep
 	return result
 }
 
-func (d *Daemon) GetProcess(key string) (ProcessInfo, error) {
+func (d *Daemon) GetProcess(key string) (api.ServiceInfo, error) {
 	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
-		return ProcessInfo{}, err
+		return api.ServiceInfo{}, err
 	}
 	canonicalKey := project + "/" + name
 	for _, info := range d.ListProcesses("") {
@@ -3076,22 +3042,20 @@ func (d *Daemon) GetProcess(key string) (ProcessInfo, error) {
 			return info, nil
 		}
 	}
-	return ProcessInfo{}, fmt.Errorf("service %q not found", key)
+	return api.ServiceInfo{}, fmt.Errorf("service %q not found", key)
 }
 
-func (d *Daemon) GetService(key string) (ServiceInfo, error) { return d.GetProcess(key) }
-
-func childProcessInfos(snapshots []metrics.ProcessSnapshot) []ChildProcessInfo {
+func childProcessInfos(snapshots []metrics.ProcessSnapshot) []api.ChildProcessInfo {
 	if len(snapshots) == 0 {
 		return nil
 	}
-	result := make([]ChildProcessInfo, 0, len(snapshots))
+	result := make([]api.ChildProcessInfo, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		osState := snapshot.OSState
 		if osState == "" {
 			osState = snapshot.State
 		}
-		result = append(result, ChildProcessInfo{
+		result = append(result, api.ChildProcessInfo{
 			PID:           snapshot.PID,
 			ParentPID:     snapshot.ParentPID,
 			Depth:         snapshot.Depth,
@@ -3133,56 +3097,6 @@ func aggregatePorts(snapshot metrics.ProcessSnapshot) []string {
 	visit(snapshot)
 	sort.Strings(result)
 	return result
-}
-
-func FlattenProcessList(items []ProcessInfo) []ProcessListRow {
-	rows := make([]ProcessListRow, 0, len(items))
-	for parentIndex, item := range items {
-		rows = append(rows, ProcessListRow{
-			ParentIndex:   parentIndex,
-			Managed:       true,
-			ID:            item.ID,
-			Project:       item.Project,
-			Service:       item.Project + "/" + item.Name,
-			Supervisor:    item.Supervisor,
-			Process:       item.ProcessName,
-			Name:          item.Name,
-			Depth:         0,
-			PID:           item.PID,
-			Ports:         item.Ports,
-			State:         item.State,
-			Health:        healthDisplay(item.Health),
-			OSState:       item.OSState,
-			CPUPercent:    item.CPUPercent,
-			RSSBytes:      item.RSSBytes,
-			MemoryPercent: item.MemoryPercent,
-			RestartCount:  item.RestartCount,
-		})
-		appendChildProcessRows(&rows, parentIndex, item.Project, item.Children)
-	}
-	return rows
-}
-
-func FlattenServiceList(items []ServiceInfo) []ServiceListRow { return FlattenProcessList(items) }
-
-func appendChildProcessRows(rows *[]ProcessListRow, parentIndex int, project string, children []ChildProcessInfo) {
-	for _, child := range children {
-		*rows = append(*rows, ProcessListRow{
-			ParentIndex:   parentIndex,
-			Project:       project,
-			Process:       child.Name,
-			Name:          child.Name,
-			Depth:         child.Depth,
-			PID:           child.PID,
-			Ports:         child.Ports,
-			State:         "",
-			OSState:       child.OSState,
-			CPUPercent:    child.CPUPercent,
-			RSSBytes:      child.RSSBytes,
-			MemoryPercent: child.MemoryPercent,
-		})
-		appendChildProcessRows(rows, parentIndex, project, child.Children)
-	}
 }
 
 func (d *Daemon) resolveServiceRef(ref string) (string, string, error) {
@@ -3604,7 +3518,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			return failure(request, "BAD_PARAMS", err)
 		}
 		d.mu.RLock()
-		store, _ := d.historyRepo.(observabilityStore)
+		store := d.historyRepo
 		d.mu.RUnlock()
 		if store == nil {
 			return success(request, []observability.AuditEntry{})
@@ -5053,14 +4967,7 @@ func StateDisabledIf(disabled bool) string {
 	return StateStopped
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func sortProcessInfo(items []ProcessInfo) {
+func sortProcessInfo(items []api.ServiceInfo) {
 	sort.Slice(items, func(i, j int) bool {
 		left := items[i].Project + "/" + items[i].Name
 		right := items[j].Project + "/" + items[j].Name

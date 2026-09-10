@@ -265,10 +265,6 @@ type ServiceListRow struct {
 	RestartCount  int
 }
 
-// ProcessListRow is kept as an internal source-compatibility alias. New
-// clients should use ServiceListRow.
-type ProcessListRow = ServiceListRow
-
 type ScheduleInfo struct {
 	Project         string
 	Name            string

@@ -389,10 +389,3 @@ func stripANSI(value string) string {
 	}
 	return builder.String()
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

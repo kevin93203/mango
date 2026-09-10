@@ -400,7 +400,7 @@ func TestOpenHistoryRepositoryDefaultsToSQLiteAndIgnoresLegacyJSON(t *testing.T)
 		t.Fatal(err)
 	}
 
-	repository, err := openHistoryRepository(layout, config.DatabaseConfig{})
+	repository, _, err := openHistoryRepositoryWithInfo(layout, config.DatabaseConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestOpenHistoryRepositoryDefaultsToSQLiteAndIgnoresLegacyJSON(t *testing.T)
 func TestOpenHistoryRepositoryResolvesRelativeSQLitePath(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
-	repository, err := openHistoryRepository(layout, config.DatabaseConfig{Driver: "sqlite", Path: "custom/history.db"})
+	repository, _, err := openHistoryRepositoryWithInfo(layout, config.DatabaseConfig{Driver: "sqlite", Path: "custom/history.db"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestOpenHistoryRepositoryResolvesRelativeSQLitePath(t *testing.T) {
 }
 
 func TestOpenHistoryRepositoryRequiresConfiguredDSN(t *testing.T) {
-	_, err := openHistoryRepository(testLayout(t.TempDir()), config.DatabaseConfig{Driver: "postgres", DSNEnv: "MANGO_TEST_MISSING_DSN"})
+	_, _, err := openHistoryRepositoryWithInfo(testLayout(t.TempDir()), config.DatabaseConfig{Driver: "postgres", DSNEnv: "MANGO_TEST_MISSING_DSN"})
 	if err == nil || !strings.Contains(err.Error(), "environment variable") {
 		t.Fatalf("error = %v, want missing DSN environment error", err)
 	}
@@ -1703,46 +1703,6 @@ func TestProcessIDsResetOnDaemonStart(t *testing.T) {
 	}
 }
 
-func TestFlattenProcessListPreservesHierarchyAndParentIndex(t *testing.T) {
-	items := []ProcessInfo{{
-		ID:          0,
-		Project:     "demo",
-		Name:        "api",
-		ProcessName: "api.exe",
-		PID:         100,
-		Children: []ChildProcessInfo{{
-			PID: 200, ParentPID: 100, Depth: 1, Name: "worker",
-			Children: []ChildProcessInfo{{PID: 300, ParentPID: 200, Depth: 2, Name: "helper"}},
-		}},
-	}}
-
-	rows := FlattenProcessList(items)
-	if len(rows) != 3 {
-		t.Fatalf("flattened rows = %d, want 3", len(rows))
-	}
-	if !rows[0].Managed || rows[0].ID != 0 || rows[0].ParentIndex != 0 || rows[0].Depth != 0 || rows[0].Service != "demo/api" || rows[0].Process != "api.exe" {
-		t.Fatalf("parent row = %+v", rows[0])
-	}
-	if rows[1].Managed || rows[1].PID != 200 || rows[1].ParentIndex != 0 || rows[1].Depth != 1 || rows[1].Service != "" || rows[1].Process != "worker" {
-		t.Fatalf("child row = %+v", rows[1])
-	}
-	if rows[2].Managed || rows[2].PID != 300 || rows[2].ParentIndex != 0 || rows[2].Depth != 2 || rows[2].Service != "" || rows[2].Process != "helper" {
-		t.Fatalf("grandchild row = %+v", rows[2])
-	}
-
-	encoded, err := json.Marshal(items)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var data []map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &data); err != nil {
-		t.Fatal(err)
-	}
-	if len(data) != 1 || data[0]["Children"] == nil {
-		t.Fatalf("JSON = %s, want nested Children", encoded)
-	}
-}
-
 func TestChildProcessInfosCopiesSnapshotMetrics(t *testing.T) {
 	children := childProcessInfos([]metrics.ProcessSnapshot{{
 		PID: 200, ParentPID: 100, Depth: 1, Name: "worker", CommandLine: "worker --serve",
@@ -1765,9 +1725,9 @@ func TestChildProcessInfosCopiesSnapshotMetrics(t *testing.T) {
 }
 
 func TestProcessJSONSeparatesHealthAndOSState(t *testing.T) {
-	items := []ProcessInfo{{
+	items := []api.ServiceInfo{{
 		Project: "demo", Name: "api", State: StateRunning, OSState: "sleeping",
-		Children: []ChildProcessInfo{{PID: 200, OSState: "sleeping"}},
+		Children: []api.ChildProcessInfo{{PID: 200, OSState: "sleeping"}},
 	}}
 	encoded, err := json.Marshal(items[0])
 	if err != nil {
@@ -1854,7 +1814,7 @@ services:
 		t.Fatal(err)
 	}
 	defer d.removeProject("demo")
-	var items []ProcessInfo
+	var items []api.ServiceInfo
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		items = d.ListProcesses("demo")
@@ -2188,7 +2148,7 @@ func yamlSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-func assertProcessID(t *testing.T, items []ProcessInfo, key string, want int) {
+func assertProcessID(t *testing.T, items []api.ServiceInfo, key string, want int) {
 	t.Helper()
 	for _, item := range items {
 		if item.Project+"/"+item.Name == key {

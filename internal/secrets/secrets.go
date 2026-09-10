@@ -69,15 +69,7 @@ func Parse(value string) (Reference, error) {
 	return ref, nil
 }
 
-type Provider interface {
-	Name() string
-	Resolve(context.Context, string) (string, error)
-}
-
-type envProvider struct{}
-
-func (envProvider) Name() string { return "from_env" }
-func (envProvider) Resolve(_ context.Context, name string) (string, error) {
+func resolveEnv(name string) (string, error) {
 	if !envNamePattern.MatchString(name) {
 		return "", fmt.Errorf("environment secret name %q is invalid", name)
 	}
@@ -88,10 +80,7 @@ func (envProvider) Resolve(_ context.Context, name string) (string, error) {
 	return value, nil
 }
 
-type fileProvider struct{}
-
-func (fileProvider) Name() string { return "from_file" }
-func (fileProvider) Resolve(ctx context.Context, name string) (string, error) {
+func resolveFile(ctx context.Context, name string) (string, error) {
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -108,41 +97,26 @@ func (fileProvider) Resolve(ctx context.Context, name string) (string, error) {
 	return value, nil
 }
 
-type Resolver struct {
-	mu        sync.RWMutex
-	providers map[string]Provider
-}
+type Resolver struct{}
 
-func NewResolver() *Resolver {
-	r := &Resolver{providers: map[string]Provider{}}
-	r.Register(envProvider{})
-	r.Register(fileProvider{})
-	return r
-}
-
-func (r *Resolver) Register(provider Provider) {
-	if provider == nil || provider.Name() == "" {
-		return
-	}
-	r.mu.Lock()
-	if r.providers == nil {
-		r.providers = map[string]Provider{}
-	}
-	r.providers[provider.Name()] = provider
-	r.mu.Unlock()
-}
+func NewResolver() *Resolver { return &Resolver{} }
 
 func (r *Resolver) Resolve(ctx context.Context, ref Reference) (string, error) {
 	if err := ref.Validate(); err != nil {
 		return "", err
 	}
-	r.mu.RLock()
-	provider := r.providers[ref.Provider]
-	r.mu.RUnlock()
-	if provider == nil {
-		return "", fmt.Errorf("secret provider %q is not registered", ref.Provider)
+	var (
+		value string
+		err   error
+	)
+	switch ref.Provider {
+	case "from_env":
+		value, err = resolveEnv(ref.Name)
+	case "from_file":
+		value, err = resolveFile(ctx, ref.Name)
+	default:
+		return "", fmt.Errorf("unsupported secret provider %q", ref.Provider)
 	}
-	value, err := provider.Resolve(ctx, ref.Name)
 	if err != nil {
 		return "", err
 	}

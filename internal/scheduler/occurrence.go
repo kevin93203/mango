@@ -46,10 +46,10 @@ func (s *Scheduler) now() time.Time {
 	return clock()
 }
 
-func (s *Scheduler) occurrenceStoreSnapshot() ScheduleOccurrenceStore {
+func (s *Scheduler) occurrenceStoreSnapshot() HistoryRepository {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.occurrenceStore
+	return s.historyRepo
 }
 
 func (s *Scheduler) scheduleDueTimes(ctx context.Context, schedule config.EffectiveSchedule, now time.Time) ([]time.Time, error) {
@@ -59,7 +59,7 @@ func (s *Scheduler) scheduleDueTimes(ctx context.Context, schedule config.Effect
 func (s *Scheduler) scheduleDueTimesMode(ctx context.Context, schedule config.EffectiveSchedule, now time.Time, includeCurrent bool) ([]time.Time, error) {
 	s.mu.Lock()
 	parser := s.parser
-	reader := s.occurrenceStore
+	reader := s.historyRepo
 	s.mu.Unlock()
 	if reader == nil {
 		return []time.Time{now}, nil

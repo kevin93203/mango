@@ -1,8 +1,7 @@
 use crate::protocol::{PROTOCOL_VERSION, Request, Response, failure};
-use serde::Serialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
 
 #[cfg(unix)]
 mod unix;
@@ -16,7 +15,7 @@ pub use windows::serve;
 
 pub type Handler = dyn Fn(&Request) -> Response<Value> + Send + Sync + 'static;
 
-pub fn handle_connection<S: ReadWrite>(mut stream: S, handler: &Arc<Handler>) {
+pub fn handle_connection<S: Read + Write + Send + 'static>(mut stream: S, handler: &Arc<Handler>) {
     let mut line = String::new();
     let mut reader = BufReader::new(&mut stream);
     let result = reader.read_line(&mut line);
@@ -58,12 +57,3 @@ pub fn handle_connection<S: ReadWrite>(mut stream: S, handler: &Arc<Handler>) {
     let _ = stream.write_all(b"\n");
     let _ = stream.flush();
 }
-
-pub trait ReadWrite: std::io::Read + Write + Send + 'static {}
-impl<T: std::io::Read + Write + Send + 'static> ReadWrite for T {}
-
-#[allow(dead_code)]
-fn _keep_serialize_bound<T: Serialize>(_value: &T) {}
-
-#[allow(dead_code)]
-fn _keep_atomic_bound(_value: &Arc<AtomicBool>) {}
