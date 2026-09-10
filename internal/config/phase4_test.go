@@ -8,7 +8,7 @@ import (
 
 func TestSecretEnvironmentAndResourcePolicyDecode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mango.yaml")
-	data := []byte(`version: 3
+	data := []byte(`version: 4
 services:
   worker:
     command: worker

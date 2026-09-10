@@ -32,14 +32,13 @@ func TestDaemonReattachesRustShimAfterControlPlaneShutdown(t *testing.T) {
 	fixture := testfixture.Build(t)
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "mango.yaml")
-	configData := []byte(fmt.Sprintf(`version: 3
+	configData := []byte(fmt.Sprintf(`version: 4
 
 defaults:
-  supervisor: shim
-
 services:
   api:
     command: %s
+    supervisor: shim
     args: [--mode, sleep, --duration, 60s]
     autostart: true
     restart: never

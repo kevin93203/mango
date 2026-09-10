@@ -104,7 +104,7 @@ func TestHealthReportsConfigErrorsAsDegraded(t *testing.T) {
 		LockPath:   filepath.Join(root, "runtime", "daemon.lock"),
 	}
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"demo": {
 				Name:       "demo",
@@ -603,7 +603,7 @@ func TestScheduleRunTimeoutForceStopsAndRetries(t *testing.T) {
 	}
 }
 
-func TestV3TaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
+func TestTaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
 	root := t.TempDir()
 	fixture := testfixture.Build(t)
 	d := New(testLayout(root))
@@ -631,13 +631,13 @@ func TestV3TaskTimeoutUsesIndependentRetryAttempts(t *testing.T) {
 	}
 }
 
-func TestV3SchedulesTriggerTasksAndWorkflows(t *testing.T) {
+func TestSchedulesTriggerTasksAndWorkflows(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "demo.yaml")
 	fixture := testfixture.Build(t)
 	taskSpec := fmt.Sprintf("    command: %s\n    args: [--mode, sleep, --duration, 100ms]", yamlSingleQuote(fixture))
-	content := fmt.Sprintf(`version: 3
+	content := fmt.Sprintf(`version: 4
 
 tasks:
   extract:
@@ -645,19 +645,17 @@ tasks:
 
 workflows:
   pipeline:
-    tasks:
+    steps:
       extract:
-        uses: extract
+        task: extract
 
 schedules:
   - name: direct-task
     cron: "* * * * *"
-    target_type: task
-    target: extract
+    run: task/extract
   - name: pipeline-run
     cron: "* * * * *"
-    target_type: workflow
-    target: pipeline
+    run: workflow/pipeline
 
 `, taskSpec)
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
@@ -862,7 +860,7 @@ func TestScheduleApplyPrunesRemovedScheduleState(t *testing.T) {
 	configPath := filepath.Join(root, "demo.yaml")
 	writeTestScheduleConfig(t, configPath, "nightly")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 		},
@@ -1412,7 +1410,7 @@ func TestProcessIDsAreStableGloballyAndResolveFromCLIReferences(t *testing.T) {
 	writeTestConfig(t, alphaPath, "api")
 	writeTestConfig(t, betaPath, "worker")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"beta":  {Name: "beta", ConfigPath: betaPath, Enabled: true},
 			"alpha": {Name: "alpha", ConfigPath: alphaPath, Enabled: true},
@@ -1572,7 +1570,7 @@ func TestPlanBulkServicesExpandsProjectsInDependencyOrderAndDeduplicates(t *test
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "alpha.yaml")
-	content := `version: 3
+	content := `version: 4
 
 services:
   db:
@@ -1593,7 +1591,7 @@ services:
 		t.Fatal(err)
 	}
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
 		},
@@ -1622,7 +1620,7 @@ func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	configPath := filepath.Join(root, "alpha.yaml")
 	writeTestConfig(t, configPath, "api", "worker")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
 		},
@@ -1776,7 +1774,7 @@ func TestHealthDependencyStartsDependentAfterHealthy(t *testing.T) {
 	serviceCommand := yamlSingleQuote(fixture)
 	serviceArgs := `[--mode, sleep, --duration, 2s]`
 	healthTest := fmt.Sprintf("[CMD, %s, --mode, file-exists, --path, %s]", serviceCommand, yamlSingleQuote(readyPath))
-	content := fmt.Sprintf(`version: 3
+	content := fmt.Sprintf(`version: 4
 
 defaults:
   working_dir: .
@@ -1864,15 +1862,15 @@ func TestShimHealthTransitionsToHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := testfixture.Build(t)
-	content := fmt.Sprintf(`version: 3
+	content := fmt.Sprintf(`version: 4
 
 defaults:
   working_dir: %s
-  supervisor: shim
 
 services:
   api:
     command: %s
+    supervisor: shim
     args: [--mode, sleep, --duration, 60s]
     autostart: true
     restart: never
@@ -1944,7 +1942,7 @@ func TestConfigChangePropagatesExplicitDependencyRestart(t *testing.T) {
 		return fmt.Sprintf(`[--mode, sleep, --duration, %ss]`, argument)
 	}
 	writeDependentConfig := func(argument string) {
-		content := fmt.Sprintf(`version: 3
+		content := fmt.Sprintf(`version: 4
 
 services:
   db:
@@ -2015,7 +2013,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 	configPath := filepath.Join(root, "demo.yaml")
 	writeTestScheduleConfig(t, configPath, "nightly-job")
 	if err := registry.Save(layout.Registry, registry.File{
-		Version: 3,
+		Version: 4,
 		Projects: map[string]registry.Project{
 			"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
 		},
@@ -2110,7 +2108,7 @@ func testLayout(root string) paths.Layout {
 }
 
 func writeTestConfig(t *testing.T, path string, processNames ...string) {
-	lines := []string{"version: 3", "", "services:"}
+	lines := []string{"version: 4", "", "services:"}
 	for _, processName := range processNames {
 		lines = append(lines,
 			fmt.Sprintf("  %s:", processName),
@@ -2126,7 +2124,7 @@ func writeTestConfig(t *testing.T, path string, processNames ...string) {
 
 func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 	content := strings.Join([]string{
-		"version: 3",
+		"version: 4",
 		"",
 		"tasks:",
 		"  nightly-task:",
@@ -2135,8 +2133,7 @@ func writeTestScheduleConfig(t *testing.T, path, scheduleName string) {
 		"schedules:",
 		fmt.Sprintf("  - name: %s", scheduleName),
 		`    cron: "* * * * *"`,
-		"    target_type: task",
-		"    target: nightly-task",
+		"    run: task/nightly-task",
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

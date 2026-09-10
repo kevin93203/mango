@@ -398,6 +398,228 @@ func startDaemon(layout paths.Layout) error {
 	return nil
 }
 
+type composeProjectOptions struct {
+	Project string
+	File    string
+}
+
+func composeConfigPath(value string) (string, error) {
+	if value == "" {
+		value = "mango.yaml"
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve config path: %w", err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func sameConfigPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func upCommand(layout paths.Layout, options composeProjectOptions) error {
+	if err := rejectJSON("up"); err != nil {
+		return err
+	}
+	path, err := composeConfigPath(options.File)
+	if err != nil {
+		return err
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	projectName, err := config.ResolveProjectName(loaded, options.Project)
+	if err != nil {
+		return err
+	}
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return err
+	}
+	if existing, ok := reg.Projects[projectName]; ok {
+		if !sameConfigPath(existing.ConfigPath, loaded.Path) {
+			return fmt.Errorf("project %q is already registered to %s; use another --project name", projectName, existing.ConfigPath)
+		}
+		existing.Name = projectName
+		existing.ConfigPath = loaded.Path
+		existing.ConfigVersion = loaded.Version
+		existing.Enabled = true
+		reg.Projects[projectName] = existing
+	}
+	if err := startDaemon(layout); err != nil {
+		return err
+	}
+	if _, ok := reg.Projects[projectName]; !ok {
+		reg.Projects[projectName] = registry.Project{
+			Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
+		}
+	}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		return err
+	}
+	if _, err := call("project.reload", nil); err != nil {
+		return err
+	}
+	response, err := call("config.apply", struct{ Project string }{projectName})
+	if err != nil {
+		return err
+	}
+	var result api.ApplyResult
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	status, err := waitForProjectGenerationWithTimeout(projectName, result.Generation, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	if len(loaded.Schedules) > 0 {
+		if err := setProjectSchedules(projectName, "enable"); err != nil {
+			return err
+		}
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s is ready at generation %d", projectName, status.Generation)))
+	return nil
+}
+
+func resolveRegisteredComposeTarget(layout paths.Layout, options composeProjectOptions) (string, registry.Project, bool, error) {
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return "", registry.Project{}, false, err
+	}
+	path, err := composeConfigPath(options.File)
+	if err != nil {
+		return "", registry.Project{}, false, err
+	}
+	if options.Project != "" {
+		if err := config.ValidateProjectName(options.Project); err != nil {
+			return "", registry.Project{}, false, err
+		}
+		project, ok := reg.Projects[options.Project]
+		if ok && options.File != "" && !sameConfigPath(project.ConfigPath, path) {
+			return "", registry.Project{}, false, fmt.Errorf("project %q is registered to %s, not %s", options.Project, project.ConfigPath, path)
+		}
+		return options.Project, project, ok, nil
+	}
+	for name, project := range reg.Projects {
+		if sameConfigPath(project.ConfigPath, path) {
+			return name, project, true, nil
+		}
+	}
+	if loaded, loadErr := config.Load(path); loadErr == nil {
+		name, nameErr := config.ResolveProjectName(loaded, "")
+		if nameErr != nil {
+			return "", registry.Project{}, false, nameErr
+		}
+		project, ok := reg.Projects[name]
+		return name, project, ok, nil
+	}
+	name, nameErr := config.ResolveProjectName(config.File{Path: path}, "")
+	if nameErr != nil {
+		return "", registry.Project{}, false, nameErr
+	}
+	project, ok := reg.Projects[name]
+	return name, project, ok, nil
+}
+
+func downCommand(layout paths.Layout, options composeProjectOptions) error {
+	if err := rejectJSON("down"); err != nil {
+		return err
+	}
+	name, _, registered, err := resolveRegisteredComposeTarget(layout, options)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleMuted, fmt.Sprintf("Project %s is not registered; nothing to stop", name)))
+		return nil
+	}
+	// These calls are best-effort. Registry reload below is authoritative and
+	// also stops any process left after an individual operation fails.
+	_, _ = callWithTimeout("service.bulk", struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}{Action: "stop", Targets: []string{name}}, processOperationTimeout)
+	_, _ = callWithTimeout("schedule.bulk", struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}{Action: "disable", Targets: []string{name}}, processOperationTimeout)
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		return err
+	}
+	current, ok := reg.Projects[name]
+	if !ok {
+		return nil
+	}
+	current.Enabled = false
+	reg.Projects[name] = current
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		return err
+	}
+	if _, reloadErr := call("project.reload", nil); reloadErr != nil && !errors.Is(reloadErr, ipc.ErrDaemonUnavailable) {
+		return reloadErr
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s stopped and disabled", name)))
+	return nil
+}
+
+func psCommand(layout paths.Layout, options composeProjectOptions) error {
+	name := ""
+	if options.Project != "" || options.File != "" {
+		resolved, _, _, err := resolveRegisteredComposeTarget(layout, options)
+		if err != nil {
+			return err
+		}
+		name = resolved
+	}
+	response, err := call("service.ls", struct{ Project string }{name})
+	if err != nil {
+		return err
+	}
+	var items []api.ServiceInfo
+	if err := decodeData(response.Data, &items); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(items)
+	}
+	printServiceTable(items)
+	return nil
+}
+
+func setProjectSchedules(project, action string) error {
+	response, err := callWithTimeout("schedule.bulk", struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+	}{Action: action, Targets: []string{project}}, processOperationTimeout)
+	if err != nil {
+		return err
+	}
+	var results []api.ScheduleOperationResult
+	if err := decodeData(response.Data, &results); err != nil {
+		return err
+	}
+	for _, result := range results {
+		if result.Status != "ok" {
+			if result.Error == "" {
+				return fmt.Errorf("schedule %s %s failed", action, result.Key)
+			}
+			return fmt.Errorf("schedule %s %s failed: %s", action, result.Key, result.Error)
+		}
+	}
+	return nil
+}
+
 func waitForDaemon(layout paths.Layout) (ipc.Response, error) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -736,6 +958,44 @@ func waitForProjectGeneration(project string, generation uint64) (api.ProjectSta
 		case <-cliCommandContext.Done():
 			timer.Stop()
 			return api.ProjectStatus{}, fmt.Errorf("wait for project %s cancelled", project)
+		case <-timer.C:
+		}
+	}
+}
+
+func waitForProjectGenerationWithTimeout(project string, generation uint64, timeout time.Duration) (api.ProjectStatus, error) {
+	if timeout <= 0 {
+		return api.ProjectStatus{}, errors.New("project readiness timeout must be positive")
+	}
+	ctx, cancel := context.WithTimeout(cliCommandContext, timeout)
+	defer cancel()
+	for {
+		pollContext, pollCancel := context.WithTimeout(ctx, 5*time.Second)
+		response, err := callWithContext(pollContext, "project.status", struct {
+			Project string `json:"project"`
+		}{Project: project})
+		pollCancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return api.ProjectStatus{}, fmt.Errorf("project %s did not become ready within %s; background reconciliation continues", project, timeout)
+			}
+			return api.ProjectStatus{}, err
+		}
+		var status api.ProjectStatus
+		if err := decodeData(response.Data, &status); err != nil {
+			return api.ProjectStatus{}, err
+		}
+		if status.Generation != generation {
+			return api.ProjectStatus{}, fmt.Errorf("project %s generation %d was superseded by generation %d", project, generation, status.Generation)
+		}
+		if status.Ready && status.Phase == api.ProjectPhaseReady {
+			return status, nil
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return api.ProjectStatus{}, fmt.Errorf("project %s did not become ready within %s; background reconciliation continues", project, timeout)
 		case <-timer.C:
 		}
 	}

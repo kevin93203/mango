@@ -141,10 +141,13 @@ func TestInitCommandCreatesDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated config is invalid: %v", err)
 	}
-	for _, service := range []string{"api-single", "api-supervisor", "one-task"} {
+	for _, service := range []string{"api"} {
 		if _, ok := loaded.Services[service]; !ok {
 			t.Fatalf("generated config is missing service %q", service)
 		}
+	}
+	if _, ok := loaded.Tasks["backup"]; !ok {
+		t.Fatal("generated config is missing task backup")
 	}
 	for _, relative := range []string{
 		"examples/api/main.go",
@@ -1730,7 +1733,7 @@ func TestUnifiedHistoryTaskAttemptsTextOutput(t *testing.T) {
 func writeCLIConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "demo.yaml")
-	content := "version: 3\n\nservices:\n  api:\n    command: mango-test-fixture\n"
+	content := "version: 4\n\nservices:\n  api:\n    command: mango-test-fixture\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,7 @@ shell-based process definition.
 - [Platform behavior](#platform-behavior)
 - [Security and observability](#security-and-observability)
 - [Release, migration, and rollback](#release-migration-and-rollback)
+- [YAML v4 migration](docs/migration-v4.md)
 - [Development](#development)
 
 ## What Mango provides
@@ -74,14 +75,15 @@ Mango has a small client/daemon architecture:
 - Each `MANGO_HOME` is one daemon instance. `mangod` takes an OS-level lock at
   `MANGO_HOME/runtime/daemon.lock`; different `MANGO_HOME` values can run in
   parallel.
-- A project is a name registered to a YAML configuration file. The project
-  name is stored in Mango's registry; it is not written inside the YAML file.
+- A project is a name attached to one YAML configuration file. Use the YAML
+  `name`, or let Mango derive it from the directory name; `--project` can
+  explicitly override it.
 
 The main implementation areas are organized under `internal/`:
 
 | Package | Responsibility |
 | --- | --- |
-| `config` | YAML v3 loading, validation, and default resolution |
+| `config` | YAML v4 loading, validation, and default resolution |
 | `daemon` | Project reconciliation, IPC handling, and service supervision |
 | `mango-shim/` | Rust per-service process-tree supervision, restart, logs, and durable state |
 | `process` | Cross-platform process and process-tree control |
@@ -95,8 +97,8 @@ The main implementation areas are organized under `internal/`:
 - Stable Rust toolchain for building `mango-shim`.
 - Windows 10/11, Linux, or macOS.
 - The executables referenced by your configuration must be available on the
-  host. The canonical examples use the Go toolchain, and the sample HTTP
-  healthchecks also require `curl`.
+  host. The canonical examples use the Go toolchain, and native HTTP
+  healthchecks do not require an external probe executable.
 
 ## Quick start
 
@@ -122,65 +124,62 @@ cargo build --release --manifest-path mango-shim/Cargo.toml
 Copy-Item mango-shim/target/release/mango-shim.exe bin/mango-shim.exe
 ```
 
-Start the daemon in one terminal:
-
-```sh
-./bin/mangod run
-```
-
-In Windows PowerShell, use `.\bin\mangod.exe run` and replace
-`./bin/mango` in the examples below with `.\bin\mango.exe`.
-
-In another terminal, generate, validate, register, and apply the example project:
+Generate and start the example project. `mango up` starts or connects to the
+daemon, registers the YAML, applies it, and waits for services to become ready:
 
 ```sh
 ./bin/mango init
-./bin/mango config validate mango.yaml
-./bin/mango project add demo mango.yaml
-./bin/mango project apply demo
-./bin/mango ls
+./bin/mango up
+./bin/mango ps
+./bin/mango down
 ```
+
+In Windows PowerShell, replace `./bin/mango` with `.\bin\mango.exe`.
+The default file is `./mango.yaml`; use `--file PATH` for another file and
+`--project NAME` to override the project name.
 
 Inspect the sample service and its logs:
 
 ```sh
-./bin/mango status demo/api-single
-./bin/mango logs demo/api-single --stream all --tail 50
-./bin/mango logs demo/api-single --follow
+./bin/mango status demo/api
+./bin/mango logs demo/api --stream all --tail 50
+./bin/mango logs demo/api --follow
 ```
 
 To run the daemon in the background, use `mango daemon start`. This command
 expects `mangod` next to `mango` or somewhere on `PATH`.
 
-The example configuration contains services, tasks, workflows, schedules,
-health checks, retries, timeouts, and dependency examples. See
+The starter configuration contains one service, one task, one schedule, and a
+single healthcheck. See
 [`mango.example.yaml`](mango.example.yaml) and
 [`examples/tasks/README.md`](examples/tasks/README.md) for guided examples.
+The advanced schema example is [`docs/advanced-example.yaml`](docs/advanced-example.yaml).
 The canonical examples use Go source files and are intended to run on
-Windows, macOS, and Linux. The HTTP healthchecks use `curl`, which must be
-available on the host.
+Windows, macOS, and Linux. The starter HTTP healthcheck is native and does
+not require `curl`.
 
 ## Configuration
 
-Mango configuration files use YAML schema version 3. Only `.yaml` files are
+Mango configuration files use YAML schema version 4. Only `.yaml` files are
 supported:
 
 ```yaml
-version: 3
+version: 4
+name: demo
 
 defaults:
-  supervisor: legacy
+  working_dir: .
   restart: on-failure
-  stop_timeout: 10s
+  environment:
+    APP_ENV: development
 
 services:
   api:
     command: go
     args: [run, ./examples/api/main.go, --port, "8080"]
     autostart: true
-    restart: always
     healthcheck:
-      test: [CMD, curl, -f, "http://127.0.0.1:8080/"]
+      test: [HTTP, http://127.0.0.1:8080/]
 
 tasks:
   cleanup:
@@ -193,17 +192,36 @@ tasks:
 workflows:
   nightly:
     concurrency: forbid
-    tasks:
+    steps:
       clean:
-        uses: cleanup
+        task: cleanup
 
 schedules:
   - name: nightly
     cron: "0 2 * * *"
     timezone: Asia/Taipei
-    target_type: workflow
-    target: nightly
+    run: workflow/nightly
 ```
+
+### Compose-like project lifecycle
+
+```text
+mango up [--project NAME] [--file PATH]
+mango ps [--project NAME] [--file PATH]
+mango down [--project NAME] [--file PATH]
+```
+
+With no `--file`, Mango reads `./mango.yaml`. Project resolution is
+`--project`, then YAML `name`, then the YAML directory name. `up` registers or
+updates the project, applies the configuration, enables schedules, starts
+autostart services, and waits up to 60 seconds for readiness. A readiness
+timeout returns a non-zero status while background reconciliation continues.
+
+`down` stops services, disables schedules, and marks the project disabled. It
+does not delete YAML, registry data, generations, logs, or execution history.
+It can use a registered project with `--project` even when the YAML is
+currently invalid. `ps` shows the compact service state table; `ls` remains an
+alias.
 
 ### Services
 
@@ -230,7 +248,7 @@ set to `restart` or `stop`.
 ### Tasks
 
 Tasks are one-off command executions. They support their own working directory,
-environment (`env`), timeout, retry policy, and concurrency mode:
+environment (`environment`), timeout, retry policy, and concurrency mode:
 
 - `forbid` prevents overlapping runs of the same task.
 - `allow` permits overlapping runs.
@@ -351,6 +369,9 @@ YAML alone does not change running or restored services.
 ### Services
 
 ```sh
+mango up [--project NAME] [--file PATH]
+mango ps [--project NAME] [--file PATH]
+mango down [--project NAME] [--file PATH]
 mango ls
 mango status PROJECT/SERVICE
 mango start PROJECT/SERVICE
@@ -425,7 +446,8 @@ mango config validate ./mango.yaml
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `version` | integer | yes | Must be `3`. |
+| `version` | integer | yes | Must be `4`. |
+| `name` | string | no | Project name. Overridden by `--project`; otherwise derived from the YAML directory. |
 | `defaults` | mapping | no | Defaults shared by services and tasks. |
 | `services` | mapping | no | Long-running processes keyed by service name. |
 | `tasks` | mapping | no | One-off commands keyed by task name. |
@@ -439,36 +461,21 @@ mango config validate ./mango.yaml
 defaults:
   working_dir: .
   restart: on-failure
-  stop_timeout: 10s
-  log_max_size: 100MiB
-  log_max_files: 10
-  metrics_interval: 1s
-  max_restarts: 10
-  restart_window: 5m
-  stable_after: 1m
-  inherit_env: true
+  environment:
+    APP_ENV: development
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `working_dir` | string | `.` | Base working directory for services and tasks. Relative paths are resolved from the YAML file directory. |
-| `supervisor` | string | `legacy` | Service supervisor: `legacy` or `shim`. Shim services survive an unexpected `mangod` exit and can be reattached by a new daemon. |
 | `restart` | string | `on-failure` | Service restart policy: `never`, `on-failure`, or `always`. |
-| `startup_timeout` | duration | `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
-| `stop_timeout` | duration | `10s` | Graceful-stop timeout before Mango force-stops a service. |
-| `log_max_size` | size | `100MiB` | Maximum size of each service stdout/stderr log before rotation. |
-| `log_max_files` | integer | `10` | Number of rotated log files to retain. |
-| `metrics_interval` | duration | `1s` | Process metrics sampling interval. |
-| `max_restarts` | integer | `10` | Maximum restart failures within `restart_window`. |
-| `restart_window` | duration | `5m` | Time window used for crash-loop counting. |
-| `stable_after` | duration | `1m` | Stable runtime after which the restart counter is cleared. |
-| `inherit_env` | boolean | `true` | Whether services and tasks inherit the daemon's environment. Explicit variables override inherited values. |
+| `environment` | string-or-reference map | inherited environment | Variables shared by services and tasks. |
 
-Defaults are applied where the field is relevant: restart, stop timeout, log,
-metrics, and crash-loop settings apply to services, while working directory
-and environment inheritance also apply to tasks. Service fields override
-service defaults. Task-specific settings are defined on each task; tasks do
-not use service restart settings.
+`defaults` intentionally contains only high-frequency shared settings. Keep
+low-frequency controls such as timeouts, log rotation, metrics, and
+crash-loop limits at the service level. Service fields override defaults.
+Tasks use `working_dir` and `environment` but do not use service restart
+settings.
 
 ### `services`
 
@@ -494,17 +501,17 @@ services:
 | --- | --- | --- | --- |
 | `<service-name>` | mapping key | — | Unique service name within the project. |
 | `command` | string | — | Required executable name or path. It is executed directly, without a shell. |
-| `supervisor` | string | `defaults.supervisor` or `legacy` | `legacy` uses the daemon-owned backend; `shim` delegates process-tree ownership to a per-service `mango-shim`. |
+| `supervisor` | string | `legacy` | `legacy` uses the daemon-owned backend; `shim` delegates process-tree ownership to a per-service `mango-shim`. |
 | `args` | sequence of strings | `[]` | Arguments passed to `command`. |
 | `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the process. |
-| `environment` | string-or-reference map | inherited environment | Variables to add or override. References use `from_env` or `from_file` and resolve only at process start. Set `defaults.inherit_env: false` for a clean environment. |
+| `environment` | string-or-reference map | inherited environment | Variables to add or override. References use `from_env` or `from_file` and resolve only at process start. |
 | `autostart` | boolean | `false` | Start when the daemon starts or the project is applied. |
 | `restart` | string | `defaults.restart` or `on-failure` | `never`, `on-failure`, or `always`. |
-| `startup_timeout` | duration | `defaults.startup_timeout` or `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
-| `stop_timeout` | duration | `defaults.stop_timeout` | Graceful-stop timeout. |
-| `max_restarts` | integer | `defaults.max_restarts` or `10` | Restart limit used with crash-loop protection. |
-| `restart_window` | duration | `defaults.restart_window` or `5m` | Restart failure counting window. |
-| `stable_after` | duration | `defaults.stable_after` or `1m` | Time required to clear the restart counter. |
+| `startup_timeout` | duration | `30s` | Maximum time to reach a healthy state when a healthcheck is configured. |
+| `stop_timeout` | duration | `10s` | Graceful-stop timeout. |
+| `max_restarts` | integer | `10` | Restart limit used with crash-loop protection. |
+| `restart_window` | duration | `5m` | Restart failure counting window. |
+| `stable_after` | duration | `1m` | Stable runtime after which the restart counter is cleared. |
 | `run_as` | mapping | current user | Optional `user` and `group`; validated and applied by the host process adapter. |
 | `resources` | mapping | not configured | Optional process, memory, and CPU policy. Status is explicit when the host cannot enforce it. |
 | `healthcheck` | mapping | disabled | Optional command or native-probe health monitoring. |
@@ -616,7 +623,7 @@ tasks:
     command: ./bin/backup
     args: [--database, app]
     working_dir: .
-    env:
+    environment:
       APP_ENV: production
     timeout: 30m
     concurrency: forbid
@@ -631,7 +638,7 @@ tasks:
 | `command` | string | — | Required executable name or path. It follows the same direct-execution rules as services. |
 | `args` | sequence of strings | `[]` | Arguments passed to `command`. |
 | `working_dir` | string | `defaults.working_dir` or `.` | Working directory for the task. |
-| `env` | string-or-reference map | inherited environment | Variables to add or override; `from_env` and `from_file` references resolve per attempt. |
+| `environment` | string-or-reference map | inherited environment | Variables to add or override; `from_env` and `from_file` references resolve per attempt. |
 | `timeout` | duration | no limit | Starts after the process starts. A timeout force-stops the process tree and records exit code `124`. |
 | `concurrency` | string | `forbid` | `forbid` queues overlapping invocations; `allow` runs them in parallel. |
 | `retry` | mapping | no retries | Retry settings for failed or timed-out attempts. |
@@ -656,18 +663,18 @@ Workflows are DAGs made from task nodes:
 workflows:
   release:
     concurrency: forbid
-    tasks:
+    steps:
       build:
-        uses: build
+        task: build
       test:
-        uses: test
+        task: test
         needs: [build]
         timeout: 10m
         retry:
           retries: 2
           delay: 5s
       publish:
-        uses: publish
+        task: publish
         needs: [test]
         allow_failure: false
 ```
@@ -676,9 +683,9 @@ workflows:
 | --- | --- | --- | --- |
 | `<workflow-name>` | mapping key | — | Unique workflow name within the project. |
 | `concurrency` | string | `forbid` | `forbid` skips a new run while the same workflow is active; `allow` permits overlap. |
-| `tasks` | mapping | — | At least one workflow node. |
+| `steps` | mapping | — | At least one workflow node. |
 | `<node-name>` | mapping key | — | Unique node name within the workflow. |
-| `uses` | string | — | Required name of a task in the same project. |
+| `task` | string | — | Required name of a task in the same project. |
 | `needs` | sequence of strings | `[]` | Other node names that must finish successfully before this node runs. |
 | `timeout` | duration | task setting | Optional node-level timeout override. |
 | `retry` | mapping | task setting | Optional node-level retry override. |
@@ -698,15 +705,13 @@ schedules:
   - name: nightly-release
     cron: "0 2 * * *"
     timezone: Asia/Taipei
-    target_type: workflow
-    target: release
+    run: workflow/release
     misfire: catch_up
     max_catch_up: 2
 
   - name: hourly-cleanup
     cron: "0 * * * *"
-    target_type: task
-    target: cleanup
+    run: task/cleanup
 ```
 
 | Field | Type | Required | Description |
@@ -714,8 +719,7 @@ schedules:
 | `name` | string | yes | Unique schedule name within the project. |
 | `cron` | string | yes | Five-field standard cron expression. |
 | `timezone` | string | no | IANA time zone, such as `UTC` or `Asia/Taipei`; defaults to local time. |
-| `target_type` | string | yes | `task` or `workflow`. |
-| `target` | string | yes | Existing task or workflow name in the same project. |
+| `run` | string | yes | `task/<task-name>` or `workflow/<workflow-name>`. |
 | `misfire` | string | no | `skip`, `run_once`, or `catch_up`; defaults to `skip`. |
 | `max_catch_up` | non-negative integer | no | Maximum missed activations to run for `catch_up`; capped at `1000`. |
 
@@ -724,7 +728,7 @@ cannot create a duplicate logical run. `skip` (the default) records missed
 slots without backfilling them, `run_once` runs the latest missed slot once,
 and `catch_up` runs at most `max_catch_up` missed slots. A nonexistent local
 time during spring-forward is skipped; both UTC instants of an ambiguous
-fall-back time are distinct occurrences. In v3, schedule-level `command`,
+fall-back time are distinct occurrences. In v4, schedule-level `command`,
 `args`, `working_dir`, `timeout`, `retry`, and `concurrency` fields are not
 supported; put execution settings on the target task instead.
 
@@ -778,7 +782,7 @@ Notation used below:
 - `[value]` is optional.
 - `...` accepts one or more additional values.
 - `PROJECT/NAME` means a project-qualified resource, such as
-  `demo/api-single` or `demo/nightly`.
+  `demo/api` or `demo/nightly`.
 
 Project names must start with an ASCII letter and may then contain letters,
 digits, `.`, `_`, and `-`. Service, task, workflow, schedule, and workflow-node
@@ -800,7 +804,7 @@ Both forms are accepted:
 
 ```sh
 mango --color=never ls
-mango status demo/api-single --json
+mango status demo/api --json
 mango --json history ls --limit 20
 ```
 
@@ -987,16 +991,16 @@ mango ls --json > services.json
 mango status PROJECT/SERVICE|ID [--json]
 ```
 
-The single target may be a stable service key such as `demo/api-single` or a
+The single target may be a stable service key such as `demo/api` or a
 non-negative runtime ID such as `2`. The detailed view includes state, health,
 OS state, PID, ports, start time, uptime, CPU, RSS, memory percentage, restart
 count, last exit code, disabled state, command line, stdout/stderr log paths,
 last error, and unsatisfied dependencies.
 
 ```sh
-mango status demo/api-single
+mango status demo/api
 mango status 2 --json
-mango status demo/api-single --watch
+mango status demo/api --watch
 ```
 
 `--watch` refreshes the service status until interrupted. Resource policies are
@@ -1034,10 +1038,10 @@ Multiple targets are accepted:
 
 ```sh
 mango start demo
-mango stop demo/api-single 2 other/web
-mango restart demo/api-single
-mango disable demo/api-single
-mango enable demo/api-single
+mango stop demo/api 2 other/web
+mango restart demo/api
+mango disable demo/api
+mango enable demo/api
 ```
 
 | Command | Behavior |
@@ -1081,7 +1085,7 @@ Log targets are:
 
 | Target form | Example | Resolves to |
 | --- | --- | --- |
-| `PROJECT/SERVICE` | `demo/api-single` | Service stdout/stderr logs. |
+| `PROJECT/SERVICE` | `demo/api` | Service stdout/stderr logs. |
 | service ID | `2` | A service found by runtime ID. |
 | `PROJECT/task/TASK` | `demo/task/cleanup` | Direct task execution logs. |
 | `PROJECT/workflow/WORKFLOW/NODE` | `demo/workflow/release/build` | One workflow node's logs. |
@@ -1097,12 +1101,12 @@ Flags:
 Examples:
 
 ```sh
-mango logs demo/api-single
-mango logs demo/api-single --stream stdout --tail 50
-mango logs demo/api-single --stream stderr
-mango logs demo/api-single --follow
-mango logs demo/api-single demo/task/cleanup --stream all --tail 20
-mango logs clear demo/api-single
+mango logs demo/api
+mango logs demo/api --stream stdout --tail 50
+mango logs demo/api --stream stderr
+mango logs demo/api --follow
+mango logs demo/api demo/task/cleanup --stream all --tail 20
+mango logs clear demo/api
 ```
 
 When multiple targets or streams are requested, each line is prefixed with its
@@ -1110,8 +1114,8 @@ canonical target. `stdout` and `stderr` are color-coded in interactive output.
 `logs clear` truncates current stdout/stderr files and removes their numeric
 rotation files; a running service can continue writing after the clear.
 
-Service log files use the configured `defaults.log_max_size` and
-`defaults.log_max_files` values. `logs` does not support `--json`.
+Service log files use the service-level log rotation settings, with runtime
+defaults when they are omitted. `logs` does not support `--json`.
 
 ### `mango monitor`
 

@@ -11,7 +11,8 @@
 
 ## Compatibility and migration
 
-- [ ] Confirm YAML v3 fixtures validate without semantic changes.
+- [ ] Confirm YAML v4 starter and advanced fixtures validate; v3 is rejected
+      without modifying the source file.
 - [ ] Test SQLite fresh creation and upgrades from schema 1, 3, 9, and 10.
 - [ ] Test migration lock, marker retry, stale marker, missing backup, checksum
       mismatch, and newer-schema refusal.

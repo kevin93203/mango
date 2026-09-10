@@ -62,6 +62,30 @@ func (v colorFlagValue) Set(value string) error {
 
 func (colorFlagValue) Type() string { return "string" }
 
+type singleStringFlag struct {
+	target *string
+	name   string
+	set    bool
+}
+
+func (v *singleStringFlag) String() string {
+	if v == nil || v.target == nil {
+		return ""
+	}
+	return *v.target
+}
+
+func (v *singleStringFlag) Set(value string) error {
+	if v.set {
+		return fmt.Errorf("--%s may only be specified once", v.name)
+	}
+	v.set = true
+	*v.target = value
+	return nil
+}
+
+func (*singleStringFlag) Type() string { return "string" }
+
 func (a *cliApp) rootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "mango",
@@ -84,7 +108,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
-		a.simpleCmd("ls", "List services", func() error { return lsCommand() }),
+		a.composeProjectCmd("up"), a.composeProjectCmd("down"), a.composeProjectCmd("ps"), a.composeProjectCmd("ls"),
 		a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"), a.processCmd("enable"), a.processCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
 		a.historyCmd(), a.executionCmd(), a.startupCmd(),
@@ -105,6 +129,27 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	events.Flags().BoolVar(&followEvents, "follow", false, "follow new events")
 	root.AddCommand(events)
 	return root
+}
+
+func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
+	var project, file string
+	short := map[string]string{"up": "Create and start a project", "down": "Stop and disable a project", "ps": "Show project services", "ls": "Show project services"}[action]
+	cmd := a.actionCmd(action, short, func() error {
+		opts := composeProjectOptions{Project: project, File: file}
+		switch action {
+		case "up":
+			return upCommand(a.layout, opts)
+		case "down":
+			return downCommand(a.layout, opts)
+		case "ps", "ls":
+			return psCommand(a.layout, opts)
+		default:
+			return fmt.Errorf("unsupported compose command %q", action)
+		}
+	})
+	cmd.Flags().Var(&singleStringFlag{target: &project, name: "project"}, "project", "project name")
+	cmd.Flags().Var(&singleStringFlag{target: &file, name: "file"}, "file", "path to mango.yaml")
+	return cmd
 }
 
 func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {

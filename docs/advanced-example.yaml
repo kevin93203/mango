@@ -1,0 +1,65 @@
+version: 4
+name: advanced-demo
+
+defaults:
+  working_dir: .
+  restart: on-failure
+  environment:
+    APP_ENV: staging
+
+services:
+  database:
+    command: ./bin/database
+    autostart: true
+    healthcheck:
+      policy: all
+      checks:
+        - test: [HTTP, http://127.0.0.1:8080/health]
+        - test: [TCP, 127.0.0.1:5432]
+    resources:
+      process_limit: 128
+      memory: 512MiB
+      cpu_percent: 80
+  api:
+    command: ./bin/api
+    autostart: true
+    depends_on:
+      database:
+        condition: service_healthy
+
+tasks:
+  build:
+    command: ./bin/build
+    environment:
+      BUILD_ENV: staging
+    retry:
+      retries: 2
+      delay: 5s
+  test:
+    command: ./bin/test
+    timeout: 10m
+
+workflows:
+  release:
+    concurrency: forbid
+    steps:
+      build:
+        task: build
+      test:
+        task: test
+        needs: [build]
+
+schedules:
+  - name: nightly-release
+    cron: "0 2 * * *"
+    timezone: Asia/Taipei
+    run: workflow/release
+    misfire: catch_up
+    max_catch_up: 2
+
+webhooks:
+  - name: release-hook
+    path: /hooks/release
+    target_type: workflow
+    target: release
+    secret_ref: env:MANGO_WEBHOOK_SECRET

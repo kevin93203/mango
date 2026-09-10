@@ -1,6 +1,6 @@
 # Mango release compatibility
 
-This release keeps YAML schema v3 execution semantics unchanged. The
+This release adopts YAML schema v4 as a deliberate breaking change. The
 compatibility gates below are the startup contract; the product build version
 is diagnostic metadata and is not currently used as a SemVer major gate.
 
@@ -8,7 +8,7 @@ is diagnostic metadata and is not currently used as a SemVer major gate.
 | --- | --- | --- |
 | CLI ↔ daemon | IPC version `2` | `UNSUPPORTED_VERSION`; request version `0` is the v2 compatibility alias |
 | daemon ↔ shim | Shim protocol `2`, bootstrap schema `1`, matching config fingerprint | `supervisor: shim` fails closed; no legacy fallback |
-| YAML | Schema version `3` only | Reject the configuration; no automatic conversion |
+| YAML | Schema version `4` only | Reject v3 and older configurations; no automatic conversion |
 | Metadata DB | Forward migration to schema `11` | A newer schema refuses daemon startup; downgrade is unsupported |
 | HTTP | `/api/v1`, disabled by default, loopback by default | Other paths are rejected; non-loopback requires authentication |
 | Build metadata | Go and Rust version, commit, build date | Uninjected local builds report `dev` / `unknown` |

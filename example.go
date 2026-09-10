@@ -5,7 +5,7 @@ import (
 	"io/fs"
 )
 
-// exampleConfig is the complete sample configuration shipped with Mango.
+// exampleConfig is the starter configuration shipped with Mango.
 // Keeping the sample embedded lets the CLI initialize a project after the
 // repository source tree is no longer available.
 //

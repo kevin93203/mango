@@ -11,7 +11,7 @@ import (
 func TestLoadNestedHealthcheckAndDependsOn(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
-	content := `version: 3
+	content := `version: 4
 
 services:
   db:
@@ -68,7 +68,7 @@ services:
 func TestHealthcheckActionsAndNativeProbes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
-	content := `version: 3
+	content := `version: 4
 services:
   api:
     command: api
@@ -100,14 +100,13 @@ services:
 func TestServiceSupervisorDefaultsAndOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
-	content := `version: 3
+	content := `version: 4
 
 defaults:
-  supervisor: shim
-
 services:
   api:
     command: api
+    supervisor: shim
   worker:
     command: worker
     supervisor: legacy
@@ -130,7 +129,7 @@ services:
 
 func TestValidateRejectsUnknownSupervisor(t *testing.T) {
 	file := File{
-		Version:  3,
+		Version:  4,
 		Path:     filepath.Join(t.TempDir(), "x.yaml"),
 		Defaults: Defaults{Supervisor: "unknown"},
 		Services: map[string]Service{"api": {Command: "api"}},
@@ -142,7 +141,7 @@ func TestValidateRejectsUnknownSupervisor(t *testing.T) {
 
 func TestValidateRejectsHealthDependencyWithoutEnabledCheck(t *testing.T) {
 	file := File{
-		Version: 3, Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 4, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"db":  {Command: "db", HealthCheck: &HealthCheck{Test: []string{"NONE"}}},
 			"web": {Command: "web", DependsOn: map[string]Dependency{"db": {Condition: "service_healthy"}}},
@@ -155,7 +154,7 @@ func TestValidateRejectsHealthDependencyWithoutEnabledCheck(t *testing.T) {
 
 func TestValidateRejectsCompletedDependencyWithRestart(t *testing.T) {
 	file := File{
-		Version: 3, Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 4, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"job": {Command: "job"},
 			"web": {Command: "web", DependsOn: map[string]Dependency{"job": {Condition: "service_completed_successfully"}}},
@@ -168,7 +167,7 @@ func TestValidateRejectsCompletedDependencyWithRestart(t *testing.T) {
 
 func TestValidateRejectsDependencyCycle(t *testing.T) {
 	file := File{
-		Version: 3, Path: filepath.Join(t.TempDir(), "x.yaml"),
+		Version: 4, Path: filepath.Join(t.TempDir(), "x.yaml"),
 		Services: map[string]Service{
 			"a": {Command: "a", DependsOn: map[string]Dependency{"b": {}}},
 			"b": {Command: "b", DependsOn: map[string]Dependency{"a": {}}},
@@ -183,19 +182,17 @@ func TestLoadAndEffectiveProcesses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
 	content := strings.Join([]string{
-		"version: 3",
+		"version: 4",
 		"",
 		"defaults:",
 		"  working_dir: .",
 		"  restart: on-failure",
-		"  stop_timeout: 2s",
-		"  log_max_size: 1MiB",
-		"  log_max_files: 3",
 		"",
 		"services:",
 		"  api:",
 		"    command: ./bin/api",
 		"    autostart: true",
+		"    stop_timeout: 2s",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -252,7 +249,7 @@ func TestValidateProjectNameAllowsDigitsAfterFirstLetter(t *testing.T) {
 
 func TestValidateSchedule(t *testing.T) {
 	file := File{
-		Version: 3,
+		Version: 4,
 		Path:    filepath.Join(t.TempDir(), "x.yaml"),
 		Tasks:   map[string]Task{"extract": {Command: "echo"}},
 		Schedules: []Schedule{{
@@ -268,7 +265,7 @@ func TestValidateSchedule(t *testing.T) {
 func TestLoadEffectiveWorkflowAndScheduleTargets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
-	content := `version: 3
+	content := `version: 4
 
 tasks:
   extract:
@@ -278,22 +275,20 @@ tasks:
 
 workflows:
   pipeline:
-    tasks:
+    steps:
       extract:
-        uses: extract
+        task: extract
       transform:
-        uses: transform
+        task: transform
         needs: [extract]
 
 schedules:
   - name: scheduled-workflow
     cron: "0 2 * * *"
-    target_type: workflow
-    target: pipeline
+    run: workflow/pipeline
   - name: scheduled-task
     cron: "0 3 * * *"
-    target_type: task
-    target: extract
+    run: task/extract
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -313,13 +308,13 @@ schedules:
 }
 
 func TestValidateRejectsUnknownWorkflowReferencesAndCycles(t *testing.T) {
-	unknown := File{Version: 3, Tasks: map[string]Task{"known": {Command: "echo"}}, Workflows: map[string]Workflow{
+	unknown := File{Version: 4, Tasks: map[string]Task{"known": {Command: "echo"}}, Workflows: map[string]Workflow{
 		"pipeline": {Tasks: map[string]WorkflowTask{"node": {Uses: "missing"}}},
 	}}
 	if err := Validate(unknown); err == nil || !strings.Contains(err.Error(), "unknown task") {
 		t.Fatalf("unknown reference error = %v", err)
 	}
-	cycle := File{Version: 3, Tasks: map[string]Task{"job": {Command: "echo"}}, Workflows: map[string]Workflow{
+	cycle := File{Version: 4, Tasks: map[string]Task{"job": {Command: "echo"}}, Workflows: map[string]Workflow{
 		"pipeline": {Tasks: map[string]WorkflowTask{
 			"a": {Uses: "job", Needs: []string{"b"}}, "b": {Uses: "job", Needs: []string{"a"}},
 		}},
@@ -332,7 +327,7 @@ func TestValidateRejectsUnknownWorkflowReferencesAndCycles(t *testing.T) {
 func TestLoadAndEffectiveTaskTimeoutAndRetry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mango.yaml")
-	content := `version: 3
+	content := `version: 4
 
 tasks:
   job:
@@ -361,7 +356,7 @@ tasks:
 
 func TestEffectiveWorkflowNodeOverridesTaskPolicy(t *testing.T) {
 	file := File{
-		Version: 3,
+		Version: 4,
 		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
 		Tasks: map[string]Task{"deploy": {
 			Command: "deploy", Timeout: "1m", Retry: &TaskRetry{Retries: 4, Delay: "10s"},
@@ -391,7 +386,7 @@ func TestEffectiveWorkflowNodeOverridesTaskPolicy(t *testing.T) {
 func TestValidateRejectsUnsafeTaskOutputs(t *testing.T) {
 	for _, output := range []string{"../escape.txt", `/absolute.txt`, `C:\\absolute.txt`, ""} {
 		t.Run(output, func(t *testing.T) {
-			file := File{Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
+			file := File{Version: 4, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
 				"job": {Command: "echo", Outputs: []string{output}},
 			}}
 			if err := Validate(file); err == nil || !strings.Contains(err.Error(), "outputs") {
@@ -402,7 +397,7 @@ func TestValidateRejectsUnsafeTaskOutputs(t *testing.T) {
 }
 
 func TestValidateScheduleMisfireDefaultsAndCatchUpRules(t *testing.T) {
-	file := File{Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
+	file := File{Version: 4, Path: filepath.Join(t.TempDir(), "mango.yaml"), Tasks: map[string]Task{
 		"job": {Command: "echo"},
 	}, Schedules: []Schedule{{Name: "nightly", Cron: "0 2 * * *", TargetType: "task", Target: "job"}}}
 	if err := Validate(file); err != nil {
@@ -420,7 +415,7 @@ func TestValidateScheduleMisfireDefaultsAndCatchUpRules(t *testing.T) {
 
 func TestEffectiveWebhooksAndValidation(t *testing.T) {
 	file := File{
-		Version: 3, Path: filepath.Join(t.TempDir(), "mango.yaml"),
+		Version: 4, Path: filepath.Join(t.TempDir(), "mango.yaml"),
 		Tasks:    map[string]Task{"deploy": {Command: "deploy"}},
 		Webhooks: []Webhook{{Name: "deploy-hook", Path: "/hooks/deploy", TargetType: "task", Target: "deploy", SecretRef: "env:DEPLOY_SECRET"}},
 	}
@@ -438,7 +433,7 @@ func TestEffectiveWebhooksAndValidation(t *testing.T) {
 
 func TestEffectiveTaskTimeoutDefaultsToDisabled(t *testing.T) {
 	file := File{
-		Version: 3,
+		Version: 4,
 		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
 		Tasks:   map[string]Task{"job": {Command: "echo"}},
 	}
@@ -453,7 +448,7 @@ func TestEffectiveTaskTimeoutDefaultsToDisabled(t *testing.T) {
 
 func TestEffectiveTaskSeparatesDeclaredAndEffectiveEnvironment(t *testing.T) {
 	file := File{
-		Version:  3,
+		Version:  4,
 		Path:     filepath.Join(t.TempDir(), "mango.yaml"),
 		Defaults: Defaults{InheritEnv: boolPtr(false)},
 		Tasks: map[string]Task{"job": {
@@ -484,7 +479,7 @@ func TestValidateRejectsInvalidTaskTimeout(t *testing.T) {
 	for _, timeout := range []string{"not-a-duration", "0s", "-1s"} {
 		t.Run(timeout, func(t *testing.T) {
 			file := File{
-				Version: 3,
+				Version: 4,
 				Path:    filepath.Join(t.TempDir(), "mango.yaml"),
 				Tasks:   map[string]Task{"job": {Command: "echo", Timeout: timeout}},
 			}
@@ -498,7 +493,7 @@ func TestValidateRejectsInvalidTaskTimeout(t *testing.T) {
 
 func TestValidateRejectsScheduleWithoutTargetType(t *testing.T) {
 	file := File{
-		Version: 3,
+		Version: 4,
 		Path:    filepath.Join(t.TempDir(), "mango.yaml"),
 		Tasks:   map[string]Task{"job": {Command: "echo"}},
 		Schedules: []Schedule{{
@@ -506,8 +501,8 @@ func TestValidateRejectsScheduleWithoutTargetType(t *testing.T) {
 		}},
 	}
 	err := Validate(file)
-	if err == nil || !strings.Contains(err.Error(), "target_type") {
-		t.Fatalf("error = %v, want target_type validation error", err)
+	if err == nil || !strings.Contains(err.Error(), "run") {
+		t.Fatalf("error = %v, want run validation error", err)
 	}
 }
 
@@ -524,7 +519,7 @@ func TestValidateRejectsInvalidTaskRetry(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			file := File{
-				Version: 3,
+				Version: 4,
 				Path:    filepath.Join(t.TempDir(), "mango.yaml"),
 				Tasks:   map[string]Task{"job": {Command: "echo", Retry: &test.retry}},
 			}
@@ -540,7 +535,7 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 	root := t.TempDir()
 	external := t.TempDir()
 	file := File{
-		Version: 3,
+		Version: 4,
 		Path:    filepath.Join(root, "mango.yaml"),
 		Defaults: Defaults{
 			WorkingDir: "defaults",
@@ -566,16 +561,16 @@ func TestEffectiveWorkingDirAbsoluteOverridesDefaults(t *testing.T) {
 func TestVersionOneConfigIsRejected(t *testing.T) {
 	file := File{Version: 1, Path: filepath.Join(t.TempDir(), "x.yaml"), Services: map[string]Service{"api": {Command: "echo"}}}
 	err := Validate(file)
-	if err == nil || !strings.Contains(err.Error(), "version 3") {
-		t.Fatalf("error = %v, want explicit version 3 error", err)
+	if err == nil || !strings.Contains(err.Error(), "version 4") {
+		t.Fatalf("error = %v, want explicit version 4 error", err)
 	}
 }
 
 func TestVersionTwoConfigIsRejected(t *testing.T) {
 	file := File{Version: 2, Path: filepath.Join(t.TempDir(), "x.yaml"), Tasks: map[string]Task{"job": {Command: "mango-test-fixture"}}}
 	err := Validate(file)
-	if err == nil || !strings.Contains(err.Error(), "version 3") {
-		t.Fatalf("error = %v, want version 3 rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "version 4") {
+		t.Fatalf("error = %v, want version 4 rejection", err)
 	}
 }
 
@@ -584,14 +579,14 @@ func TestLoadRejectsVersionTwoConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("version: 2\n\ntasks:\n  job:\n    command: mango-test-fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "version 3") {
-		t.Fatalf("error = %v, want version 3 rejection", err)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "version 4") {
+		t.Fatalf("error = %v, want version 4 rejection", err)
 	}
 }
 
 func TestLoadRejectsLegacyServiceEnvField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	content := `version: 3
+	content := `version: 4
 
 services:
   api:
@@ -609,7 +604,7 @@ services:
 
 func TestLoadRejectsUnknownYAMLField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	content := `version: 3
+	content := `version: 4
 unknown: true
 services:
   api:
@@ -625,7 +620,7 @@ services:
 
 func TestLoadRejectsProjectYAMLField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	content := `version: 3
+	content := `version: 4
 project: demo
 services:
   api:
@@ -667,7 +662,7 @@ func TestLoadRejectsNonYAMLExtension(t *testing.T) {
 
 func TestLoadRejectsMissingServiceCommand(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	content := `version: 3
+	content := `version: 4
 services:
   api: {}
 `
@@ -681,7 +676,7 @@ services:
 
 func TestLoadRejectsEmptyHealthCheckProbe(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.yaml")
-	content := `version: 3
+	content := `version: 4
 services:
   api:
     command: mango-test-fixture
@@ -694,5 +689,88 @@ services:
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "checks[0].test is required") {
 		t.Fatalf("error = %v, want empty probe error", err)
+	}
+}
+
+func TestLoadV4ComposeShapeAndProjectResolution(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "demo")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "mango.yaml")
+	content := `version: 4
+name: yaml-name
+
+defaults:
+  working_dir: .
+  restart: on-failure
+  environment:
+    APP_ENV: test
+
+services:
+  api:
+    command: echo
+    autostart: true
+    healthcheck:
+      test: [HTTP, http://127.0.0.1:8080/health]
+
+tasks:
+  backup:
+    command: echo
+    environment:
+      MODE: backup
+
+workflows:
+  release:
+    steps:
+      build:
+        task: backup
+
+schedules:
+  - name: nightly
+    cron: "0 2 * * *"
+    run: workflow/release
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Name != "yaml-name" || file.Tasks["backup"].Environment["MODE"] != "backup" {
+		t.Fatalf("loaded v4 file = %+v", file)
+	}
+	if got, err := ResolveProjectName(file, "flag-name"); err != nil || got != "flag-name" {
+		t.Fatalf("explicit project = %q, %v", got, err)
+	}
+	if got, err := ResolveProjectName(file, ""); err != nil || got != "yaml-name" {
+		t.Fatalf("YAML project = %q, %v", got, err)
+	}
+	file.Name = ""
+	if got, err := ResolveProjectName(file, ""); err != nil || got != filepath.Base(dir) {
+		t.Fatalf("directory project = %q, %v", got, err)
+	}
+}
+
+func TestLoadV3RejectsBeforeLegacyFieldDecode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mango.yaml")
+	content := `version: 3
+workflows:
+  release:
+    tasks:
+      build:
+        uses: backup
+schedules:
+  - name: nightly
+    cron: "0 2 * * *"
+    target_type: task
+    target: backup
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || err.Error() != "configuration schema v3 is unsupported; Mango requires schema v4" {
+		t.Fatalf("error = %v, want explicit v3 rejection", err)
 	}
 }

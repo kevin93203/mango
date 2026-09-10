@@ -737,8 +737,8 @@ func (s *Scheduler) executeOccurrence(ctx context.Context, schedule config.Effec
 func (s *Scheduler) execute(ctx context.Context, schedule config.EffectiveSchedule) {
 	key := schedule.Project + "/" + schedule.Name
 	s.mu.Lock()
-	// v3 concurrency is owned by the target workflow/task. Keep the old
-	// schedule-level check for package-level compatibility with pre-v3 callers.
+	// v4 concurrency is owned by the target workflow/task. Keep the old
+	// schedule-level check for package-level compatibility with direct callers.
 	if schedule.TargetType == "" && schedule.Concurrency == "forbid" && s.running[key] > 0 {
 		s.mu.Unlock()
 		return

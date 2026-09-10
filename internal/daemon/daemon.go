@@ -3131,7 +3131,7 @@ func (d *Daemon) resolveProcessRef(ref string) (string, string, error) {
 
 func (d *Daemon) runSchedule(ctx context.Context, schedule config.EffectiveSchedule) scheduler.ExecutionResult {
 	// Keep direct callers that construct the old EffectiveSchedule shape
-	// working while the YAML schema itself remains strictly v3. Loaded v3
+	// working while the YAML schema itself remains strictly v4. Loaded v4
 	// schedules always take the target-based branches below.
 	if schedule.TargetType == "" && schedule.Action == "run" {
 		return d.runLegacyScheduleTask(ctx, schedule)

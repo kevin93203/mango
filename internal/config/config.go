@@ -18,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 const (
 	DefaultScheduleMisfire    = "skip"
@@ -33,6 +33,7 @@ var (
 
 type File struct {
 	Version   int                 `yaml:"version"`
+	Name      string              `yaml:"name"`
 	Defaults  Defaults            `yaml:"defaults"`
 	Services  map[string]Service  `yaml:"services"`
 	Tasks     map[string]Task     `yaml:"tasks"`
@@ -43,18 +44,45 @@ type File struct {
 }
 
 type Defaults struct {
-	WorkingDir      string `yaml:"working_dir"`
-	Supervisor      string `yaml:"supervisor"`
-	Restart         string `yaml:"restart"`
-	StartupTimeout  string `yaml:"startup_timeout"`
-	StopTimeout     string `yaml:"stop_timeout"`
-	LogMaxSize      string `yaml:"log_max_size"`
-	LogMaxFiles     int    `yaml:"log_max_files"`
-	MetricsInterval string `yaml:"metrics_interval"`
-	MaxRestarts     int    `yaml:"max_restarts"`
-	RestartWindow   string `yaml:"restart_window"`
-	StableAfter     string `yaml:"stable_after"`
-	InheritEnv      *bool  `yaml:"inherit_env"`
+	WorkingDir      string                       `yaml:"working_dir"`
+	Restart         string                       `yaml:"restart"`
+	Environment     map[string]string            `yaml:"environment"`
+	EnvironmentRefs map[string]secrets.Reference `yaml:"-"`
+
+	// These fields remain internal compatibility hooks for callers that build
+	// config.File values directly. They are deliberately not accepted in YAML
+	// v4 defaults; low-frequency settings use the built-in runtime defaults or
+	// service-level settings instead.
+	Supervisor      string `yaml:"-"`
+	StartupTimeout  string `yaml:"-"`
+	StopTimeout     string `yaml:"-"`
+	LogMaxSize      string `yaml:"-"`
+	LogMaxFiles     int    `yaml:"-"`
+	MetricsInterval string `yaml:"-"`
+	MaxRestarts     int    `yaml:"-"`
+	RestartWindow   string `yaml:"-"`
+	StableAfter     string `yaml:"-"`
+	InheritEnv      *bool  `yaml:"-"`
+}
+
+func (d *Defaults) UnmarshalYAML(node *yaml.Node) error {
+	if err := validateNodeKeys(node, map[string]bool{"working_dir": true, "restart": true, "environment": true}); err != nil {
+		return err
+	}
+	var raw struct {
+		WorkingDir  string    `yaml:"working_dir"`
+		Restart     string    `yaml:"restart"`
+		Environment yaml.Node `yaml:"environment"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	environment, refs, err := decodeEnvironmentNode(raw.Environment, "environment")
+	if err != nil {
+		return err
+	}
+	*d = Defaults{WorkingDir: raw.WorkingDir, Restart: raw.Restart, Environment: environment, EnvironmentRefs: refs}
+	return nil
 }
 
 type Service struct {
@@ -159,13 +187,14 @@ type Schedule struct {
 	Name       string `yaml:"name"`
 	Cron       string `yaml:"cron"`
 	Timezone   string `yaml:"timezone"`
-	TargetType string `yaml:"target_type"`
-	Target     string `yaml:"target"`
+	Run        string `yaml:"run"`
+	TargetType string `yaml:"-"`
+	Target     string `yaml:"-"`
 	Misfire    string `yaml:"misfire"`
 	MaxCatchUp int    `yaml:"max_catch_up"`
 
 	// Deprecated source-compatibility fields. They are deliberately excluded
-	// from YAML decoding so the breaking v3 schema cannot silently accept the
+	// from YAML decoding so the breaking v4 schema cannot silently accept the
 	// former schedule action/command model.
 	Action      string     `yaml:"-"`
 	Command     string     `yaml:"-"`
@@ -176,11 +205,39 @@ type Schedule struct {
 	Retry       *TaskRetry `yaml:"-"`
 }
 
+func (s *Schedule) UnmarshalYAML(node *yaml.Node) error {
+	if err := validateNodeKeys(node, map[string]bool{
+		"name": true, "cron": true, "timezone": true, "run": true,
+		"misfire": true, "max_catch_up": true,
+	}); err != nil {
+		return err
+	}
+	var raw struct {
+		Name       string `yaml:"name"`
+		Cron       string `yaml:"cron"`
+		Timezone   string `yaml:"timezone"`
+		Run        string `yaml:"run"`
+		Misfire    string `yaml:"misfire"`
+		MaxCatchUp int    `yaml:"max_catch_up"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	targetType, target, err := parseScheduleRun(raw.Run)
+	if err != nil {
+		return err
+	}
+	*s = Schedule{Name: raw.Name, Cron: raw.Cron, Timezone: raw.Timezone, Run: raw.Run,
+		TargetType: targetType, Target: target, Misfire: raw.Misfire, MaxCatchUp: raw.MaxCatchUp}
+	return nil
+}
+
 type Task struct {
 	Command     string                       `yaml:"command"`
 	Args        []string                     `yaml:"args"`
 	WorkingDir  string                       `yaml:"working_dir"`
-	Env         map[string]string            `yaml:"env"`
+	Environment map[string]string            `yaml:"environment"`
+	Env         map[string]string            `yaml:"-"` // Deprecated Go-level alias for Environment.
 	EnvRefs     map[string]secrets.Reference `yaml:"-"`
 	Timeout     string                       `yaml:"timeout"`
 	Concurrency string                       `yaml:"concurrency"`
@@ -193,24 +250,24 @@ func (t *Task) UnmarshalYAML(node *yaml.Node) error {
 		Command     string     `yaml:"command"`
 		Args        []string   `yaml:"args"`
 		WorkingDir  string     `yaml:"working_dir"`
-		Env         yaml.Node  `yaml:"env"`
+		Environment yaml.Node  `yaml:"environment"`
 		Timeout     string     `yaml:"timeout"`
 		Concurrency string     `yaml:"concurrency"`
 		Retry       *TaskRetry `yaml:"retry"`
 		Outputs     []string   `yaml:"outputs"`
 	}
-	if err := validateNodeKeys(node, map[string]bool{"command": true, "args": true, "working_dir": true, "env": true, "timeout": true, "concurrency": true, "retry": true, "outputs": true}); err != nil {
+	if err := validateNodeKeys(node, map[string]bool{"command": true, "args": true, "working_dir": true, "environment": true, "timeout": true, "concurrency": true, "retry": true, "outputs": true}); err != nil {
 		return err
 	}
 	var raw rawTask
 	if err := node.Decode(&raw); err != nil {
 		return err
 	}
-	env, refs, err := decodeEnvironmentNode(raw.Env, "env")
+	env, refs, err := decodeEnvironmentNode(raw.Environment, "environment")
 	if err != nil {
 		return err
 	}
-	*t = Task{Command: raw.Command, Args: raw.Args, WorkingDir: raw.WorkingDir, Env: env, EnvRefs: refs,
+	*t = Task{Command: raw.Command, Args: raw.Args, WorkingDir: raw.WorkingDir, Environment: env, Env: env, EnvRefs: refs,
 		Timeout: raw.Timeout, Concurrency: raw.Concurrency, Retry: raw.Retry, Outputs: raw.Outputs}
 	return nil
 }
@@ -289,15 +346,50 @@ type TaskRetry struct {
 
 type Workflow struct {
 	Concurrency string                  `yaml:"concurrency"`
-	Tasks       map[string]WorkflowTask `yaml:"tasks"`
+	Steps       map[string]WorkflowTask `yaml:"steps"`
+	Tasks       map[string]WorkflowTask `yaml:"-"` // Deprecated Go-level alias for Steps.
 }
 
 type WorkflowTask struct {
-	Uses         string     `yaml:"uses"`
+	Task         string     `yaml:"task"`
+	Uses         string     `yaml:"-"` // Deprecated Go-level alias for Task.
 	Needs        []string   `yaml:"needs"`
 	Timeout      string     `yaml:"timeout"`
 	Retry        *TaskRetry `yaml:"retry"`
 	AllowFailure bool       `yaml:"allow_failure"`
+}
+
+func (w *Workflow) UnmarshalYAML(node *yaml.Node) error {
+	if err := validateNodeKeys(node, map[string]bool{"concurrency": true, "steps": true}); err != nil {
+		return err
+	}
+	var raw struct {
+		Concurrency string                  `yaml:"concurrency"`
+		Steps       map[string]WorkflowTask `yaml:"steps"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*w = Workflow{Concurrency: raw.Concurrency, Steps: raw.Steps, Tasks: raw.Steps}
+	return nil
+}
+
+func (w *WorkflowTask) UnmarshalYAML(node *yaml.Node) error {
+	if err := validateNodeKeys(node, map[string]bool{"task": true, "needs": true, "timeout": true, "retry": true, "allow_failure": true}); err != nil {
+		return err
+	}
+	var raw struct {
+		Task         string     `yaml:"task"`
+		Needs        []string   `yaml:"needs"`
+		Timeout      string     `yaml:"timeout"`
+		Retry        *TaskRetry `yaml:"retry"`
+		AllowFailure bool       `yaml:"allow_failure"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*w = WorkflowTask{Task: raw.Task, Uses: raw.Task, Needs: raw.Needs, Timeout: raw.Timeout, Retry: raw.Retry, AllowFailure: raw.AllowFailure}
+	return nil
 }
 
 type Webhook struct {
@@ -369,7 +461,7 @@ type EffectiveSchedule struct {
 	ConfigurationGeneration uint64
 
 	// Deprecated internal fields are retained so package consumers can migrate
-	// independently; v3 configuration never populates them.
+	// independently; v4 YAML never populates them.
 	Action      string
 	Command     string
 	Args        []string
@@ -438,6 +530,12 @@ func Load(path string) (File, error) {
 	if err != nil {
 		return File{}, fmt.Errorf("read %s: %w", path, err)
 	}
+	var header struct {
+		Version int `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(data, &header); err == nil && header.Version == 3 {
+		return File{}, errors.New("configuration schema v3 is unsupported; Mango requires schema v4")
+	}
 	var f File
 	if err := decodeYAML(data, &f); err != nil {
 		return File{}, fmt.Errorf("decode %s: %w", path, err)
@@ -479,6 +577,9 @@ func decodeYAML(data []byte, target interface{}) error {
 
 func Validate(f File) error {
 	if f.Version != CurrentVersion {
+		if f.Version == 3 {
+			return errors.New("configuration schema v3 is unsupported; Mango requires schema v4")
+		}
 		return fmt.Errorf("unsupported config version %d; version %d is required", f.Version, CurrentVersion)
 	}
 	if len(f.Services) == 0 && len(f.Tasks) == 0 && len(f.Workflows) == 0 && len(f.Schedules) == 0 {
@@ -613,24 +714,26 @@ func Validate(f File) error {
 		}
 	}
 	for name, workflow := range f.Workflows {
+		steps := workflowSteps(workflow)
 		if !namePattern.MatchString(name) {
 			return fmt.Errorf("workflow name %q is invalid", name)
 		}
 		if workflow.Concurrency != "" && !validConcurrency(workflow.Concurrency) {
 			return fmt.Errorf("workflow %q concurrency must be forbid or allow", name)
 		}
-		if len(workflow.Tasks) == 0 {
-			return fmt.Errorf("workflow %q must define at least one task", name)
+		if len(steps) == 0 {
+			return fmt.Errorf("workflow %q must define at least one step", name)
 		}
-		for nodeName, node := range workflow.Tasks {
+		for nodeName, node := range steps {
+			taskName := workflowTaskName(node)
 			if !namePattern.MatchString(nodeName) {
-				return fmt.Errorf("workflow %q task node %q is invalid", name, nodeName)
+				return fmt.Errorf("workflow %q step %q is invalid", name, nodeName)
 			}
-			if strings.TrimSpace(node.Uses) == "" {
-				return fmt.Errorf("workflow %q task node %q uses is required", name, nodeName)
+			if strings.TrimSpace(taskName) == "" {
+				return fmt.Errorf("workflow %q step %q task is required", name, nodeName)
 			}
-			if _, ok := f.Tasks[node.Uses]; !ok {
-				return fmt.Errorf("workflow %q task node %q uses unknown task %q", name, nodeName, node.Uses)
+			if _, ok := f.Tasks[taskName]; !ok {
+				return fmt.Errorf("workflow %q step %q references unknown task %q", name, nodeName, taskName)
 			}
 			if _, err := parseDuration(node.Timeout, 0); err != nil {
 				return fmt.Errorf("workflow %q task node %q timeout: %w", name, nodeName, err)
@@ -652,12 +755,12 @@ func Validate(f File) error {
 					return fmt.Errorf("workflow %q task node %q has duplicate need %q", name, nodeName, dependency)
 				}
 				seenNeeds[dependency] = true
-				if _, ok := workflow.Tasks[dependency]; !ok {
+				if _, ok := steps[dependency]; !ok {
 					return fmt.Errorf("workflow %q task node %q needs unknown node %q", name, nodeName, dependency)
 				}
 			}
 		}
-		if err := validateWorkflowCycles(workflow.Tasks); err != nil {
+		if err := validateWorkflowCycles(steps); err != nil {
 			return fmt.Errorf("workflow %q: %w", name, err)
 		}
 	}
@@ -701,18 +804,19 @@ func Validate(f File) error {
 		if _, err := time.LoadLocation(zone); err != nil {
 			return fmt.Errorf("schedule %q timezone: %w", s.Name, err)
 		}
-		if s.TargetType != "workflow" && s.TargetType != "task" {
-			return fmt.Errorf("schedule %q target_type must be workflow or task", s.Name)
+		targetType, target, err := scheduleTarget(s)
+		if err != nil {
+			return fmt.Errorf("schedule %q: %w", s.Name, err)
 		}
-		if strings.TrimSpace(s.Target) == "" {
-			return fmt.Errorf("schedule %q target is required", s.Name)
+		if strings.TrimSpace(target) == "" {
+			return fmt.Errorf("schedule %q run is required", s.Name)
 		}
-		if s.TargetType == "workflow" {
-			if _, ok := f.Workflows[s.Target]; !ok {
-				return fmt.Errorf("schedule %q target workflow %q does not exist", s.Name, s.Target)
+		if targetType == "workflow" {
+			if _, ok := f.Workflows[target]; !ok {
+				return fmt.Errorf("schedule %q target workflow %q does not exist", s.Name, target)
 			}
-		} else if _, ok := f.Tasks[s.Target]; !ok {
-			return fmt.Errorf("schedule %q target task %q does not exist", s.Name, s.Target)
+		} else if _, ok := f.Tasks[target]; !ok {
+			return fmt.Errorf("schedule %q target task %q does not exist", s.Name, target)
 		}
 	}
 	webhookNames := map[string]bool{}
@@ -776,6 +880,54 @@ func ValidateProjectName(name string) error {
 		return errors.New("project name must start with an ASCII letter and contain only letters, digits, '.', '_' or '-'")
 	}
 	return nil
+}
+
+// ResolveProjectName applies the Compose-like project precedence used by the
+// CLI: explicit flag, YAML name, then the YAML directory name.
+func ResolveProjectName(file File, explicit string) (string, error) {
+	name := strings.TrimSpace(explicit)
+	if name == "" {
+		name = strings.TrimSpace(file.Name)
+	}
+	if name == "" {
+		name = filepath.Base(filepath.Dir(file.Path))
+	}
+	if err := ValidateProjectName(name); err != nil {
+		return "", fmt.Errorf("invalid project name %q: %w; use --project or set name in mango.yaml", name, err)
+	}
+	return name, nil
+}
+
+func parseScheduleRun(value string) (string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(value), "/", 2)
+	if len(parts) != 2 || (parts[0] != "task" && parts[0] != "workflow") || strings.TrimSpace(parts[1]) == "" {
+		return "", "", errors.New("run must be task/<task-name> or workflow/<workflow-name>")
+	}
+	return parts[0], parts[1], nil
+}
+
+func scheduleTarget(schedule Schedule) (string, string, error) {
+	if strings.TrimSpace(schedule.Run) != "" {
+		return parseScheduleRun(schedule.Run)
+	}
+	if schedule.TargetType == "task" || schedule.TargetType == "workflow" {
+		return schedule.TargetType, schedule.Target, nil
+	}
+	return "", "", errors.New("run must be task/<task-name> or workflow/<workflow-name>")
+}
+
+func workflowSteps(workflow Workflow) map[string]WorkflowTask {
+	if workflow.Steps != nil {
+		return workflow.Steps
+	}
+	return workflow.Tasks
+}
+
+func workflowTaskName(task WorkflowTask) string {
+	if strings.TrimSpace(task.Task) != "" {
+		return task.Task
+	}
+	return task.Uses
 }
 
 func validateOutputPaths(outputs []string) error {
@@ -905,6 +1057,12 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		for k, v := range p.Environment {
 			env[k] = v
 		}
+		for k, v := range d.Environment {
+			if _, ok := p.Environment[k]; !ok {
+				env[k] = v
+			}
+		}
+		environmentRefs := mergeSecretRefs(d.EnvironmentRefs, p.EnvironmentRefs, p.Environment)
 		restartPolicy := restart
 		if p.Restart != "" {
 			restartPolicy = p.Restart
@@ -946,7 +1104,7 @@ func (f File) ServicesEffective(projectName string) ([]EffectiveService, error) 
 		}
 		result = append(result, EffectiveService{
 			Project: projectName, Name: name, Command: command, Supervisor: serviceSupervisor, Args: append([]string(nil), p.Args...),
-			WorkingDir: dir, Env: env, Environment: env, EnvironmentRefs: resolveSecretRefs(p.EnvironmentRefs, base), Autostart: p.Autostart, Restart: restartPolicy,
+			WorkingDir: dir, Env: env, Environment: env, EnvironmentRefs: resolveSecretRefs(environmentRefs, base), Autostart: p.Autostart, Restart: restartPolicy,
 			StartupTimeout: serviceStartupTimeout, StopTimeout: st, MaxRestarts: mr, RestartWindow: rw, StableAfter: sa,
 			LogMaxSize: logSize, LogMaxFiles: logFiles, MetricsEvery: metricsEvery,
 			HealthCheck: effectiveHealth, DependsOn: dependsOn,
@@ -973,6 +1131,10 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 	sort.Strings(names)
 	for _, name := range names {
 		task := f.Tasks[name]
+		taskEnvironmentValues := task.Environment
+		if taskEnvironmentValues == nil {
+			taskEnvironmentValues = task.Env
+		}
 		dir := task.WorkingDir
 		if dir == "" {
 			dir = f.Defaults.WorkingDir
@@ -995,9 +1157,11 @@ func (f File) TasksEffective(projectName string) (map[string]EffectiveTask, erro
 			retryCount = task.Retry.Retries
 			retryDelay, _ = parseNonNegativeDuration(task.Retry.Delay, 0)
 		}
+		declaredEnv := mergeStringMaps(f.Defaults.Environment, taskEnvironmentValues)
+		environmentRefs := mergeSecretRefs(f.Defaults.EnvironmentRefs, task.EnvRefs, taskEnvironmentValues)
 		result[name] = EffectiveTask{
 			Project: projectName, Name: name, Command: command, Args: append([]string(nil), task.Args...),
-			WorkingDir: dir, Env: taskEnvironment(task.Env, inheritEnv), DeclaredEnv: cloneStringMap(task.Env), EnvironmentRefs: resolveSecretRefs(task.EnvRefs, base), Timeout: timeout,
+			WorkingDir: dir, Env: taskEnvironment(declaredEnv, inheritEnv), DeclaredEnv: declaredEnv, EnvironmentRefs: resolveSecretRefs(environmentRefs, base), Timeout: timeout,
 			Concurrency: defaultString(task.Concurrency, "forbid"), RetryCount: retryCount, RetryDelay: retryDelay,
 			Outputs: append([]string(nil), task.Outputs...),
 		}
@@ -1021,9 +1185,11 @@ func (f File) WorkflowsEffective(projectName string) (map[string]EffectiveWorkfl
 	sort.Strings(names)
 	for _, name := range names {
 		workflow := f.Workflows[name]
-		nodes := make(map[string]EffectiveWorkflowTask, len(workflow.Tasks))
-		for nodeName, node := range workflow.Tasks {
-			base := tasks[node.Uses]
+		steps := workflowSteps(workflow)
+		nodes := make(map[string]EffectiveWorkflowTask, len(steps))
+		for nodeName, node := range steps {
+			taskName := workflowTaskName(node)
+			base := tasks[taskName]
 			timeout := base.Timeout
 			retryCount := base.RetryCount
 			retryDelay := base.RetryDelay
@@ -1035,7 +1201,7 @@ func (f File) WorkflowsEffective(projectName string) (map[string]EffectiveWorkfl
 				retryDelay, _ = parseNonNegativeDuration(node.Retry.Delay, 0)
 			}
 			nodes[nodeName] = EffectiveWorkflowTask{
-				Name: nodeName, Uses: node.Uses, Needs: append([]string(nil), node.Needs...),
+				Name: nodeName, Uses: taskName, Needs: append([]string(nil), node.Needs...),
 				Timeout: timeout, RetryCount: retryCount, RetryDelay: retryDelay, AllowFailure: node.AllowFailure,
 				PolicyResolved: true,
 			}
@@ -1067,9 +1233,10 @@ func (f File) SchedulesEffective(projectName string) ([]EffectiveSchedule, error
 		if maxCatchUp == 0 {
 			maxCatchUp = DefaultScheduleMaxCatchUp
 		}
+		targetType, target, _ := scheduleTarget(s)
 		result = append(result, EffectiveSchedule{
 			Project: projectName, Name: s.Name, Cron: s.Cron, Timezone: loc,
-			TargetType: s.TargetType, Target: s.Target, Misfire: misfire, MaxCatchUp: maxCatchUp,
+			TargetType: targetType, Target: target, Misfire: misfire, MaxCatchUp: maxCatchUp,
 		})
 	}
 	return result, nil
@@ -1112,6 +1279,28 @@ func taskEnvironment(extra map[string]string, inherit bool) map[string]string {
 	}
 	for k, v := range extra {
 		result[k] = v
+	}
+	return result
+}
+
+func mergeStringMaps(base, extra map[string]string) map[string]string {
+	result := make(map[string]string, len(base)+len(extra))
+	for key, value := range base {
+		result[key] = value
+	}
+	for key, value := range extra {
+		result[key] = value
+	}
+	return result
+}
+
+func mergeSecretRefs(base, extra map[string]secrets.Reference, overrides map[string]string) map[string]secrets.Reference {
+	result := cloneSecretRefs(base)
+	for key := range overrides {
+		delete(result, key)
+	}
+	for key, value := range extra {
+		result[key] = value
 	}
 	return result
 }

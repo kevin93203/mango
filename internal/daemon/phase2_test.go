@@ -91,7 +91,7 @@ func TestDaemonRestartRestoresAcceptedGenerationInsteadOfReloadingYAML(t *testin
 	if stored.Projects["demo"].ConfigurationGeneration == 0 {
 		t.Fatalf("registry = %+v, want accepted generation", stored.Projects["demo"])
 	}
-	if err := os.WriteFile(configPath, []byte("version: 3\nservices:\n  api:\n    command: changed-without-apply\n    autostart: false\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("version: 4\nservices:\n  api:\n    command: changed-without-apply\n    autostart: false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	second := New(layout)
@@ -151,7 +151,7 @@ func TestApplyAcceptsRuntimeFailureAndPublishesStatus(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "project.yaml")
-	if err := os.WriteFile(configPath, []byte("version: 3\nservices:\n  api:\n    command: C:/path/that/does/not/exist.exe\n    autostart: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("version: 4\nservices:\n  api:\n    command: C:/path/that/does/not/exist.exe\n    autostart: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
@@ -275,7 +275,7 @@ func waitForDaemonStatus(t *testing.T, d *Daemon, project string, predicate func
 
 func writePhase2Project(t *testing.T, path, command string) {
 	t.Helper()
-	content := fmt.Sprintf("version: 3\nservices:\n  api:\n    command: %s\n    autostart: false\n", command)
+	content := fmt.Sprintf("version: 4\nservices:\n  api:\n    command: %s\n    autostart: false\n", command)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
