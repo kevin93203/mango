@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,26 @@ import (
 )
 
 func Listen(endpoint string) (net.Listener, error) {
-	return winio.ListenPipe(pipeNameForEndpoint(endpoint), &winio.PipeConfig{SecurityDescriptor: "D:P(A;;GA;;;OW)"})
+	userSID, err := currentUserSID()
+	if err != nil {
+		return nil, fmt.Errorf("resolve named-pipe user SID: %w", err)
+	}
+	return winio.ListenPipe(pipeNameForEndpoint(endpoint), &winio.PipeConfig{SecurityDescriptor: pipeSecurityDescriptor(userSID)})
+}
+
+func currentUserSID() (string, error) {
+	account, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	if account.User.Sid == nil {
+		return "", errors.New("empty user SID")
+	}
+	return account.User.Sid.String(), nil
+}
+
+func pipeSecurityDescriptor(userSID string) string {
+	return "D:P(A;;GA;;;OW)(A;;GA;;;" + userSID + ")"
 }
 
 func dial(ctx context.Context) (net.Conn, error) {
