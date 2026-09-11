@@ -7,7 +7,7 @@ import (
 )
 
 func TestSystemdUnitUsesFailureRestartAndInstanceEnvironment(t *testing.T) {
-	unit := systemdUnit("/opt/mango dir/mangod", "/Users/test user/mango")
+	unit := systemdUnit("/opt/mango dir/mangod", "/Users/test user/mango", "/Users/test user")
 	for _, want := range []string{
 		"Restart=on-failure",
 		"RestartSec=2",
@@ -16,6 +16,7 @@ func TestSystemdUnitUsesFailureRestartAndInstanceEnvironment(t *testing.T) {
 		"Type=simple",
 		"Delegate=yes",
 		"KillMode=control-group",
+		`Environment="HOME=/Users/test user"`,
 		`Environment="MANGO_HOME=/Users/test user/mango"`,
 	} {
 		if !strings.Contains(unit, want) {
@@ -28,11 +29,12 @@ func TestSystemdUnitUsesFailureRestartAndInstanceEnvironment(t *testing.T) {
 }
 
 func TestLaunchdPlistUsesFailureKeepAliveAndInstanceEnvironment(t *testing.T) {
-	plist := launchdPlist("/opt/mango/mangod", "/Users/test/mango")
+	plist := launchdPlist("/opt/mango/mangod", "/Users/test/mango", "test", "/Users/test")
 	for _, want := range []string{
+		"<key>UserName</key><string>test</string>",
 		"<key>RunAtLoad</key><true/>",
 		"<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>",
-		"<key>EnvironmentVariables</key><dict><key>MANGO_HOME</key><string>/Users/test/mango</string></dict>",
+		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/test</string><key>MANGO_HOME</key><string>/Users/test/mango</string></dict>",
 	} {
 		if !strings.Contains(plist, want) {
 			t.Fatalf("launchd plist does not contain %q:\n%s", want, plist)
@@ -50,8 +52,8 @@ func TestWindowsTaskRunsHiddenLauncherAsCurrentUser(t *testing.T) {
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"<Command>wscript.exe</Command>",
 		`<Arguments>//B //Nologo &quot;C:\Users\楊竣凱\App Data\mango\runtime\mangod-start.vbs&quot;</Arguments>`,
-		"<LogonTrigger><Enabled>true</Enabled><UserId>" + userID + "</UserId></LogonTrigger>",
-		"<Principal id=\"Author\"><UserId>" + userID + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>",
+		"<BootTrigger><Enabled>true</Enabled></BootTrigger>",
+		"<Principal id=\"Author\"><UserId>" + userID + "</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>",
 	} {
 		if !strings.Contains(xml, want) {
 			t.Fatalf("Windows task XML does not contain %q:\n%s", want, xml)
@@ -59,6 +61,9 @@ func TestWindowsTaskRunsHiddenLauncherAsCurrentUser(t *testing.T) {
 	}
 	if strings.Contains(xml, "cmd.exe") || strings.Contains(xml, "mangod-start.cmd") {
 		t.Fatal("Windows task XML still launches the daemon through a visible cmd.exe wrapper")
+	}
+	if strings.Contains(xml, "LogonTrigger") || strings.Contains(xml, "InteractiveToken") {
+		t.Fatal("Windows task XML still requires an interactive logon")
 	}
 }
 
@@ -79,6 +84,25 @@ func TestWindowsLauncherRunsDaemonHiddenAndWaits(t *testing.T) {
 	data := windowsLauncherBytes(`C:\Users\楊竣凱\mangod.exe`, "")
 	if len(data) < 2 || data[0] != 0xff || data[1] != 0xfe {
 		t.Fatalf("Windows launcher is missing a UTF-16LE BOM: %x", data[:min(2, len(data))])
+	}
+}
+
+func TestWindowsLauncherProvidesTheUserProfileBeforeLogin(t *testing.T) {
+	launcher := windowsLauncher(
+		`C:\Users\test user\Mango\mangod.exe`,
+		"",
+		`C:\Users\test user`,
+	)
+	for _, want := range []string{
+		`Set environment = shell.Environment("Process")`,
+		`environment("HOME") = "C:\Users\test user"`,
+		`environment("USERPROFILE") = "C:\Users\test user"`,
+		`environment("APPDATA") = "C:\Users\test user\AppData\Roaming"`,
+		`environment("LOCALAPPDATA") = "C:\Users\test user\AppData\Local"`,
+	} {
+		if !strings.Contains(launcher, want) {
+			t.Fatalf("Windows launcher does not set %q:\n%s", want, launcher)
+		}
 	}
 }
 

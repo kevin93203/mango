@@ -12,12 +12,18 @@ import (
 )
 
 type Status struct {
-	Platform  string
-	Installed bool
-	Detail    string
+	Platform    string
+	Installed   bool
+	BootEnabled bool
+	Detail      string
 }
 
-const windowsTaskName = "mango"
+const (
+	windowsTaskName   = "mango"
+	launchdLabel      = "com.mango.daemon"
+	systemdUnitName   = "mango.service"
+	launchdDaemonPath = "/Library/LaunchDaemons/com.mango.daemon.plist"
+)
 
 func Install(executable string, mangoHomes ...string) error {
 	mangoHome, err := configuredMangoHome(mangoHomes...)
@@ -67,6 +73,10 @@ func GetStatus() (Status, error) {
 }
 
 func installWindows(executable, mangoHome string) error {
+	account, err := currentUser()
+	if err != nil {
+		return err
+	}
 	root, err := startupWrapperHome(mangoHome)
 	if err != nil {
 		return err
@@ -75,11 +85,7 @@ func installWindows(executable, mangoHome string) error {
 	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(launcherPath, windowsLauncherBytes(executable, mangoHome), 0o600); err != nil {
-		return err
-	}
-	userID, err := currentUserID()
-	if err != nil {
+	if err := os.WriteFile(launcherPath, windowsLauncherBytes(executable, mangoHome, account.Home), 0o600); err != nil {
 		return err
 	}
 	taskFile, err := os.CreateTemp("", "mango-task-*.xml")
@@ -88,24 +94,24 @@ func installWindows(executable, mangoHome string) error {
 	}
 	taskPath := taskFile.Name()
 	defer os.Remove(taskPath)
-	if _, err := taskFile.Write(windowsTaskXMLBytes(launcherPath, userID)); err != nil {
+	if _, err := taskFile.Write(windowsTaskXMLBytes(launcherPath, account.UID)); err != nil {
 		_ = taskFile.Close()
 		return err
 	}
 	if err := taskFile.Close(); err != nil {
 		return err
 	}
-	task := exec.Command("schtasks", "/Create", "/TN", windowsTaskName, "/XML", taskPath, "/F")
-	if output, err := task.CombinedOutput(); err != nil {
-		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
+	if err := runPrivilegedCommand("schtasks", "/Create", "/TN", windowsTaskName, "/XML", taskPath, "/F"); err != nil {
+		return err
 	}
 	return nil
 }
 
 func uninstallWindows(mangoHome string) error {
-	task := exec.Command("schtasks", "/Delete", "/TN", windowsTaskName, "/F")
-	if output, err := task.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(output)), "cannot find") {
-		return fmt.Errorf("schtasks: %w: %s", err, strings.TrimSpace(string(output)))
+	if status, _ := statusWindows(); status.Installed {
+		if err := runPrivilegedCommand("schtasks", "/Delete", "/TN", windowsTaskName, "/F"); err != nil {
+			return err
+		}
 	}
 	if root, err := startupWrapperHome(mangoHome); err == nil {
 		for _, path := range []string{windowsLauncherPath(root), legacyWindowsWrapperPath(root)} {
@@ -118,99 +124,168 @@ func uninstallWindows(mangoHome string) error {
 }
 
 func installLaunchd(executable, mangoHome string) error {
-	home, err := os.UserHomeDir()
+	account, err := currentUser()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	legacyPath := filepath.Join(account.Home, "Library", "LaunchAgents", launchdLabel+".plist")
+	path, cleanup, err := writeTemporaryStartupFile("mango-launchd-*.plist", []byte(launchdPlist(executable, mangoHome, account.Name, account.Home)))
+	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "com.mango.daemon.plist")
-	if err := os.WriteFile(path, []byte(launchdPlist(executable, mangoHome)), 0o600); err != nil {
+	defer cleanup()
+
+	if err := runPrivilegedCommand("install", "-o", "root", "-g", "wheel", "-m", "0644", path, launchdDaemonPath); err != nil {
+		return fmt.Errorf("install launch daemon: %w", err)
+	}
+	_ = exec.Command("launchctl", "bootout", "gui/"+account.UID, legacyPath).Run()
+	_ = exec.Command("launchctl", "unload", legacyPath).Run()
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	_ = exec.Command("launchctl", "unload", path).Run()
-	if output, err := exec.Command("launchctl", "load", path).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl: %w: %s", err, strings.TrimSpace(string(output)))
+	_ = runPrivilegedCommand("launchctl", "bootout", "system/"+launchdLabel)
+	if err := runPrivilegedCommand("launchctl", "bootstrap", "system", launchdDaemonPath); err != nil {
+		return fmt.Errorf("bootstrap launch daemon: %w", err)
 	}
 	return nil
 }
 
 func uninstallLaunchd(_ string) error {
-	home, err := os.UserHomeDir()
+	account, err := currentUser()
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, "Library", "LaunchAgents", "com.mango.daemon.plist")
-	_ = exec.Command("launchctl", "unload", path).Run()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if _, statErr := os.Stat(launchdDaemonPath); statErr == nil {
+		_ = runPrivilegedCommand("launchctl", "bootout", "system/"+launchdLabel)
+		if err := runPrivilegedCommand("rm", "-f", launchdDaemonPath); err != nil {
+			return fmt.Errorf("remove launch daemon: %w", err)
+		}
+	}
+	legacyPath := filepath.Join(account.Home, "Library", "LaunchAgents", launchdLabel+".plist")
+	_ = exec.Command("launchctl", "bootout", "gui/"+account.UID, legacyPath).Run()
+	_ = exec.Command("launchctl", "unload", legacyPath).Run()
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
 }
 
 func statusLaunchd() (Status, error) {
-	home, err := os.UserHomeDir()
+	account, err := currentUser()
 	if err != nil {
 		return Status{}, err
 	}
-	path := filepath.Join(home, "Library", "LaunchAgents", "com.mango.daemon.plist")
-	_, err = os.Stat(path)
-	return Status{Platform: "darwin", Installed: err == nil, Detail: path}, nil
+	legacyPath := filepath.Join(account.Home, "Library", "LaunchAgents", launchdLabel+".plist")
+	if _, err := os.Stat(launchdDaemonPath); err != nil {
+		if _, legacyErr := os.Stat(legacyPath); legacyErr == nil {
+			return Status{Platform: "darwin", Installed: true, Detail: legacyPath}, nil
+		}
+		return Status{Platform: "darwin", Detail: launchdDaemonPath}, nil
+	}
+	bootEnabled := exec.Command("launchctl", "print", "system/"+launchdLabel).Run() == nil
+	return Status{Platform: "darwin", Installed: true, BootEnabled: bootEnabled, Detail: launchdDaemonPath}, nil
 }
 
 func installSystemd(executable, mangoHome string) error {
-	home, err := os.UserHomeDir()
+	account, err := currentUser()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, ".config", "systemd", "user")
+	dir := filepath.Join(account.Home, ".config", "systemd", "user")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "mango.service")
-	if err := os.WriteFile(path, []byte(systemdUnit(executable, mangoHome)), 0o600); err != nil {
+	path := filepath.Join(dir, systemdUnitName)
+	if err := os.WriteFile(path, []byte(systemdUnit(executable, mangoHome, account.Home)), 0o600); err != nil {
 		return err
 	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if output, err := exec.Command("systemctl", "--user", "enable", "--now", "mango.service").CombinedOutput(); err != nil {
+	if !userLingerEnabled(account.UID) {
+		if err := runPrivilegedCommand("loginctl", "enable-linger", account.UID); err != nil {
+			return fmt.Errorf("enable user lingering: %w", err)
+		}
+	}
+	if output, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if output, err := exec.Command("systemctl", "--user", "enable", "--now", systemdUnitName).CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
 func uninstallSystemd(_ string) error {
-	_ = exec.Command("systemctl", "--user", "disable", "--now", "mango.service").Run()
-	home, err := os.UserHomeDir()
+	_ = exec.Command("systemctl", "--user", "disable", "--now", systemdUnitName).Run()
+	account, err := currentUser()
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".config", "systemd", "user", "mango.service")
+	path := filepath.Join(account.Home, ".config", "systemd", "user", systemdUnitName)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	// User lingering is intentionally shared state. Removing Mango must not
+	// disable it for Docker, Podman, or another user service.
 	return nil
 }
 
 func statusSystemd() (Status, error) {
-	home, err := os.UserHomeDir()
+	account, err := currentUser()
 	if err != nil {
 		return Status{}, err
 	}
-	path := filepath.Join(home, ".config", "systemd", "user", "mango.service")
-	_, err = os.Stat(path)
-	return Status{Platform: "linux", Installed: err == nil, Detail: path}, nil
+	path := filepath.Join(account.Home, ".config", "systemd", "user", systemdUnitName)
+	if _, err := os.Stat(path); err != nil {
+		return Status{Platform: "linux", Detail: path}, nil
+	}
+	enabled := exec.Command("systemctl", "--user", "is-enabled", systemdUnitName).Run() == nil
+	linger := userLingerEnabled(account.UID)
+	return Status{Platform: "linux", Installed: true, BootEnabled: enabled && linger, Detail: path}, nil
+}
+
+func userLingerEnabled(uid string) bool {
+	return strings.TrimSpace(string(commandOutput("loginctl", "show-user", uid, "-p", "Linger", "--value"))) == "yes"
 }
 
 func statusWindows() (Status, error) {
 	output, err := exec.Command("schtasks", "/Query", "/TN", windowsTaskName).CombinedOutput()
 	detail := strings.TrimSpace(string(output))
+	bootEnabled := false
 	if err == nil {
 		detail = windowsTaskStatusDetail(detail)
+		xmlOutput, xmlErr := exec.Command("schtasks", "/Query", "/TN", windowsTaskName, "/XML").CombinedOutput()
+		bootEnabled = xmlErr == nil && strings.Contains(string(xmlOutput), "<BootTrigger>") && strings.Contains(string(xmlOutput), "<LogonType>S4U</LogonType>")
 	}
-	return Status{Platform: "windows", Installed: err == nil, Detail: detail}, nil
+	return Status{Platform: "windows", Installed: err == nil, BootEnabled: bootEnabled, Detail: detail}, nil
+}
+
+func writeTemporaryStartupFile(pattern string, data []byte) (string, func(), error) {
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return path, cleanup, nil
+}
+
+func commandOutput(name string, args ...string) []byte {
+	output, _ := exec.Command(name, args...).CombinedOutput()
+	return output
 }
 
 func windowsTaskStatusDetail(output string) string {
@@ -253,17 +328,36 @@ func configuredMangoHome(values ...string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func launchdPlist(executable, mangoHome string) string {
+func launchdPlist(executable, mangoHome string, user ...string) string {
+	userName := ""
+	home := ""
+	if len(user) > 0 {
+		userName = user[0]
+	}
+	if len(user) > 1 {
+		home = user[1]
+	}
 	lines := []string{
 		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
 		"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
 		"<plist version=\"1.0\">",
 		"<dict>",
-		"  <key>Label</key><string>com.mango.daemon</string>",
+		"  <key>Label</key><string>" + xmlEscape(launchdLabel) + "</string>",
 		"  <key>ProgramArguments</key><array><string>" + xmlEscape(executable) + "</string><string>run</string></array>",
 	}
-	if mangoHome != "" {
-		lines = append(lines, "  <key>EnvironmentVariables</key><dict><key>MANGO_HOME</key><string>"+xmlEscape(mangoHome)+"</string></dict>")
+	if userName != "" {
+		lines = append(lines, "  <key>UserName</key><string>"+xmlEscape(userName)+"</string>")
+	}
+	if home != "" || mangoHome != "" {
+		environment := "  <key>EnvironmentVariables</key><dict>"
+		if home != "" {
+			environment += "<key>HOME</key><string>" + xmlEscape(home) + "</string>"
+		}
+		if mangoHome != "" {
+			environment += "<key>MANGO_HOME</key><string>" + xmlEscape(mangoHome) + "</string>"
+		}
+		environment += "</dict>"
+		lines = append(lines, environment)
 	}
 	lines = append(lines,
 		"  <key>RunAtLoad</key><true/>",
@@ -274,7 +368,7 @@ func launchdPlist(executable, mangoHome string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func systemdUnit(executable, mangoHome string) string {
+func systemdUnit(executable, mangoHome string, home ...string) string {
 	lines := []string{
 		"[Unit]",
 		"Description=mango service manager",
@@ -288,6 +382,9 @@ func systemdUnit(executable, mangoHome string) string {
 		"RestartSec=2",
 		"Delegate=yes",
 		"KillMode=control-group",
+	}
+	if len(home) > 0 && home[0] != "" {
+		lines = append(lines, "Environment=\"HOME="+systemdQuote(home[0])+"\"")
 	}
 	if mangoHome != "" {
 		lines = append(lines, "Environment=\"MANGO_HOME="+systemdQuote(mangoHome)+"\"")
@@ -326,24 +423,50 @@ func startupWrapperHome(mangoHome string) (string, error) {
 	return filepath.Join(config, "mango"), nil
 }
 
-func windowsLauncher(executable, mangoHome string) string {
+func windowsLauncher(executable, mangoHome string, home ...string) string {
 	command := windowsCommandLineArg(executable) + " run"
 	if mangoHome != "" {
 		command += " --home " + windowsCommandLineArg(mangoHome)
 	}
 	command = strings.ReplaceAll(command, `"`, `""`)
-	return strings.Join([]string{
-		"Option Explicit",
-		"Dim shell, exitCode",
-		`Set shell = CreateObject("WScript.Shell")`,
-		`exitCode = shell.Run("` + command + `", 0, True)`,
+	hasHome := len(home) > 0 && home[0] != ""
+	lines := []string{"Option Explicit"}
+	if hasHome {
+		lines = append(lines, "Dim shell, environment, exitCode")
+	} else {
+		lines = append(lines, "Dim shell, exitCode")
+	}
+	lines = append(lines, `Set shell = CreateObject("WScript.Shell")`)
+	if hasHome {
+		profile := windowsVBScriptString(home[0])
+		roaming := windowsVBScriptString(windowsProfilePath(home[0], "AppData\\Roaming"))
+		local := windowsVBScriptString(windowsProfilePath(home[0], "AppData\\Local"))
+		lines = append(lines,
+			`Set environment = shell.Environment("Process")`,
+			`environment("HOME") = "`+profile+`"`,
+			`environment("USERPROFILE") = "`+profile+`"`,
+			`environment("APPDATA") = "`+roaming+`"`,
+			`environment("LOCALAPPDATA") = "`+local+`"`,
+		)
+	}
+	lines = append(lines,
+		`exitCode = shell.Run("`+command+`", 0, True)`,
 		"WScript.Quit exitCode",
 		"",
-	}, "\r\n")
+	)
+	return strings.Join(lines, "\r\n")
 }
 
-func windowsLauncherBytes(executable, mangoHome string) []byte {
-	return utf16LEBytes(windowsLauncher(executable, mangoHome))
+func windowsLauncherBytes(executable, mangoHome string, home ...string) []byte {
+	return utf16LEBytes(windowsLauncher(executable, mangoHome, home...))
+}
+
+func windowsProfilePath(home, suffix string) string {
+	return strings.TrimRight(home, `\/`) + `\` + suffix
+}
+
+func windowsVBScriptString(value string) string {
+	return strings.ReplaceAll(value, `"`, `""`)
 }
 
 func windowsTaskXML(launcherPath, userID string) string {
@@ -353,8 +476,8 @@ func windowsTaskXML(launcherPath, userID string) string {
 		"<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
 		"<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">",
 		"  <RegistrationInfo><Description>mango service manager</Description></RegistrationInfo>",
-		"  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + escapedUserID + "</UserId></LogonTrigger></Triggers>",
-		"  <Principals><Principal id=\"Author\"><UserId>" + escapedUserID + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
+		"  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>",
+		"  <Principals><Principal id=\"Author\"><UserId>" + escapedUserID + "</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
 		"  <Settings>",
 		"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",

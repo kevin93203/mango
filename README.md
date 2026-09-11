@@ -1304,18 +1304,23 @@ mango startup status [--json]
 
 | Command | Description |
 | --- | --- |
-| `install` | Installs per-user daemon startup integration for the current OS. |
+| `install` | Installs per-user daemon startup integration that launches at boot, before interactive login. It may request one-time administrator authorization. |
 | `uninstall` | Removes the integration. It does not remove project files or logs. |
-| `status` | Reports whether integration is installed and where it is configured. |
+| `status` | Reports whether integration is installed, boot-enabled, and where it is configured. |
 
-The platform mechanisms are Windows Task Scheduler, Linux `systemd --user`,
-and a macOS `launchd` LaunchAgent. When `MANGO_HOME` is set, each definition
-passes the same value to `mangod`. Linux restarts only after failure, macOS keeps the
-job alive only after an unsuccessful exit, and Windows uses
-`MultipleInstancesPolicy=IgnoreNew`. The daemon lock remains the final guard
-for direct or overlapping launches. Startup integration launches only
-`mangod`; service startup still depends on each service's `autostart` setting.
-The daemon binary must be available next to `mango` or on `PATH` when
+The platform mechanisms are a Windows Task Scheduler boot trigger with an S4U
+principal, Linux `systemd --user` with user lingering, and a macOS `launchd`
+LaunchDaemon with `UserName` set to the current user. They all start the
+user-owned `mangod` before interactive login. When `MANGO_HOME` is set, each
+definition passes the same value to `mangod`. Linux restarts only after failure,
+macOS keeps the job alive only after an unsuccessful exit, and Windows uses
+`MultipleInstancesPolicy=IgnoreNew`. Windows S4U startup is deliberately local:
+it cannot use network credentials or Windows encrypted-file access. The Linux
+uninstall command removes Mango's unit but leaves user lingering enabled because
+that setting may be shared by other user services. The daemon lock remains the
+final guard for direct or overlapping launches. Startup integration launches
+only `mangod`; service startup still depends on each service's `autostart`
+setting. The daemon binary must be available next to `mango` or on `PATH` when
 installing.
 
 ```sh
@@ -1568,8 +1573,8 @@ automatic schema downgrade or rollback.
 - `mango daemon stop` and explicit SIGTERM/SIGINT shutdowns stop shim services
   first. Arbitrary daemonization, `setsid`, namespace escape, and Windows
   breakaway processes are not covered by the v1 containment guarantee.
-- `mango startup install` uses Windows Task Scheduler, Linux `systemd --user`,
-  or a macOS `launchd` LaunchAgent.
+- `mango startup install` uses a Windows Task Scheduler boot trigger with S4U,
+  Linux `systemd --user` plus user lingering, or a macOS `launchd` LaunchDaemon.
 
 ### Capability reporting and local IPC
 

@@ -2505,6 +2505,10 @@ func doctorCommand(layout paths.Layout) error {
 	if startupErr == nil {
 		startupValue = doctorStatusValue(startupStatus.Installed, startupStatus.Detail)
 		startupStyle = doctorStatusStyle(startupStatus.Installed, startupStatus.Detail)
+		if startupStatus.Installed && !startupStatus.BootEnabled {
+			startupValue = "boot disabled: " + startupStatus.Detail
+			startupStyle = cliui.StyleWarning
+		}
 	}
 	if startupErr != nil {
 		startupValue = startupErr.Error()
@@ -3306,10 +3310,17 @@ func printStartupStatus(status startup.Status) {
 		state = "installed"
 		style = cliui.StyleSuccess
 	}
+	bootState := "disabled"
+	bootStyle := cliui.StyleWarning
+	if status.BootEnabled {
+		bootState = "enabled"
+		bootStyle = cliui.StyleSuccess
+	}
 	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "Startup integration"))
 	cliOutput.KeyValues([][]cliui.Cell{
 		{{Text: "platform"}, {Text: status.Platform}},
 		{{Text: "status"}, {Text: state, Style: style}},
+		{{Text: "boot"}, {Text: bootState, Style: bootStyle}},
 		{{Text: "detail"}, {Text: status.Detail, Style: zeroStyle(status.Detail)}},
 	})
 }

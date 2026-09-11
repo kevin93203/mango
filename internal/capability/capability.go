@@ -69,11 +69,11 @@ func discoverFor(platform string, cgroup bool) api.CapabilityReport {
 func startupDetail(platform string) string {
 	switch platform {
 	case "windows":
-		return "Windows Task Scheduler per-user integration"
+		return "Windows Task Scheduler boot-trigger per-user integration (S4U)"
 	case "darwin":
-		return "macOS launchd per-user integration"
+		return "macOS launchd LaunchDaemon per-user integration"
 	default:
-		return "Linux systemd --user integration"
+		return "Linux systemd --user integration with user lingering"
 	}
 }
 
