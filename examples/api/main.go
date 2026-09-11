@@ -28,9 +28,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if options.supervise {
-		err = runSupervisor(ctx, options.ports, options.interval)
+		err = runSupervisor(ctx, options.host, options.ports, options.interval)
 	} else {
-		err = runServers(ctx, options.ports, options.interval)
+		err = runServers(ctx, options.host, options.ports, options.interval)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "api:", err)
@@ -39,6 +39,7 @@ func main() {
 }
 
 type apiOptions struct {
+	host      string
 	ports     []int
 	interval  time.Duration
 	supervise bool
@@ -68,10 +69,14 @@ func (p *portList) Set(value string) error {
 func parseArgs(args []string) (apiOptions, error) {
 	flags := flag.NewFlagSet("api", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+
 	var ports portList
+
+	host := flags.String("host", "0.0.0.0", "HTTP listen host")
 	flags.Var(&ports, "port", "HTTP port; may be repeated")
 	interval := flags.Duration("interval", 5*time.Second, "heartbeat interval")
 	supervise := flags.Bool("supervise", false, "run one API child process per port")
+
 	if err := flags.Parse(args); err != nil {
 		return apiOptions{}, err
 	}
@@ -84,13 +89,21 @@ func parseArgs(args []string) (apiOptions, error) {
 	if *interval <= 0 {
 		return apiOptions{}, errors.New("interval must be positive")
 	}
-	return apiOptions{ports: ports, interval: *interval, supervise: *supervise}, nil
+
+	return apiOptions{
+		host:      *host,
+		ports:     ports,
+		interval:  *interval,
+		supervise: *supervise,
+	}, nil
 }
 
-func supervisorChildArgs(port int, interval time.Duration) []string {
+func supervisorChildArgs(host string, port int, interval time.Duration) []string {
 	return []string{
 		"run",
 		"./examples/api/main.go",
+		"--host",
+		host,
 		"--port",
 		strconv.Itoa(port),
 		"--interval",
@@ -106,7 +119,7 @@ type childResult struct {
 // runSupervisor starts each API port in a separate `go run` process. This is
 // intentionally a Go implementation of the old shell supervisor so the
 // example retains its process-tree demonstration on every supported OS.
-func runSupervisor(ctx context.Context, ports []int, interval time.Duration) error {
+func runSupervisor(ctx context.Context, host string, ports []int, interval time.Duration) error {
 	if len(ports) == 0 {
 		return errors.New("at least one supervisor port is required")
 	}
@@ -122,7 +135,7 @@ func runSupervisor(ctx context.Context, ports []int, interval time.Duration) err
 	commands := make([]*exec.Cmd, 0, len(ports))
 	results := make(chan childResult, len(ports))
 	for _, port := range ports {
-		command := exec.Command("go", supervisorChildArgs(port, interval)...)
+		command := exec.Command("go", supervisorChildArgs(host, port, interval)...)
 		command.Stdout = os.Stdout
 		command.Stderr = os.Stderr
 		if err := command.Start(); err != nil {
@@ -165,7 +178,7 @@ func waitChildren(commands []*exec.Cmd, results <-chan childResult) {
 	}
 }
 
-func runServers(ctx context.Context, ports []int, interval time.Duration) error {
+func runServers(ctx context.Context, host string, ports []int, interval time.Duration) error {
 	if len(ports) == 0 {
 		return errors.New("at least one port is required")
 	}
@@ -179,7 +192,13 @@ func runServers(ctx context.Context, ports []int, interval time.Duration) error 
 	}
 
 	stderr := log.New(os.Stderr, "api stderr: ", log.LstdFlags|log.Lmicroseconds)
-	stderr.Printf("startup diagnostics: pid=%d ports=%v interval=%s", os.Getpid(), ports, interval.String())
+	stderr.Printf(
+		"startup diagnostics: pid=%d host=%s ports=%v interval=%s",
+		os.Getpid(),
+		host,
+		ports,
+		interval.String(),
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -196,13 +215,16 @@ func runServers(ctx context.Context, ports []int, interval time.Duration) error 
 	servers := make([]*http.Server, 0, len(ports))
 	listeners := make([]net.Listener, 0, len(ports))
 	for _, port := range ports {
-		listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+		address := net.JoinHostPort(host, strconv.Itoa(port))
+
+		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			for _, opened := range listeners {
 				_ = opened.Close()
 			}
-			return fmt.Errorf("listen on port %d: %w", port, err)
+			return fmt.Errorf("listen on %s: %w", address, err)
 		}
+
 		listeners = append(listeners, listener)
 		servers = append(servers, &http.Server{
 			Handler:           mux,
@@ -211,7 +233,7 @@ func runServers(ctx context.Context, ports []int, interval time.Duration) error 
 	}
 
 	for _, port := range ports {
-		fmt.Printf("api server starting on http://127.0.0.1:%d\n", port)
+		fmt.Printf("api server starting on http://%s:%d\n", host, port)
 	}
 
 	serverCtx, cancel := context.WithCancel(ctx)

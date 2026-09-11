@@ -51,8 +51,8 @@ func TestParseArgsAcceptsSupervisorMode(t *testing.T) {
 }
 
 func TestSupervisorChildArgsUseOnePortPerProcess(t *testing.T) {
-	args := supervisorChildArgs(9090, 3*time.Second)
-	want := []string{"run", "./examples/api/main.go", "--port", "9090", "--interval", "3s"}
+	args := supervisorChildArgs("127.0.0.1", 9090, 3*time.Second)
+	want := []string{"run", "./examples/api/main.go", "--host", "127.0.0.1", "--port", "9090", "--interval", "3s"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}
@@ -68,7 +68,7 @@ func TestRunServersServesAndShutsDownAllPorts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- runServers(ctx, ports, 10*time.Millisecond)
+		serverErr <- runServers(ctx, "127.0.0.1", ports, 10*time.Millisecond)
 	}()
 
 	for _, port := range ports {
@@ -90,14 +90,14 @@ func TestRunServersServesAndShutsDownAllPorts(t *testing.T) {
 }
 
 func TestRunServersReportsListenError(t *testing.T) {
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	err = runServers(context.Background(), []int{port}, time.Second)
+	err = runServers(context.Background(), "127.0.0.1", []int{port}, time.Second)
 	if err == nil {
 		t.Fatal("runServers() succeeded on an occupied port")
 	}
