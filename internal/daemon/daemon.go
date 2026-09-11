@@ -1702,7 +1702,13 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 }
 
 func (d *Daemon) startManaged(projectName string, managed *managedProcess) error {
-	if managed.spec.Supervisor == "shim" {
+	// Resource policies must be applied before exec. The legacy Go launcher
+	// only learns the child PID after exec, which requires moving a live
+	// process into a delegated cgroup and is rejected by some cgroup v2
+	// hierarchies (notably domain/threaded systemd scopes). The shim creates
+	// the cgroup and joins the child in pre_exec, so resource-constrained
+	// services use that safe path even when no supervisor was explicitly set.
+	if managed.spec.Supervisor == "shim" || managed.spec.Resources != nil {
 		return d.startShimManaged(projectName, managed)
 	}
 	d.mu.Lock()

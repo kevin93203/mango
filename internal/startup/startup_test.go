@@ -13,6 +13,9 @@ func TestSystemdUnitUsesFailureRestartAndInstanceEnvironment(t *testing.T) {
 		"RestartSec=2",
 		"StartLimitIntervalSec=60",
 		"StartLimitBurst=5",
+		"Type=simple",
+		"Delegate=yes",
+		"KillMode=control-group",
 		`Environment="MANGO_HOME=/Users/test user/mango"`,
 	} {
 		if !strings.Contains(unit, want) {

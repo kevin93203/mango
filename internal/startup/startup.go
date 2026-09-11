@@ -282,9 +282,12 @@ func systemdUnit(executable, mangoHome string) string {
 		"StartLimitBurst=5",
 		"",
 		"[Service]",
+		"Type=simple",
 		"ExecStart=" + systemdEscape(executable) + " run",
 		"Restart=on-failure",
 		"RestartSec=2",
+		"Delegate=yes",
+		"KillMode=control-group",
 	}
 	if mangoHome != "" {
 		lines = append(lines, "Environment=\"MANGO_HOME="+systemdQuote(mangoHome)+"\"")

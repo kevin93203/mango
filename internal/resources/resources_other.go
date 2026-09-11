@@ -4,8 +4,10 @@ package resources
 
 import "fmt"
 
-func applyPlatform(_ int, _ Policy) (*Handle, error) {
+func preparePlatform(_ Policy) (*Handle, error) {
 	return nil, fmt.Errorf("resource adapter is unsupported on this platform")
 }
+
+func attachPlatform(_ *Handle, _ int) error { return nil }
 
 func cleanupPlatform(_ *Handle) error { return nil }

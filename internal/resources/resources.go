@@ -51,11 +51,39 @@ type Handle struct {
 	path string
 }
 
-func Apply(pid int, policy Policy) (*Handle, error) {
+func Prepare(policy Policy) (*Handle, error) {
 	if policy == (Policy{}) {
 		return nil, nil
 	}
-	return applyPlatform(pid, policy)
+	return preparePlatform(policy)
+}
+
+func Apply(pid int, policy Policy) (*Handle, error) {
+	handle, err := Prepare(policy)
+	if err != nil || handle == nil {
+		return handle, err
+	}
+	if err := Attach(handle, pid); err != nil {
+		_ = Cleanup(handle)
+		return nil, err
+	}
+	return handle, nil
+}
+
+func Attach(handle *Handle, pid int) error {
+	if handle == nil {
+		return nil
+	}
+	return attachPlatform(handle, pid)
+}
+
+// Path returns the cgroup path used by the platform adapter. It is intended
+// for process launchers that must join the cgroup before exec.
+func (h *Handle) Path() string {
+	if h == nil {
+		return ""
+	}
+	return h.path
 }
 
 func Cleanup(handle *Handle) error {
@@ -232,8 +260,23 @@ func linuxCgroupAvailable(policy *config.ResourcePolicy) bool {
 		if readErr != nil {
 			return false
 		}
+		enabledControllers := strings.Fields(string(enabled))
+		missing := make([]string, 0, len(requiredControllers))
 		for _, required := range requiredControllers {
-			if !contains(strings.Fields(string(enabled)), required) {
+			if !contains(enabledControllers, required) {
+				missing = append(missing, required)
+			}
+		}
+		// systemd Delegate=yes grants ownership of the subtree but does not
+		// necessarily enable controllers in it. Enable only the controllers
+		// requested by this policy; otherwise a valid delegated service would
+		// be reported as unsupported until somebody manually wrote this file.
+		if len(missing) > 0 {
+			values := make([]string, 0, len(missing))
+			for _, controller := range missing {
+				values = append(values, "+"+controller)
+			}
+			if writeErr := os.WriteFile(parent+"/cgroup.subtree_control", []byte(strings.Join(values, " ")), 0o600); writeErr != nil {
 				return false
 			}
 		}

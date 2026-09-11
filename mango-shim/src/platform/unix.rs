@@ -34,7 +34,7 @@ pub fn spawn_platform(bootstrap: &Bootstrap) -> io::Result<super::Spawned> {
     let cgroup = prepare_cgroup(bootstrap)?;
     #[cfg(target_os = "linux")]
     let cgroup_procs = cgroup.as_ref().map(|path| {
-        let mut value = path.join("cgroup.procs").as_os_str().as_bytes().to_vec();
+        let mut value = path.join("cgroup.threads").as_os_str().as_bytes().to_vec();
         value.push(0);
         value
     });
@@ -75,9 +75,17 @@ pub fn spawn_platform(bootstrap: &Bootstrap) -> io::Result<super::Spawned> {
                     digits.swap(index, length - index - 1);
                 }
                 let written = libc::write(fd, digits.as_ptr().cast(), length);
+                let write_error = if written != length as isize {
+                    Some(io::Error::last_os_error())
+                } else {
+                    None
+                };
                 libc::close(fd);
-                if written != length as isize {
-                    return Err(io::Error::last_os_error());
+                if let Some(error) = write_error {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("attach process thread to cgroup: {error}"),
+                    ));
                 }
             }
             if let Some(identity) = &identity {
@@ -212,6 +220,11 @@ fn prepare_cgroup(bootstrap: &Bootstrap) -> io::Result<Option<std::path::PathBuf
     let path = parent.join(format!("mango-shim-{}-{timestamp}", std::process::id()));
     fs::create_dir(&path)?;
     let result = (|| {
+        // A systemd user service can be a domain/threaded cgroup. In that
+        // hierarchy a child must be a threaded cgroup and processes must be
+        // joined through cgroup.threads; writing cgroup.procs returns
+        // EOPNOTSUPP even when Delegate=yes is correctly configured.
+        fs::write(path.join("cgroup.type"), b"threaded")?;
         if policy.process_limit > 0 {
             fs::write(path.join("pids.max"), policy.process_limit.to_string())?;
         }

@@ -13,7 +13,7 @@ import (
 	"github.com/kevin93203/mango/internal/config"
 )
 
-func applyPlatform(pid int, policy Policy) (*Handle, error) {
+func preparePlatform(policy Policy) (*Handle, error) {
 	probe := &config.ResourcePolicy{ProcessLimit: int(policy.ProcessLimit), CPUPercent: int(policy.CPUPercent)}
 	if policy.MemoryBytes > 0 {
 		probe.Memory = strconv.FormatUint(policy.MemoryBytes, 10)
@@ -22,7 +22,7 @@ func applyPlatform(pid int, policy Policy) (*Handle, error) {
 		return nil, fmt.Errorf("Linux cgroup v2 resource controllers are unavailable or not delegated")
 	}
 	parent := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(currentCgroupPath(), "/"))
-	name := fmt.Sprintf("mango-%d-%d", pid, time.Now().UnixNano())
+	name := fmt.Sprintf("mango-%d", time.Now().UnixNano())
 	path := filepath.Join(parent, name)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return nil, fmt.Errorf("create service cgroup: %w", err)
@@ -50,11 +50,15 @@ func applyPlatform(pid int, policy Policy) (*Handle, error) {
 			return nil, fmt.Errorf("set %s: %w", limit.name, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o600); err != nil {
-		return nil, fmt.Errorf("attach process to cgroup: %w", err)
-	}
 	failed = false
 	return &Handle{path: path}, nil
+}
+
+func attachPlatform(handle *Handle, pid int) error {
+	if err := os.WriteFile(filepath.Join(handle.path, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return fmt.Errorf("attach process to cgroup: %w", err)
+	}
+	return nil
 }
 
 func cleanupPlatform(handle *Handle) error {
