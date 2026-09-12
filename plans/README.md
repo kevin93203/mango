@@ -77,10 +77,11 @@ Kubernetes orchestration, or multi-host high availability.
   sibling resolution, YAML v3 validation, daemon startup, health, and clean
   shutdown; broader feature coverage remains in the existing cross-platform
   integration suite.
-- **Phase 07 — Stage 3 in progress.** The canonical service, project, task,
-  workflow, schedule, and unified run commands are now the executable CLI
-  surface. Removed names fail with stderr migration errors, stay out of help
-  and completion, and do not contact the daemon.
+- **Phase 07 — Stage 3 in progress.** The canonical root service, project,
+  task, workflow, schedule, and unified run commands are now the executable CLI
+  surface. Most removed names fail with stderr migration errors; the service
+  namespace and `ps`/`ls` aliases are unregistered, stay out of help and
+  completion, and do not contact the daemon.
 
 ## Dependency Flow
 

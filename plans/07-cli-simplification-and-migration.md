@@ -85,7 +85,7 @@ the unified run facade is implemented.
 
 資源與進階命令則使用一致的 noun-first 形式：
 
-    mango service list|status|start|stop|restart|enable|disable
+    mango list|status|start|stop|restart|enable|disable
     mango project list|plan|apply|status|rollback|register|remove|rename
     mango task list
     mango workflow list
@@ -102,17 +102,17 @@ Advanced 區段。是否在 Stage 3 移到 system 或其他進階 namespace，�
 
 | Concept | Canonical name | Compatibility behavior |
 | --- | --- | --- |
-| Service listing | mango service list | mango ps、mango ls 保留為 hidden/deprecated aliases |
-| Service operations | mango service start, stop, restart | root start/stop/restart 保留為高頻 shortcuts |
-| Persistent service policy | mango service enable/disable | root enable/disable 移到 compatibility layer |
+| Service listing | mango list | `mango ps`、`mango ls` 完全移除，不保留 aliases |
+| Service operations | mango start, stop, restart | 根命令是唯一 canonical 入口 |
+| Persistent service policy | mango enable/disable | 根命令是唯一 canonical 入口 |
 | Resource listing | list | 各 namespace 的 ls 轉為 alias，不再新增新的 ls |
 | Task execution | mango run task TARGET | mango task run TARGET 保留 |
 | Workflow execution | mango run workflow TARGET | mango workflow run TARGET 保留 |
 | Configuration check | mango config validate PATH | 可增加 mango check PATH shortcut |
 | Project lifecycle | mango up / mango down | project add/apply 作為 advanced operator interface |
 
-不建議同時將 ps、ls、list、services 都列為正式入口。若要提供更短的快捷命令，
-應選擇一個並在 help 中清楚標示其 scope。
+不建議同時將 ps、ls、list、services 都列為正式入口。此版本只保留
+`mango list`，並在 help 中明確標示它只列出 services。
 
 ### Detailed implementation work
 
@@ -142,10 +142,9 @@ Advanced 區段。是否在 Stage 3 移到 system 或其他進階 namespace，�
 
 - 將 task ls、workflow ls、schedule ls、project ls 對應到完整的 list command。
 - 將 task run 與 workflow run 對應到新的 run task 與 run workflow。
-- 將 root service commands 包裝到 service namespace；root shortcuts 仍呼叫
-  相同 handler。
-- 將 ps 與 ls 統一導向同一個 service-list handler，避免兩條 command path
-  再次產生語意差異。
+- 將 service list/status/start/stop/restart/enable/disable 全部註冊在 root，
+  直接重用既有 handler。
+- 移除 service namespace 與 ps/ls aliases；不保留相容 command path。
 - deprecated commands 必須：
 
   - 保持相同 positional arguments、exit status 與 stdout 格式。
@@ -460,14 +459,15 @@ canonical CLI，而不是永久堆積 aliases。
 - README、migration guide、release notes 與 completion 都已改用 replacement。
 - 主要 repository examples、CI scripts、PowerShell scripts 與 smoke tests 不再依賴舊命令。
 - 有實際使用資料或明確產品決策支持移除；不能只因為命令看起來不漂亮就刪除。
-- 舊命令失敗時仍提供清楚的 replacement，至少保留一個 major release 的 migration
-  error path，或以 compatibility binary/flag 提供過渡。
+- 仍保留 migration stub 的舊命令失敗時提供 replacement；明確要求完全移除的命令
+  可回傳 unknown-command，但必須在 migration guide 中提供替代語法。
 
 ### Commands to remove or hide
 
 第一優先：
 
-- root ps 與 root ls 的重複入口。
+- root ps 與 root ls 的重複入口，連同 hidden migration stubs 一併移除。
+- service namespace 及其所有子命令。
 - task ls、workflow ls、schedule ls、project ls 的 primary help entries；
   canonical 形式改用 list。
 - execution namespace。
@@ -475,7 +475,7 @@ canonical CLI，而不是永久堆積 aliases。
 
 第二優先：
 
-- root enable／disable，改由 service enable/disable 使用。
+- root enable／disable 改為正式 service lifecycle commands。
 - 不必要的 project add，一般流程改用 up PATH；若仍需要 registry-only
   operation，命名為 project register 並保留在 advanced reference。
 - mangod run 不放在一般使用者 quick-start；保留給 packaging、service manager、
@@ -486,10 +486,13 @@ canonical CLI，而不是永久堆積 aliases。
     mango up
     mango down
     mango status
+    mango list
     mango logs
     mango start
     mango stop
     mango restart
+    mango enable
+    mango disable
     mango run
     mango runs
 
@@ -507,7 +510,7 @@ canonical CLI，而不是永久堆積 aliases。
       runs
 
     Manage:
-      service
+      list
       project
       schedule
 
@@ -538,7 +541,8 @@ events、monitor、startup 可作為 Advanced commands 保留，或在不破壞�
 ### Stage 3 tests
 
 - Default root help snapshot 只包含 canonical commands 與正確分組。
-- 每個移除 command 都有 migration error test。
+- 保留 migration stub 的移除 command 有 migration error test；完全移除的
+  service、ps、ls 則有 unknown-command 與不聯絡 daemon 的測試。
 - 舊 command 不會被誤解析成另一個 command 或靜默執行不同操作。
 - completion 不再產生 removed commands。
 - packaged binary、Windows PowerShell、Unix shell smoke tests 使用 canonical syntax。
@@ -553,14 +557,15 @@ events、monitor、startup 可作為 Advanced commands 保留，或在不破壞�
   版本邊界與 rollback 方式。
 - 更新 plans/README.md 的 plan status 與 dependency flow。
 - 更新 release checklist，加入 root help snapshot、completion、old-command migration
-  error、JSON compatibility 與 packaged smoke tests。
+  behavior、JSON compatibility 與 packaged smoke tests。
 - 所有錯誤訊息、README、examples、PowerShell scripts 與 release docs 使用同一套命名。
 
 ### Stage 3 acceptance criteria
 
 - Default help 不再暴露重複入口或 execution/history storage terminology。
 - 核心日常流程最多需要理解七個概念：init、up、status、logs、run、runs、down。
-- 舊命令移除後，錯誤訊息仍能引導使用者完成遷移。
+- 舊命令移除後，migration guide 與仍保留的 migration error 能引導使用者完成遷移；
+  完全移除的命令維持明確 non-zero unknown-command 行為。
 - 所有現有資料與 run lineage 維持可讀、可查詢、可 rollback。
 - CLI reference、completion、examples、release docs 與實作完全一致。
 

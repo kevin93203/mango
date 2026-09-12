@@ -133,7 +133,7 @@ to become ready:
 ./bin/mango init
 ./bin/mango up
 ./bin/mango status demo/api
-./bin/mango service list
+./bin/mango list
 ./bin/mango logs demo/api --tail 50
 ./bin/mango down
 ```
@@ -213,7 +213,7 @@ schedules:
 
 ```text
 mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
-mango service list [PROJECT]
+mango list [PROJECT]
 mango down [PROJECT] [--project NAME] [--file PATH]
 ```
 
@@ -228,7 +228,7 @@ timeout returns a non-zero status while background reconciliation continues.
 `down` stops services, disables schedules, and marks the project disabled. It
 does not delete YAML, registry data, generations, logs, or execution history.
 It can use a registered project with `--project` even when the YAML is
-currently invalid. `mango service list` shows the compact service state table.
+currently invalid. `mango list` shows the compact service state table.
 
 ### Services
 
@@ -381,23 +381,22 @@ services.
 
 ```sh
 mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
-mango service list [PROJECT]
+mango list [PROJECT]
 mango down [PROJECT] [--project NAME] [--file PATH]
 mango status PROJECT/SERVICE
-mango service start PROJECT/SERVICE
-mango service stop PROJECT/SERVICE
-mango service restart PROJECT/SERVICE
-mango service enable PROJECT/SERVICE
-mango service disable PROJECT/SERVICE
+mango start PROJECT/SERVICE
+mango stop PROJECT/SERVICE
+mango restart PROJECT/SERVICE
+mango enable PROJECT/SERVICE
+mango disable PROJECT/SERVICE
 ```
 
-The root `start`, `stop`, and `restart` shortcuts remain available for
-frequent service operations.
+All service lifecycle commands are available at the root. They accept a
+project name to operate on all services in that project, a numeric service ID,
+or multiple targets.
 
-Lifecycle commands also accept a project name to operate on all services in
-that project, a numeric service ID, or multiple targets. Service IDs are
-convenient for a running daemon but can change after a daemon restart; project
-and service names are the stable form.
+Service IDs are convenient for a running daemon but can change after a daemon
+restart; project and service names are the stable form.
 
 ### Logs and monitoring
 
@@ -858,7 +857,7 @@ commands when you need to manage desired state or daemon ownership directly:
 - `mango events` reads the durable event stream, and `mango startup` manages
   per-user boot integration.
 - `mango monitor` is an interactive terminal view and does not support JSON;
-  use `mango service list --json`, `mango status TARGET --json`, or
+  use `mango list --json`, `mango status TARGET --json`, or
   `mango logs TARGET --json` for machine-readable alternatives.
 
 `runs` is the canonical run model. Removed command names and their major-release
@@ -998,10 +997,10 @@ zones, and schedule targets.
 mango config validate mango.example.yaml
 ```
 
-### `mango service list`
+### `mango list`
 
 ```text
-mango service list [PROJECT] [--json]
+mango list [PROJECT] [--json]
 ```
 
 Lists every managed service. The text table contains:
@@ -1026,11 +1025,11 @@ operating system permits inspection; child CPU and memory values are shown in
 their own rows.
 
 ```sh
-mango service list
-mango service list --json > services.json
+mango list
+mango list --json > services.json
 ```
 
-Use `mango service list` for all service listings.
+Use `mango list` for all service listings.
 
 #### `mango status`
 
@@ -1071,14 +1070,11 @@ IDs rather than root executions.
 ### Service lifecycle commands
 
 ```text
-mango service start TARGET [TARGET ...] [--json]
-mango service stop TARGET [TARGET ...] [--json]
-mango service restart TARGET [TARGET ...] [--json]
-mango service enable TARGET [TARGET ...] [--json]
-mango service disable TARGET [TARGET ...] [--json]
-mango start   TARGET [TARGET ...] [--json]
-mango stop    TARGET [TARGET ...] [--json]
+mango start TARGET [TARGET ...] [--json]
+mango stop TARGET [TARGET ...] [--json]
 mango restart TARGET [TARGET ...] [--json]
+mango enable TARGET [TARGET ...] [--json]
+mango disable TARGET [TARGET ...] [--json]
 ```
 
 `TARGET` can be:
@@ -1093,8 +1089,8 @@ Multiple targets are accepted:
 mango start demo
 mango stop demo/api 2 other/web
 mango restart demo/api
-mango service disable demo/api
-mango service enable demo/api
+mango disable demo/api
+mango enable demo/api
 ```
 
 | Command | Behavior |
@@ -1109,9 +1105,8 @@ For a project target, `start`/`enable` use dependency-first order and
 `stop`/`disable` use dependent-first order. A project `restart` stops in reverse
 order and starts in dependency-first order. Bulk operations continue after an
 individual failure and return a non-zero exit status if any target failed.
-The root `start`, `stop`, and `restart` forms are shortcuts for the canonical
-`service` commands. Use the noun-first `service enable` and `service disable`
-forms for persistent service policy.
+The root forms are the canonical service lifecycle commands, including the
+persistent `enable` and `disable` policy operations.
 
 Possible lifecycle states are `stopped`, `starting`, `waiting`, `running`,
 `stopping`, `exited`, `backing_off`, `crash_loop`, `failed`, `disabled`, and
@@ -1173,7 +1168,7 @@ Service log files use the service-level log rotation settings, with runtime
 defaults when they are omitted. One-shot `logs --json` returns ordered
 `target`, `stream`, and `data` entries; `--json` cannot be combined with
 `--follow`. For a machine-readable service snapshot, use
-`mango service list --json` or `mango status PROJECT/SERVICE --json`.
+`mango list --json` or `mango status PROJECT/SERVICE --json`.
 
 ### `mango monitor`
 
@@ -1183,7 +1178,7 @@ mango monitor
 
 With a TTY, `monitor` redraws the service table every second and allows actions
 on the selected service. Without a TTY it prints one service table and exits.
-It does not support `--json`; use `mango service list --json` or
+It does not support `--json`; use `mango list --json` or
 `mango status PROJECT/SERVICE --json` for machine-readable status, and
 `mango logs PROJECT/SERVICE --json` for one-shot logs.
 

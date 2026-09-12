@@ -97,9 +97,9 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		Use:   "mango",
 		Short: "Cross-platform service manager",
 		Long: "Cross-platform service manager.\n\n" +
-			"Start with init, up, status, logs, run, runs, and down. Advanced operational\n" +
+			"Start with init, up, list, status, logs, run, runs, and down. Advanced operational\n" +
 			"commands remain available under the Advanced group.",
-		Example:       "  mango init\n  mango up\n  mango status demo/api\n  mango logs demo/api --follow\n  mango down",
+		Example:       "  mango init\n  mango up\n  mango list\n  mango status demo/api\n  mango logs demo/api --follow\n  mango down",
 		Version:       version.String(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -136,13 +136,10 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
 		a.composeProjectCmd("up"), a.composeProjectCmd("down"),
-		a.serviceCmd(), a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"),
+		a.serviceListCmd(), a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"),
+		a.processCmd("enable"), a.processCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
 		a.startupCmd(), a.runCmd(), a.runsCmd(),
-		a.removedCommand("ps", "mango service list"),
-		a.removedCommand("ls", "mango service list"),
-		a.removedCommand("enable TARGET [TARGET...]", "mango service enable TARGET [TARGET...]"),
-		a.removedCommand("disable TARGET [TARGET...]", "mango service disable TARGET [TARGET...]"),
 		a.removedNamespaceCommand("execution", "mango runs", map[string]string{
 			"list": "mango runs list", "ls": "mango runs list", "get": "mango runs show RUN_REF",
 			"watch": "mango runs watch RUN_REF", "cancel": "mango runs cancel RUN_REF",
@@ -158,6 +155,9 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
 		if err := validateServiceTarget(args[0]); err != nil {
 			return err
+		}
+		if watchStatus && jsonOutput {
+			return errors.New("--json is not supported with status --watch")
 		}
 		return statusCommandWithOptions(ctx, args[0], watchStatus)
 	})
@@ -268,7 +268,6 @@ func namespaceExample(use string) string {
 		"run":      "  mango run task demo/backup\n  mango run workflow demo/release --wait",
 		"runs":     "  mango runs list\n  mango runs show RUN_REF",
 		"schedule": "  mango schedule list\n  mango schedule disable demo/nightly",
-		"service":  "  mango service list\n  mango service status demo/api",
 		"startup":  "  mango startup status",
 		"task":     "  mango task list",
 		"workflow": "  mango workflow list",
@@ -599,6 +598,22 @@ func (a *cliApp) processCmd(action string) *cobra.Command {
 	return cmd
 }
 
+func (a *cliApp) serviceListCmd() *cobra.Command {
+	cmd := a.leafCmd("list [PROJECT]", "List services", cobra.MaximumNArgs(1), func(args []string) error {
+		project := ""
+		if len(args) == 1 {
+			if _, err := clitarget.ParseProject(args[0]); err != nil {
+				return err
+			}
+			project = args[0]
+		}
+		return psCommand(a.layout, composeProjectOptions{Project: project})
+	})
+	a.addJSONFlag(cmd)
+	cmd.GroupID = groupManage
+	return cmd
+}
+
 func (a *cliApp) logsCmd() *cobra.Command {
 	var stream string
 	var tail int
@@ -637,8 +652,8 @@ func (a *cliApp) monitorCmd() *cobra.Command {
 		}
 		return tui.Run(cliOutput, monitorLogs)
 	})
-	cmd.Long = "Open the interactive service monitor. For machine-readable output, use `mango service list --json` or `mango status TARGET --json`; use `mango logs TARGET --json` for one-shot logs."
-	cmd.Example = "  mango monitor\n  mango service list --json\n  mango status demo/api --json"
+	cmd.Long = "Open the interactive service monitor. For machine-readable output, use `mango list --json` or `mango status TARGET --json`; use `mango logs TARGET --json` for one-shot logs."
+	cmd.Example = "  mango monitor\n  mango list --json\n  mango status demo/api --json"
 	return cmd
 }
 
@@ -801,50 +816,6 @@ func (a *cliApp) runTargetCmd(kind string) *cobra.Command {
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the run to finish")
 	a.addJSONFlag(cmd)
 	a.addNoTruncFlag(cmd)
-	return cmd
-}
-
-func (a *cliApp) serviceCmd() *cobra.Command {
-	cmd := a.groupedNamespace("service", "Manage services", groupManage)
-	list := a.leafCmd("list [PROJECT]", "List services", cobra.MaximumNArgs(1), func(args []string) error {
-		project := ""
-		if len(args) == 1 {
-			if _, err := clitarget.ParseProject(args[0]); err != nil {
-				return err
-			}
-			project = args[0]
-		}
-		return psCommand(a.layout, composeProjectOptions{Project: project})
-	})
-	a.addJSONFlag(list)
-	cmd.AddCommand(list)
-	cmd.AddCommand(a.removedCommand("ls [PROJECT]", "mango service list [PROJECT]"))
-
-	var watch bool
-	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
-		if err := validateServiceTarget(args[0]); err != nil {
-			return err
-		}
-		if watch && jsonOutput {
-			return errors.New("--json is not supported with service status --watch")
-		}
-		return statusCommandWithOptions(ctx, args[0], watch)
-	})
-	status.Flags().BoolVar(&watch, "watch", false, "watch service status until interrupted")
-	a.addJSONFlag(status)
-	cmd.AddCommand(status)
-
-	for _, action := range []string{"start", "stop", "restart", "enable", "disable"} {
-		action := action
-		child := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" one or more services", cobra.MinimumNArgs(1), func(args []string) error {
-			if err := validateServiceOperationTargets(args); err != nil {
-				return err
-			}
-			return processCommand(action, args)
-		})
-		a.addJSONFlag(child)
-		cmd.AddCommand(child)
-	}
 	return cmd
 }
 

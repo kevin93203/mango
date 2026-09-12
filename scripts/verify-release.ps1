@@ -136,9 +136,9 @@ try {
         if ([string]$health.database.migration.status -notin @("completed", "complete")) {
             throw "daemon health did not report a completed metadata migration"
         }
-        & $cli service list --json 2>&1 | Out-Null
+        & $cli list --json 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw "packaged canonical service list failed"
+            throw "packaged canonical list command failed"
         }
         & $cli runs list --json 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {

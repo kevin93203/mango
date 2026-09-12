@@ -25,10 +25,11 @@ shim and do not expect automatic fallback to the legacy supervisor.
 
 The Stage 3 major release completes the CLI cutover to the unified `runs`
 model. Removed command names are listed in
-[the CLI migration guide](../migration-cli.md). The new `mango` binary returns
-a non-zero migration error for those names, writes it to stderr, and does not
-contact the daemon. Hidden migration stubs are excluded from help and shell
-completion; they do not preserve the old operation.
+[the CLI migration guide](../migration-cli.md). Most removed names return a
+non-zero migration error, write it to stderr, and do not contact the daemon.
+The service namespace and the old `ps`/`ls` listing aliases are intentionally
+unregistered and return an unknown-command error instead. None appear in help
+or shell completion, and none preserve the old operation.
 
 The data and protocol contract is unchanged by the CLI cleanup:
 

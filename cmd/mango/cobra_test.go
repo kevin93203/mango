@@ -30,8 +30,8 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	root := app.rootCommand()
 	want := []string{
 		"config", "daemon", "doctor", "down", "events", "init", "logs",
-		"monitor", "project", "restart", "run", "runs", "schedule", "service", "start", "startup", "status",
-		"stop", "task", "up", "workflow",
+		"list", "monitor", "project", "restart", "run", "runs", "schedule", "start", "startup", "status",
+		"stop", "task", "up", "workflow", "enable", "disable",
 	}
 	for _, name := range want {
 		if command, _, err := root.Find([]string{name}); err != nil || command == root || command.Name() != name {
@@ -40,6 +40,11 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	}
 	if command, _, err := root.Find([]string{"completion"}); err == nil && command != root {
 		t.Fatal("unexpected default completion command")
+	}
+	for _, name := range []string{"service", "ps", "ls"} {
+		if command, _, err := root.Find([]string{name}); err == nil && command != root {
+			t.Fatalf("removed root command %q is still registered", name)
+		}
 	}
 }
 
@@ -51,12 +56,12 @@ func TestCobraRootHelpGroupsCanonicalCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"Start here:", "Manage:", "Advanced:", "service", "run", "completion"} {
+	for _, want := range []string{"Start here:", "Manage:", "Advanced:", "list", "enable", "disable", "run", "completion"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("root help = %q, want %q", text, want)
 		}
 	}
-	for _, forbidden := range []string{"\n  ps ", "\n  ls ", "\n  enable ", "\n  disable ", "\n  execution ", "\n  history "} {
+	for _, forbidden := range []string{"\n  service ", "\n  ps ", "\n  ls ", "\n  execution ", "\n  history "} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("root help exposes compatibility command %q: %q", forbidden, text)
 		}
@@ -68,7 +73,7 @@ func TestCobraRootCommandGroupSnapshot(t *testing.T) {
 	root := app.rootCommand()
 	want := map[string][]string{
 		groupStart:    {"down", "init", "logs", "run", "runs", "status", "up"},
-		groupManage:   {"project", "restart", "schedule", "service", "start", "stop", "task", "workflow"},
+		groupManage:   {"disable", "enable", "list", "project", "restart", "schedule", "start", "stop", "task", "workflow"},
 		groupAdvanced: {"config", "daemon", "doctor", "events", "monitor", "startup"},
 	}
 	got := map[string][]string{}
@@ -94,7 +99,7 @@ func TestCobraRootHelpSnapshot(t *testing.T) {
 	}
 	for _, snapshot := range []string{
 		"Start here:\n  down        Stop a project\n  init        Create an example configuration\n  logs        Read service logs\n  run         Run a task or workflow\n  runs        List and control runs\n  status      Show service status\n  up          Start a project",
-		"Manage:\n  project     Manage registered projects\n  restart     Restart one or more services\n  schedule    Manage schedules\n  service     Manage services\n  start       Start one or more services\n  stop        Stop one or more services\n  task        Manage tasks\n  workflow    Manage workflows",
+		"Manage:\n  disable     Disable one or more services\n  enable      Enable one or more services\n  list        List services\n  project     Manage registered projects\n  restart     Restart one or more services\n  schedule    Manage schedules\n  start       Start one or more services\n  stop        Stop one or more services\n  task        Manage tasks\n  workflow    Manage workflows",
 		"Advanced:\n  completion  Generate the autocompletion script for the specified shell\n  config      Inspect configuration\n  daemon      Manage the Mango daemon\n  doctor      Inspect Mango environment and daemon health\n  events      Read the event stream\n  monitor     Open the interactive service monitor\n  startup     Manage startup integration",
 	} {
 		if !strings.Contains(output.String(), snapshot) {
@@ -108,13 +113,8 @@ func TestCobraRemovedCommandsReturnMigrationErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{args: []string{"ps"}, want: "mango service list"},
-		{args: []string{"ls"}, want: "mango service list"},
-		{args: []string{"enable", "demo/api"}, want: "mango service enable"},
-		{args: []string{"disable", "demo/api"}, want: "mango service disable"},
 		{args: []string{"project", "add", "demo", "mango.yaml"}, want: "mango project register"},
 		{args: []string{"project", "ls"}, want: "mango project list"},
-		{args: []string{"service", "ls"}, want: "mango service list"},
 		{args: []string{"task", "ls"}, want: "mango task list"},
 		{args: []string{"task", "run", "demo/job"}, want: "mango run task"},
 		{args: []string{"workflow", "ls"}, want: "mango workflow list"},
@@ -150,7 +150,7 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
 	for _, path := range [][]string{
-		{"service", "list"}, {"project", "list"}, {"task", "list"}, {"workflow", "list"},
+		{"list"}, {"project", "list"}, {"task", "list"}, {"workflow", "list"},
 		{"schedule", "list"}, {"run", "task"}, {"run", "workflow"},
 	} {
 		command, _, err := root.Find(path)
@@ -158,7 +158,7 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 			t.Fatalf("canonical command %v missing: command=%v err=%v", path, command, err)
 		}
 	}
-	for _, path := range [][]string{{"service", "list"}, {"status"}, {"init"}} {
+	for _, path := range [][]string{{"list"}, {"status"}, {"init"}, {"enable"}, {"disable"}} {
 		command, _, err := root.Find(path)
 		if err != nil || command == root {
 			t.Fatalf("command %v missing: command=%v err=%v", path, command, err)
@@ -174,7 +174,7 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 	if err != nil || runTask.Flag("wait") == nil || runTask.Flag("no-trunc") == nil {
 		t.Fatalf("run task flags missing: command=%v err=%v", runTask, err)
 	}
-	for _, path := range [][]string{{"ps"}, {"ls"}, {"enable"}, {"disable"}, {"task", "ls"}, {"workflow", "ls"}, {"schedule", "ls"}, {"project", "ls"}, {"execution"}, {"history"}} {
+	for _, path := range [][]string{{"task", "ls"}, {"workflow", "ls"}, {"schedule", "ls"}, {"project", "ls"}, {"execution"}, {"history"}} {
 		command, _, err := root.Find(path)
 		if err != nil || command == root || command.IsAvailableCommand() {
 			t.Fatalf("removed command %v = command:%v err:%v available:%v", path, command, err, command != nil && command.IsAvailableCommand())
@@ -185,6 +185,42 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 		if err != nil || command == root || command.LocalNonPersistentFlags().Lookup("json") == nil {
 			t.Fatalf("command %v missing JSON flag: command=%v err=%v", path, command, err)
 		}
+	}
+}
+
+func TestCobraRejectsRemovedServiceNamespaceAndAliases(t *testing.T) {
+	for _, args := range [][]string{{"service"}, {"service", "list"}, {"ps"}, {"ls"}} {
+		name := strings.Join(args, " ")
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			app := newCLIApp(paths.Layout{}, &stdout, &stderr)
+			root := app.rootCommand()
+			root.SetArgs(args)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "unknown command") {
+				t.Fatalf("error = %v, want unknown command", err)
+			}
+			if strings.Contains(err.Error(), "was removed in this major release") {
+				t.Fatalf("error = %v, want no compatibility migration path", err)
+			}
+			app.printCommandError(err)
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "error: "+err.Error()) {
+				t.Fatalf("stderr = %q, want command error", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCobraStatusRejectsJSONWatch(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	root.SetArgs([]string{"status", "demo/api", "--watch", "--json"})
+	err := root.Execute()
+	if err == nil || err.Error() != "--json is not supported with status --watch" {
+		t.Fatalf("error = %v, want JSON/watch validation error", err)
 	}
 }
 
@@ -221,12 +257,12 @@ func TestCobraCompletionCommandAndFlagSmoke(t *testing.T) {
 		t.Fatalf("root completion = %v", err)
 	}
 	commands := output.String()
-	for _, want := range []string{"service", "run", "up"} {
+	for _, want := range []string{"list", "run", "up", "enable", "disable"} {
 		if !strings.Contains(commands, want) {
 			t.Fatalf("root completion = %q, want command %q", commands, want)
 		}
 	}
-	for _, forbidden := range []string{"\nps\t", "\nls\t", "\nexecution\t", "\nhistory\t", "\nenable\t", "\ndisable\t"} {
+	for _, forbidden := range []string{"\nservice\t", "\nps\t", "\nls\t", "\nexecution\t", "\nhistory\t"} {
 		if strings.Contains(commands, forbidden) {
 			t.Fatalf("root completion exposes deprecated command %q: %q", forbidden, commands)
 		}
@@ -234,7 +270,7 @@ func TestCobraCompletionCommandAndFlagSmoke(t *testing.T) {
 
 	app, output = newTestRoot(t)
 	root = app.rootCommand()
-	root.SetArgs([]string{"__complete", "service", "list", "--"})
+	root.SetArgs([]string{"__complete", "list", "--"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("flag completion = %v", err)
 	}
@@ -251,7 +287,7 @@ func TestCobraInteractiveHelpNamesMachineReadableAlternatives(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"monitor", "--help"}, "mango service list --json"},
+		{[]string{"monitor", "--help"}, "mango list --json"},
 		{[]string{"logs", "--help"}, "mango logs TARGET --json"},
 		{[]string{"daemon", "logs", "--help"}, "mango daemon logs --json"},
 		{[]string{"events", "--help"}, "mango events --json"},
@@ -387,7 +423,7 @@ func TestCobraProjectExposesPlanAsOnlyPreviewCommand(t *testing.T) {
 
 func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 	cases := [][]string{
-		{"status"}, {"start"}, {"stop"}, {"restart"}, {"logs"},
+		{"status"}, {"start"}, {"stop"}, {"restart"}, {"enable"}, {"disable"}, {"logs"},
 		{"logs", "clear"}, {"config", "validate"}, {"project", "remove"},
 		{"project", "rename"}, {"project", "apply"},
 		{"project", "rollback"}, {"project", "status"},

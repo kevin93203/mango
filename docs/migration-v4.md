@@ -30,7 +30,7 @@ The normal registration/apply sequence is now:
 
 ```sh
 mango up
-mango service list
+mango list
 mango down
 ```
 

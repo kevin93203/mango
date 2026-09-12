@@ -1,10 +1,11 @@
 # Mango CLI migration guide
 
-Stage 3 is the major-release cutover to the canonical CLI. The old command
-names below are no longer executed by the new `mango` binary. They return a
-non-zero migration error on stderr, do not contact the daemon, and are absent
-from help and shell completion. JSON pipelines therefore keep stdout empty on
-failure.
+Stage 3 is the major-release cutover to the canonical CLI. Most old command
+names below return a non-zero migration error on stderr, do not contact the
+daemon, and are absent from help and shell completion. The service namespace
+and the `ps`/`ls` listing aliases are intentionally unregistered instead, so
+they return Cobra's unknown-command error. JSON pipelines keep stdout empty on
+failure in both cases.
 
 The migration error path is intentionally kept for this major release. If a
 rollback requires an old command, install the previous compatible package (or
@@ -16,16 +17,18 @@ not change the registry, generations, logs, history, or run references.
 
 | Old syntax | New syntax | Behavior and boundary |
 | --- | --- | --- |
-| `mango ps` | `mango service list` | Removed in the Stage 3 major release; the error points to the same service-list operation. |
-| `mango ls` | `mango service list` | Removed in the Stage 3 major release; no service operation is run. |
-| `mango start TARGET...` | `mango service start TARGET...` | Root `start` remains a supported shortcut; use the noun-first form in new automation. |
-| `mango stop TARGET...` | `mango service stop TARGET...` | Root `stop` remains a supported shortcut; use the noun-first form in new automation. |
-| `mango restart TARGET...` | `mango service restart TARGET...` | Root `restart` remains a supported shortcut; use the noun-first form in new automation. |
-| `mango enable TARGET...` | `mango service enable TARGET...` | Removed in the Stage 3 major release. |
-| `mango disable TARGET...` | `mango service disable TARGET...` | Removed in the Stage 3 major release. |
+| `mango ps` | `mango list` | Fully removed; no compatibility alias is registered. |
+| `mango ls` | `mango list` | Fully removed; no compatibility alias is registered. |
+| `mango service list [PROJECT]` | `mango list [PROJECT]` | The `service` namespace is fully removed; use the root service-list command. |
+| `mango service ls [PROJECT]` | `mango list [PROJECT]` | The `service` namespace and nested `ls` alias are fully removed. |
+| `mango service status TARGET` | `mango status TARGET` | The root command keeps the same target and watch behavior. |
+| `mango service start TARGET...` | `mango start TARGET...` | Root `start` is now the canonical service command. |
+| `mango service stop TARGET...` | `mango stop TARGET...` | Root `stop` is now the canonical service command. |
+| `mango service restart TARGET...` | `mango restart TARGET...` | Root `restart` is now the canonical service command. |
+| `mango service enable TARGET...` | `mango enable TARGET...` | Root `enable` is now the canonical persistent service-policy command. |
+| `mango service disable TARGET...` | `mango disable TARGET...` | Root `disable` is now the canonical persistent service-policy command. |
 | `mango project add NAME PATH` | `mango project register NAME PATH` | Removed in the Stage 3 major release; registry-only registration is still available under `register`. |
 | `mango project ls` | `mango project list` | Removed in the Stage 3 major release. |
-| `mango service ls [PROJECT]` | `mango service list [PROJECT]` | Removed in the Stage 3 major release. |
 | `mango task ls` | `mango task list` | Removed in the Stage 3 major release. |
 | `mango task run PROJECT/TASK` | `mango run task PROJECT/TASK` | Removed in the Stage 3 major release; add `--wait` when the terminal result is needed. |
 | `mango workflow ls` | `mango workflow list` | Removed in the Stage 3 major release. |
@@ -56,12 +59,17 @@ Use these commands in README examples, CI, packages, and new scripts:
 mango init [PATH]
 mango up [PATH]
 mango down [PROJECT]
+mango list [PROJECT]
 mango status PROJECT/SERVICE
+mango start TARGET [TARGET ...]
+mango stop TARGET [TARGET ...]
+mango restart TARGET [TARGET ...]
+mango enable TARGET [TARGET ...]
+mango disable TARGET [TARGET ...]
 mango logs TARGET [--follow]
 mango run task PROJECT/TASK [--wait]
 mango run workflow PROJECT/WORKFLOW [--wait]
 mango runs [list|show|watch|cancel|retry|logs|prune]
-mango service [list|status|start|stop|restart|enable|disable]
 mango project [list|plan|apply|status|rollback|register|remove|rename]
 mango schedule [list|enable|disable]
 mango config validate PATH
