@@ -57,3 +57,10 @@ Target grammar is stable across the canonical commands:
 limits the list to queued and running runs; `--limit 0` means all matching
 runs. `mango runs prune` requires `--yes` and never removes active runs, logs,
 or lifetime counters.
+
+In an interactive terminal, `mango runs` and `mango runs list` use the same
+hierarchical browser as `mango history`, including manual `r` refresh and
+lazy terminal detail loading. Active rows use only `execution.ls` metadata;
+opening a terminal row fetches its existing `history.get` detail once per TUI
+session. JSON and non-TTY output remain list-oriented, and the compatibility
+`mango history` browser remains terminal-only.

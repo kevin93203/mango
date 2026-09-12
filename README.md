@@ -1312,6 +1312,18 @@ adds task and attempt details to JSON and text output. `runs prune` requires
 exactly one of `--before` or `--all`, plus `--yes`; it removes terminal
 metadata only and never removes active runs, logs, or lifetime counters.
 
+In an interactive terminal, both `mango runs` and `mango runs list` open the
+same browser used by `mango history`: `run → task` or
+`run → workflow → tasks → attempts → output`. The root list uses `execution.ls`
+and includes active runs; Enter loads terminal task and attempt detail lazily
+through `history.get`, while active runs show the metadata available in the
+list response. Press `r` to refresh manually; there is no background polling.
+The browser keeps 15-row pages, newest-first runs, oldest-first tasks and
+attempts, and the existing `q`, arrows/`j`/`k`, Enter, Esc, Home/End controls.
+Non-TTY output and `--json` keep the normal list behavior. A task target filter
+also includes workflow roots containing that task and limits their detail view
+to matching nodes.
+
 The old `execution` and `history` commands remain hidden compatibility
 interfaces. Their migration table is in [CLI migration](docs/migration-cli.md).
 

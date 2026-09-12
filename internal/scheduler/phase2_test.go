@@ -56,6 +56,50 @@ func TestHistoryQueryIsTerminalOnlyAndNewestFirst(t *testing.T) {
 	}
 }
 
+func TestExecutionListTaskTargetIncludesWorkflowRoots(t *testing.T) {
+	store := newMemoryHistoryRepository()
+	writer := store.(interface {
+		Record(context.Context, Record, int) error
+	})
+	for _, record := range []Record{
+		{RunID: "direct", Status: StatusSuccess, TargetType: "task", Target: "compile"},
+		{RunID: "workflow", Status: StatusSuccess, TargetType: "workflow", Target: "pipeline", Tasks: []TaskRecord{{Task: "compile"}, {Task: "lint"}}},
+		{RunID: "other", Status: StatusSuccess, TargetType: "workflow", Target: "other", Tasks: []TaskRecord{{Task: "test"}}},
+	} {
+		if err := writer.Record(context.Background(), record, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		query      ExecutionQuery
+		wantRunIDs map[string]bool
+	}{
+		{name: "task target", query: ExecutionQuery{All: true, TargetType: "task", Target: "compile"}, wantRunIDs: map[string]bool{"direct": true, "workflow": true}},
+		{name: "nested task target", query: ExecutionQuery{All: true, TargetType: "task", Target: "lint"}, wantRunIDs: map[string]bool{"workflow": true}},
+		{name: "untyped target", query: ExecutionQuery{All: true, Target: "lint"}, wantRunIDs: map[string]bool{"workflow": true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := store.ListExecutions(context.Background(), test.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]bool, len(rows))
+			for _, row := range rows {
+				got[row.Record.RunID] = true
+			}
+			if len(got) != len(test.wantRunIDs) {
+				t.Fatalf("run ids = %v, want %v", got, test.wantRunIDs)
+			}
+			for runID := range test.wantRunIDs {
+				if !got[runID] {
+					t.Fatalf("run ids = %v, want %v", got, test.wantRunIDs)
+				}
+			}
+		})
+	}
+}
+
 func timeForTest(seconds int64) time.Time {
 	return time.Unix(seconds, 0).UTC()
 }

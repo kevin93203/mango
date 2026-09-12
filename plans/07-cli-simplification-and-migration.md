@@ -357,6 +357,26 @@ daemon methods：
 - prune 仍只刪 terminal metadata，不能刪除 active metadata、lifetime counters、
   logs 或 project configuration。
 
+#### Stage 2C: Shared interactive run browser
+
+在進入 Stage 3 前，`mango runs` 與 `mango runs list` 已完成 `mango history` 的
+互動式瀏覽器移植，兩個 canonical 入口在 interactive terminal 中提供相同的
+`run → task` 或 `run → workflow → tasks → attempts → output` navigation。
+
+- 根列表透過 `execution.ls` 同時顯示 active 與 terminal runs；`r` 只做手動
+  refresh，不進行背景 polling。
+- Enter 開啟 terminal run 時才呼叫既有 `history.get`，並在 TUI session 內快取
+  detail；active run 只顯示 `execution.ls` 提供的 metadata。
+- terminal detail 保留既有 attempts、workflow node、safe command metadata、
+  retained stdout/stderr 與分頁鍵盤操作。
+- `--json` 與 non-TTY output 維持既有 list/schema behavior；`mango history`
+  仍是 terminal-only compatibility command。
+- `--target-type task --target PROJECT/TASK` 同時匹配 direct task root 與包含
+  該 task 的 workflow root，detail 頁只顯示匹配的 workflow nodes。
+
+此階段不新增 daemon IPC facade、資料表或 schema；先以既有 execution/history
+endpoints 完成一致的 user-facing interaction。
+
 ### Logs integration
 
 - mango runs logs RUN_REF 是 run reference 的 canonical log command。
@@ -392,6 +412,9 @@ warning、文件與 migration coverage。
 - status filter、project/target/trigger filters 的結果與 ordering 穩定。
 - show 對 active 與 terminal run 都能工作。
 - workflow root、child task、attempts 與 retry lineage 的 detail mapping 正確。
+- interactive `mango runs` 與 `mango runs list` 使用與 history 相同的階層、分頁、
+  refresh、retained-output 操作；terminal detail lazy-load 且 active run 不呼叫
+  `history.get`。
 - watch timeout、Ctrl-C、daemon unavailable 與 superseded state 行為正確。
 - cancel、retry 只允許合法 status，且不會在 ambiguous prefix 下 mutation。
 - logs 在 process 尚未結束、已結束、workflow child 與 missing log 的行為一致。

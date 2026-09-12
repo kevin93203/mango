@@ -54,7 +54,10 @@ func historyTime(value time.Time) string {
 }
 
 func historyRecordDuration(record scheduler.Record) string {
-	if record.Started.IsZero() || record.Finished.IsZero() {
+	if record.Started.IsZero() {
+		return "-"
+	}
+	if record.Finished.IsZero() && !scheduler.IsActiveStatus(record.Status) {
 		return "-"
 	}
 	return historyDuration(historyRecordDurationSeconds(record))
@@ -191,10 +194,17 @@ func splitHistoryLines(value string, style cliui.Style) []historyOutputLine {
 }
 
 func historyRecordDurationSeconds(record scheduler.Record) float64 {
-	if record.Started.IsZero() || record.Finished.IsZero() {
+	if record.Started.IsZero() {
 		return 0
 	}
-	seconds := record.Finished.Sub(record.Started).Seconds()
+	finished := record.Finished
+	if finished.IsZero() {
+		if !scheduler.IsActiveStatus(record.Status) {
+			return 0
+		}
+		finished = time.Now()
+	}
+	seconds := finished.Sub(record.Started).Seconds()
 	if seconds < 0 {
 		return 0
 	}

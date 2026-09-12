@@ -23,6 +23,11 @@ type HistoryFilter struct {
 
 type HistoryLoader func(HistoryFilter) ([]scheduler.Record, error)
 
+// RunDetailLoader fetches the complete record for one terminal run. The root
+// list deliberately stays lightweight; detail is loaded only when the user
+// opens a run.
+type RunDetailLoader func(string) (scheduler.Record, error)
+
 type unifiedHistoryScreen int
 
 const (
@@ -34,8 +39,12 @@ const (
 )
 
 type unifiedHistoryModel struct {
-	load   HistoryLoader
-	filter HistoryFilter
+	load        HistoryLoader
+	detail      RunDetailLoader
+	filter      HistoryFilter
+	title       string
+	emptyText   string
+	detailCache map[string]scheduler.Record
 
 	records      []scheduler.Record
 	screen       unifiedHistoryScreen
@@ -53,6 +62,20 @@ type unifiedHistoryModel struct {
 const historyPageSize = 15
 
 func RunHistory(output *cliui.Renderer, load HistoryLoader, filter HistoryFilter) error {
+	return runHistoryBrowser(output, load, nil, filter, "mango history", "No execution history.")
+}
+
+// RunRuns opens the unified runs browser. It shares the history interaction
+// model while allowing the initial list to contain active executions and
+// loading terminal task/attempt details lazily.
+func RunRuns(output *cliui.Renderer, load HistoryLoader, detail RunDetailLoader, filter HistoryFilter) error {
+	if detail == nil {
+		return fmt.Errorf("runs detail loader is nil")
+	}
+	return runHistoryBrowser(output, load, detail, filter, "mango runs", "No runs found.")
+}
+
+func runHistoryBrowser(output *cliui.Renderer, load HistoryLoader, detail RunDetailLoader, filter HistoryFilter, title, emptyText string) error {
 	if load == nil {
 		return fmt.Errorf("history loader is nil")
 	}
@@ -67,11 +90,14 @@ func RunHistory(output *cliui.Renderer, load HistoryLoader, filter HistoryFilter
 		if filter.ShowAttempts {
 			renderUnifiedHistoryAttempts(output, records, filter.NoTrunc)
 		} else {
-			renderUnifiedHistoryText(output, records, filter.NoTrunc)
+			renderUnifiedHistoryTextWithEmpty(output, records, filter.NoTrunc, emptyText)
 		}
 		return nil
 	}
-	model := &unifiedHistoryModel{load: load, filter: filter}
+	model := &unifiedHistoryModel{
+		load: load, detail: detail, filter: filter, title: title, emptyText: emptyText,
+		detailCache: make(map[string]scheduler.Record),
+	}
 	if err := model.reload(); err != nil {
 		return err
 	}
@@ -91,6 +117,11 @@ func (m *unifiedHistoryModel) reload() error {
 		return records[i].Started.After(records[j].Started)
 	})
 	m.records = records
+	for index := range records {
+		if cached, ok := m.detailCache[unifiedRecordID(records[index])]; ok {
+			records[index] = cached
+		}
+	}
 	m.hasMore = m.filter.Tail > 0 && len(records) >= m.filter.Tail
 	if previousRun != "" {
 		for index := range records {
@@ -176,23 +207,38 @@ func (m *unifiedHistoryModel) historyHandleKey(key int) (bool, error) {
 
 func (m *unifiedHistoryModel) historyRender(output *cliui.Renderer) {
 	help := "(q quit, ↑/↓ or j/k select, ←/→ page, Enter detail, Esc back, r refresh, Home/End)"
+	title := m.browserTitle()
 	switch m.screen {
 	case unifiedHistoryRuns:
-		output.Println(output.Text(cliui.StyleHeader, "mango history"), output.Text(cliui.StyleMuted, help))
+		output.Println(output.Text(cliui.StyleHeader, title), output.Text(cliui.StyleMuted, help))
 		renderUnifiedRuns(output, m)
 	case unifiedHistoryTask:
-		output.Println(output.Text(cliui.StyleHeader, "mango history / task"), output.Text(cliui.StyleMuted, help))
+		output.Println(output.Text(cliui.StyleHeader, title+" / task"), output.Text(cliui.StyleMuted, help))
 		renderUnifiedTask(output, m)
 	case unifiedHistoryWorkflowTasks:
-		output.Println(output.Text(cliui.StyleHeader, "mango history / workflow / tasks"), output.Text(cliui.StyleMuted, help))
+		output.Println(output.Text(cliui.StyleHeader, title+" / workflow / tasks"), output.Text(cliui.StyleMuted, help))
 		renderUnifiedWorkflowTasks(output, m)
 	case unifiedHistoryAttempts:
-		output.Println(output.Text(cliui.StyleHeader, "mango history / attempts"), output.Text(cliui.StyleMuted, help))
+		output.Println(output.Text(cliui.StyleHeader, title+" / attempts"), output.Text(cliui.StyleMuted, help))
 		renderUnifiedAttempts(output, m)
 	case unifiedHistoryOutput:
-		output.Println(output.Text(cliui.StyleHeader, "mango history / output"), output.Text(cliui.StyleMuted, "(↑/↓ or j/k scroll, Esc back, q quit)"))
+		output.Println(output.Text(cliui.StyleHeader, title+" / output"), output.Text(cliui.StyleMuted, "(↑/↓ or j/k scroll, Esc back, q quit)"))
 		renderUnifiedOutput(output, m)
 	}
+}
+
+func (m *unifiedHistoryModel) browserTitle() string {
+	if m.title == "" {
+		return "mango history"
+	}
+	return m.title
+}
+
+func (m *unifiedHistoryModel) browserEmptyText() string {
+	if m.emptyText == "" {
+		return "No execution history."
+	}
+	return m.emptyText
 }
 
 func (m *unifiedHistoryModel) historyError() string { return m.lastError }
@@ -207,6 +253,13 @@ func (m *unifiedHistoryModel) enter() error {
 			return nil
 		}
 		m.runIndex = m.selected
+		if err := m.loadRunDetails(); err != nil {
+			return err
+		}
+		run = m.currentRun()
+		if run == nil {
+			return nil
+		}
 		m.selected = 0
 		if run.TargetType == "workflow" {
 			m.screen = unifiedHistoryWorkflowTasks
@@ -243,6 +296,33 @@ func (m *unifiedHistoryModel) enter() error {
 		m.outputOffset = 0
 		m.screen = unifiedHistoryOutput
 	}
+	return nil
+}
+
+func (m *unifiedHistoryModel) loadRunDetails() error {
+	if m.detail == nil || m.selected < 0 || m.selected >= len(m.records) {
+		return nil
+	}
+	runID := unifiedRecordID(m.records[m.selected])
+	if runID == "" || !scheduler.IsTerminalStatus(m.records[m.selected].Status) {
+		return nil
+	}
+	if cached, ok := m.detailCache[runID]; ok {
+		m.records[m.selected] = cached
+		return nil
+	}
+	record, err := m.detail(runID)
+	if err != nil {
+		return err
+	}
+	if record.RunID == "" {
+		record.RunID = runID
+	}
+	if m.detailCache == nil {
+		m.detailCache = make(map[string]scheduler.Record)
+	}
+	m.detailCache[runID] = record
+	m.records[m.selected] = record
 	return nil
 }
 
@@ -539,7 +619,7 @@ func unifiedRecordID(record scheduler.Record) string {
 
 func renderUnifiedRuns(output *cliui.Renderer, model *unifiedHistoryModel) {
 	if len(model.records) == 0 {
-		output.Println(output.Text(cliui.StyleMuted, "No execution history."))
+		output.Println(output.Text(cliui.StyleMuted, model.browserEmptyText()))
 		return
 	}
 	start, end := model.pageBounds()
@@ -732,10 +812,14 @@ func renderUnifiedOutput(output *cliui.Renderer, model *unifiedHistoryModel) {
 }
 
 func renderUnifiedHistoryText(output *cliui.Renderer, records []scheduler.Record, noTrunc bool) {
+	renderUnifiedHistoryTextWithEmpty(output, records, noTrunc, "No execution history.")
+}
+
+func renderUnifiedHistoryTextWithEmpty(output *cliui.Renderer, records []scheduler.Record, noTrunc bool, emptyText string) {
 	printRecords := append([]scheduler.Record(nil), records...)
 	sort.SliceStable(printRecords, func(i, j int) bool { return printRecords[i].Started.Before(printRecords[j].Started) })
 	if len(printRecords) == 0 {
-		output.Println(output.Text(cliui.StyleMuted, "No execution history."))
+		output.Println(output.Text(cliui.StyleMuted, emptyText))
 		return
 	}
 	rows := make([][]cliui.Cell, 0, len(printRecords))

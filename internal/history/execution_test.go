@@ -95,6 +95,47 @@ func TestExecutionMigrationIdempotencyAndStateTransitions(t *testing.T) {
 	}
 }
 
+func TestExecutionListTaskTargetIncludesWorkflowRoots(t *testing.T) {
+	repository := openTestRepository(t)
+	for _, record := range []scheduler.Record{
+		{RunID: "direct", Project: "demo", Status: scheduler.StatusSuccess, TargetType: "task", Target: "compile"},
+		{RunID: "workflow", Project: "demo", Status: scheduler.StatusSuccess, TargetType: "workflow", Target: "pipeline", Tasks: []scheduler.TaskRecord{{Task: "compile"}, {Task: "lint"}}},
+		{RunID: "other", Project: "demo", Status: scheduler.StatusSuccess, TargetType: "workflow", Target: "other", Tasks: []scheduler.TaskRecord{{Task: "test"}}},
+	} {
+		if err := repository.Record(context.Background(), record, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		query      scheduler.ExecutionQuery
+		wantRunIDs map[string]bool
+	}{
+		{name: "task target", query: scheduler.ExecutionQuery{All: true, TargetType: "task", Target: "compile"}, wantRunIDs: map[string]bool{"direct": true, "workflow": true}},
+		{name: "nested task target", query: scheduler.ExecutionQuery{All: true, TargetType: "task", Target: "lint"}, wantRunIDs: map[string]bool{"workflow": true}},
+		{name: "untyped target", query: scheduler.ExecutionQuery{All: true, Target: "lint"}, wantRunIDs: map[string]bool{"workflow": true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := repository.ListExecutions(context.Background(), test.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]bool, len(rows))
+			for _, row := range rows {
+				got[row.Record.RunID] = true
+			}
+			if len(got) != len(test.wantRunIDs) {
+				t.Fatalf("run ids = %v, want %v", got, test.wantRunIDs)
+			}
+			for runID := range test.wantRunIDs {
+				if !got[runID] {
+					t.Fatalf("run ids = %v, want %v", got, test.wantRunIDs)
+				}
+			}
+		})
+	}
+}
+
 func TestScheduleOccurrencePersistenceIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.db")
 	repository, err := Open(Config{Driver: "sqlite", Path: path})

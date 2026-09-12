@@ -88,6 +88,79 @@ func TestUnifiedHistoryKeepsConcurrentRunsDistinctAndNavigatesHierarchy(t *testi
 	}
 }
 
+func TestUnifiedRunsLazilyLoadsTerminalDetailsAndLeavesActiveRunsLightweight(t *testing.T) {
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	active := scheduler.Record{
+		RunID: "active-run", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Status: scheduler.StatusRunning, Started: started.Add(2 * time.Second),
+	}
+	terminal := scheduler.Record{
+		RunID: "terminal-run", Project: "demo", TargetType: "workflow", Target: "pipeline",
+		Status: scheduler.StatusSuccess, Started: started, Finished: started.Add(time.Second),
+	}
+	detailed := terminal
+	detailed.Tasks = []scheduler.TaskRecord{{Node: "build", Task: "compile", Status: scheduler.StatusSuccess}}
+	detailCalls := 0
+	model := &unifiedHistoryModel{
+		load: func(HistoryFilter) ([]scheduler.Record, error) { return []scheduler.Record{terminal, active}, nil },
+		detail: func(runID string) (scheduler.Record, error) {
+			detailCalls++
+			if runID != terminal.RunID {
+				t.Fatalf("detail run id = %q, want %q", runID, terminal.RunID)
+			}
+			return detailed, nil
+		},
+		filter: HistoryFilter{Tail: 10},
+	}
+	if err := model.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if model.records[0].RunID != active.RunID || model.records[1].RunID != terminal.RunID {
+		t.Fatalf("records = %+v, want active then terminal", model.records)
+	}
+
+	if err := model.enter(); err != nil {
+		t.Fatal(err)
+	}
+	if detailCalls != 0 || len(model.visibleTasks()) != 0 {
+		t.Fatalf("active detail calls/tasks = %d/%+v, want no lazy detail", detailCalls, model.visibleTasks())
+	}
+	model.back()
+	model.selected = 1
+	if err := model.enter(); err != nil {
+		t.Fatal(err)
+	}
+	if detailCalls != 1 || len(model.visibleTasks()) != 1 || model.visibleTasks()[0].Task != "compile" {
+		t.Fatalf("terminal detail calls/tasks = %d/%+v, want one loaded task", detailCalls, model.visibleTasks())
+	}
+	model.back()
+	model.selected = 1
+	if err := model.enter(); err != nil {
+		t.Fatal(err)
+	}
+	if detailCalls != 1 {
+		t.Fatalf("cached terminal detail calls = %d, want one", detailCalls)
+	}
+}
+
+func TestUnifiedRunsUseRunsTitleAndEmptyMessage(t *testing.T) {
+	model := &unifiedHistoryModel{title: "mango runs", emptyText: "No runs found."}
+	var output bytes.Buffer
+	renderer := cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, Width: 120})
+	model.historyRender(renderer)
+	text := output.String()
+	if !strings.Contains(text, "mango runs") || !strings.Contains(text, "No runs found.") {
+		t.Fatalf("runs browser output = %q, want runs title and empty message", text)
+	}
+}
+
+func TestUnifiedRunsShowElapsedTimeForActiveRoot(t *testing.T) {
+	record := scheduler.Record{Status: scheduler.StatusRunning, Started: time.Now().Add(-2 * time.Second)}
+	if got := historyRecordDuration(record); got == "-" || got == "0s" {
+		t.Fatalf("active duration = %q, want elapsed duration", got)
+	}
+}
+
 func TestUnifiedHistoryTaskFilterOnlyShowsMatchingWorkflowNodes(t *testing.T) {
 	record := scheduler.Record{
 		RunID: "run-1", Project: "demo", TargetType: "workflow", Target: "pipeline",

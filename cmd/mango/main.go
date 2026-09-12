@@ -2121,10 +2121,13 @@ func runListCommandWithCaller(options runListOptions, caller func(string, interf
 	if options.TargetType != "" && options.TargetType != "task" && options.TargetType != "workflow" {
 		return fmt.Errorf("unknown target type %q", options.TargetType)
 	}
+	if !jsonOutput && termIsInteractive() {
+		return runListInteractiveCommand(options, caller)
+	}
 	response, err := runCall(caller, "execution.ls", executionListCLIParams{
 		Status: options.Status, TriggerType: options.TriggerType, Trigger: options.Trigger,
 		Project: options.Project, TargetType: options.TargetType, Target: options.Target,
-		Limit: options.Limit, All: !options.Active,
+		Limit: options.Limit, All: !options.Active && options.Status == "",
 	})
 	if err != nil {
 		return err
@@ -2151,6 +2154,68 @@ func runListCommandWithCaller(options runListOptions, caller func(string, interf
 	printRunListTable(items)
 	printRunListAttempts(detailed)
 	return nil
+}
+
+func runListInteractiveCommand(options runListOptions, caller func(string, interface{}) (ipc.Response, error)) error {
+	load := func(filter tui.HistoryFilter) ([]scheduler.Record, error) {
+		response, err := runCall(caller, "execution.ls", executionListCLIParams{
+			Status: options.Status, TriggerType: filter.TriggerType, Trigger: filter.Trigger,
+			Project: options.Project, TargetType: filter.TargetType, Target: filter.Target,
+			Limit: filter.Tail, All: !options.Active && options.Status == "",
+		})
+		if err != nil {
+			return nil, err
+		}
+		var items []api.ExecutionInfo
+		if err := decodeData(response.Data, &items); err != nil {
+			return nil, err
+		}
+		return executionRecordsFromInfo(items), nil
+	}
+	detail := func(runID string) (scheduler.Record, error) {
+		response, err := runCall(caller, "history.get", struct {
+			RunID string `json:"run_id"`
+		}{RunID: runID})
+		if err != nil {
+			return scheduler.Record{}, err
+		}
+		var history api.HistoryDetail
+		if err := decodeData(response.Data, &history); err != nil {
+			return scheduler.Record{}, err
+		}
+		records := historyRecordsFromInfo([]api.HistoryInfo{history.HistoryInfo})
+		if len(records) == 0 {
+			return scheduler.Record{}, errors.New("history.get returned no run")
+		}
+		return records[0], nil
+	}
+	return tui.RunRuns(cliOutput, load, detail, tui.HistoryFilter{
+		Tail: options.Limit, TriggerType: options.TriggerType, Trigger: options.Trigger,
+		TargetType: options.TargetType, Target: options.Target, NoTrunc: noTruncOutput,
+	})
+}
+
+func executionRecordsFromInfo(items []api.ExecutionInfo) []scheduler.Record {
+	result := make([]scheduler.Record, 0, len(items))
+	for _, item := range items {
+		record := scheduler.Record{
+			RunID: item.RunID, Project: item.Project, Name: item.Name, TargetType: item.TargetType, Target: item.Target,
+			Status: item.Status, ExitCode: item.ExitCode, Error: item.Error, StdoutPath: item.StdoutPath, StderrPath: item.StderrPath,
+			IdempotencyKey: item.IdempotencyKey, ConfigurationGeneration: item.ConfigurationGeneration,
+			RetriedFromRunID: item.RetriedFromRunID, Trigger: scheduler.TriggerRef{},
+		}
+		if item.Trigger != nil {
+			record.Trigger = scheduler.TriggerRef{Type: item.Trigger.Type, Name: item.Trigger.Name, Mode: item.Trigger.Mode, EventID: item.Trigger.EventID}
+		}
+		if item.StartedAt != nil {
+			record.Started = *item.StartedAt
+		}
+		if item.FinishedAt != nil {
+			record.Finished = *item.FinishedAt
+		}
+		result = append(result, record)
+	}
+	return result
 }
 
 func runListDetails(items []api.ExecutionInfo, caller func(string, interface{}) (ipc.Response, error)) ([]runListItem, error) {

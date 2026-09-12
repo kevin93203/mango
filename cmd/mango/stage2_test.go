@@ -100,6 +100,51 @@ func TestRunListUsesActiveAndTerminalExecutionScope(t *testing.T) {
 	}
 }
 
+func TestRunListStatusFilterDoesNotRequestAllExecutions(t *testing.T) {
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	t.Cleanup(func() {
+		cliOutput, jsonOutput = previousOutput, previousJSON
+	})
+	var output bytes.Buffer
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever, JSON: true})
+	jsonOutput = true
+	var got executionListCLIParams
+	if err := runListCommandWithCaller(runListOptions{Status: "success"}, func(method string, params interface{}) (ipc.Response, error) {
+		if method != "execution.ls" {
+			t.Fatalf("method = %q, want execution.ls", method)
+		}
+		if err := decodeData(params, &got); err != nil {
+			t.Fatal(err)
+		}
+		return ipc.Response{Data: []api.ExecutionInfo{}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.All || got.Status != "success" {
+		t.Fatalf("status query = %+v, want status without all", got)
+	}
+}
+
+func TestExecutionRecordsFromInfoPreservesRunMetadata(t *testing.T) {
+	started := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	finished := started.Add(time.Second)
+	items := executionRecordsFromInfo([]api.ExecutionInfo{{
+		RunID: "run-1", Project: "demo", Name: "pipeline", TargetType: "workflow", Target: "pipeline",
+		Status: "running", Trigger: &api.TriggerInfo{Type: "schedule", Name: "nightly", Mode: "automatic", EventID: "event-1"},
+		IdempotencyKey: "request-1", ConfigurationGeneration: 7, RetriedFromRunID: "old-run",
+		StartedAt: &started, FinishedAt: &finished, StdoutPath: "stdout.log", StderrPath: "stderr.log",
+	}})
+	if len(items) != 1 {
+		t.Fatalf("records = %+v, want one record", items)
+	}
+	got := items[0]
+	if got.RunID != "run-1" || got.Trigger.Name != "nightly" || got.Trigger.EventID != "event-1" ||
+		got.IdempotencyKey != "request-1" || got.ConfigurationGeneration != 7 || got.RetriedFromRunID != "old-run" ||
+		!got.Started.Equal(started) || !got.Finished.Equal(finished) || got.StdoutPath != "stdout.log" || got.StderrPath != "stderr.log" {
+		t.Fatalf("record = %+v, want execution metadata preserved", got)
+	}
+}
+
 func TestRunShowMapsTerminalHistoryIntoRunDetail(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput

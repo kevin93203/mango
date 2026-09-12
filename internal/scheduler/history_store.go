@@ -667,10 +667,17 @@ func matchesExecutionQuery(execution Execution, query ExecutionQuery) bool {
 	if query.Project != "" && record.Project != query.Project {
 		return false
 	}
-	if query.TargetType != "" && record.TargetType != query.TargetType {
-		return false
+	switch query.TargetType {
+	case "workflow":
+		return record.TargetType == "workflow" && (query.Target == "" || record.Target == query.Target)
+	case "task":
+		if record.TargetType == "task" {
+			return query.Target == "" || record.Target == query.Target
+		}
+		return record.TargetType == "workflow" && recordContainsTask(record, query.Target)
+	default:
+		return query.Target == "" || record.Target == query.Target || recordContainsTask(record, query.Target)
 	}
-	return query.Target == "" || record.Target == query.Target
 }
 
 func IsActiveStatus(status string) bool {

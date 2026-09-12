@@ -842,11 +842,47 @@ func (r *Repository) ListExecutions(ctx context.Context, query scheduler.Executi
 	if query.Project != "" {
 		db = db.Where("project = ?", query.Project)
 	}
-	if query.TargetType != "" {
-		db = db.Where("target_type = ?", query.TargetType)
+
+	var taskRunIDs []int64
+	if query.TargetType == "task" || (query.TargetType == "" && query.Target != "") {
+		taskDB := r.db.WithContext(ctx).Model(&taskModel{}).Select("run_row_id")
+		if query.Target != "" {
+			taskDB = taskDB.Where("task = ?", query.Target)
+		}
+		if query.Project != "" {
+			taskDB = taskDB.Joins("JOIN history_runs ON history_runs.id = history_tasks.run_row_id").Where("history_runs.project = ?", query.Project)
+		}
+		if err := taskDB.Distinct("run_row_id").Pluck("run_row_id", &taskRunIDs).Error; err != nil {
+			return nil, err
+		}
 	}
-	if query.Target != "" {
-		db = db.Where("target = ?", query.Target)
+
+	switch query.TargetType {
+	case "workflow":
+		db = db.Where("target_type = ?", "workflow")
+		if query.Target != "" {
+			db = db.Where("target = ?", query.Target)
+		}
+	case "task":
+		if query.Target == "" {
+			if len(taskRunIDs) == 0 {
+				db = db.Where("target_type = ?", "task")
+			} else {
+				db = db.Where("target_type = ? OR (target_type = ? AND id IN ?)", "task", "workflow", taskRunIDs)
+			}
+		} else if len(taskRunIDs) == 0 {
+			db = db.Where("target_type = ? AND target = ?", "task", query.Target)
+		} else {
+			db = db.Where("(target_type = ? AND target = ?) OR (target_type = ? AND id IN ?)", "task", query.Target, "workflow", taskRunIDs)
+		}
+	case "":
+		if query.Target != "" {
+			if len(taskRunIDs) == 0 {
+				db = db.Where("target = ?", query.Target)
+			} else {
+				db = db.Where("target = ? OR id IN ?", query.Target, taskRunIDs)
+			}
+		}
 	}
 	if query.Limit > 0 {
 		db = db.Limit(query.Limit)
