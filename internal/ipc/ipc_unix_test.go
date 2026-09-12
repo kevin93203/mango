@@ -3,7 +3,9 @@
 package ipc
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -75,6 +77,60 @@ func TestPrepareEndpointDoesNotRemoveActiveEndpoint(t *testing.T) {
 	if _, err := os.Stat(endpoint); err != nil {
 		t.Fatalf("active endpoint was removed: %v", err)
 	}
+}
+
+func TestCallEndpointStopsWhenContextIsCancelled(t *testing.T) {
+	endpoint := shortEndpoint(t)
+	listener, err := net.Listen("unix", endpoint)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("Unix socket bind is unavailable in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requestReceived := make(chan struct{})
+	holdResponse := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&Request{}); err != nil {
+			return
+		}
+		close(requestReceived)
+		<-holdResponse
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := CallEndpoint(ctx, endpoint, Request{Method: "execution.watch"})
+		result <- err
+	}()
+
+	select {
+	case <-requestReceived:
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive request")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CallEndpoint error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CallEndpoint did not stop after cancellation")
+	}
+	close(holdResponse)
+	<-serverDone
 }
 
 func shortEndpoint(t *testing.T) string {

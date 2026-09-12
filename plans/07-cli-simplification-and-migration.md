@@ -1,6 +1,6 @@
 # Phase 07: CLI Simplification and Progressive Migration
 
-Status: Stage 1 complete; Stage 2 pending.
+Status: Stage 2 complete; Stage 3 pending.
 
 ## Objective
 
@@ -577,12 +577,12 @@ CLI-specific checks：
 
 ### Before Stage 2 release
 
-- [ ] mango run task/workflow available。
-- [ ] mango runs CLI facade available。
-- [ ] Active/terminal ordering and filters covered by tests。
-- [ ] Retry lineage and run reference behavior verified。
-- [ ] Old execution/history commands emit migration guidance。
-- [ ] JSON schema and release compatibility docs updated。
+- [x] mango run task/workflow available。
+- [x] mango runs CLI facade available。
+- [x] Active/terminal ordering and filters covered by tests。
+- [x] Retry lineage and run reference behavior verified。
+- [x] Old execution/history commands emit migration guidance。
+- [x] JSON schema and release compatibility docs updated。
 
 ### Before Stage 3 major release
 

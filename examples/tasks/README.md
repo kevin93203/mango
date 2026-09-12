@@ -9,8 +9,8 @@ definitions:
 
 ```sh
 mango config validate mango.example.yaml
-mango task ls
-mango workflow ls
+mango task list
+mango workflow list
 ```
 
 After starting the Mango daemon with this configuration, run examples
@@ -20,19 +20,19 @@ The commands below assume the project is registered with the name `demo`;
 replace that prefix with your project name if needed.
 
 ```sh
-mango task run demo/demo-direct
-mango task run demo/demo-artifact
-mango workflow run demo/demo-linear
-mango workflow run demo/demo-parallel
-mango workflow run demo/demo-failure
-mango workflow run demo/demo-timeout
+mango run task demo/demo-direct
+mango run task demo/demo-artifact
+mango run workflow demo/demo-linear
+mango run workflow demo/demo-parallel
+mango run workflow demo/demo-failure
+mango run workflow demo/demo-timeout
 ```
 
-Inspect execution history, including per-node attempts:
+Inspect runs, including per-node attempts:
 
 ```sh
-mango history --target-type workflow --target demo/demo-failure --attempts
-mango history --target-type task --target demo/demo-slow-timeout --attempts
+mango runs list --target-type workflow --target demo/demo-failure --attempts
+mango runs list --target-type task --target demo/demo-slow-timeout --attempts
 ```
 
 The failure workflow records retries for `demo-retry-failure`; its dependent
@@ -41,7 +41,7 @@ forces `demo-slow-timeout` to stop after two seconds and records exit code 124.
 
 `demo-artifact` runs `examples/tasks/artifact/main.go`, writes
 `examples/artifacts/demo-artifact.txt`, and declares that file in `outputs`.
-Use `mango history show RUN_ID --json` to inspect its existence, size, and
+Use `mango runs show RUN_ID --json` to inspect its existence, size, and
 SHA-256 metadata.
 
 All task helpers used by the sample are Go programs and run on Windows 10/11,

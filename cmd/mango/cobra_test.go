@@ -30,7 +30,7 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	root := app.rootCommand()
 	want := []string{
 		"config", "daemon", "doctor", "down", "events", "execution", "history", "init", "logs",
-		"monitor", "project", "restart", "run", "schedule", "service", "start", "startup", "status",
+		"monitor", "project", "restart", "run", "runs", "schedule", "service", "start", "startup", "status",
 		"stop", "task", "up", "workflow",
 	}
 	for _, name := range want {
@@ -67,7 +67,7 @@ func TestCobraRootCommandGroupSnapshot(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
 	want := map[string][]string{
-		groupStart:    {"down", "init", "logs", "run", "status", "up"},
+		groupStart:    {"down", "init", "logs", "run", "runs", "status", "up"},
 		groupManage:   {"project", "restart", "schedule", "service", "start", "stop", "task", "workflow"},
 		groupAdvanced: {"config", "daemon", "doctor", "events", "monitor", "startup"},
 	}
@@ -93,7 +93,7 @@ func TestCobraRootHelpSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, snapshot := range []string{
-		"Start here:\n  down        Stop a project\n  init        Create an example configuration\n  logs        Read service logs\n  run         Run a task or workflow\n  status      Show service status\n  up          Start a project",
+		"Start here:\n  down        Stop a project\n  init        Create an example configuration\n  logs        Read service logs\n  run         Run a task or workflow\n  runs        List and control runs\n  status      Show service status\n  up          Start a project",
 		"Manage:\n  project     Manage registered projects\n  restart     Restart one or more services\n  schedule    Manage schedules\n  service     Manage services\n  start       Start one or more services\n  stop        Stop one or more services\n  task        Manage tasks\n  workflow    Manage workflows",
 		"Advanced:\n  completion  Generate the autocompletion script for the specified shell\n  config      Inspect configuration\n  daemon      Manage the Mango daemon\n  doctor      Inspect Mango environment and daemon health\n  events      Read the event stream\n  monitor     Open the interactive service monitor\n  startup     Manage startup integration",
 	} {
@@ -408,6 +408,7 @@ func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 		{"project", "rollback"}, {"project", "status"},
 		{"schedule", "enable"}, {"schedule", "disable"}, {"execution", "get"}, {"execution", "watch"},
 		{"execution", "cancel"}, {"execution", "retry"}, {"execution", "logs"},
+		{"runs", "show"}, {"runs", "watch"}, {"runs", "cancel"}, {"runs", "retry"}, {"runs", "logs"},
 	}
 	for _, args := range cases {
 		name := strings.Join(args, " ")

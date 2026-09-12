@@ -427,17 +427,22 @@ mango schedule list
 mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 
-mango history list
-mango history show RUN_REF
-mango history purge (--before RFC3339 | --all) --yes
+mango runs
+mango runs list
+mango runs show RUN_REF
+mango runs watch RUN_REF [--timeout DURATION]
+mango runs cancel RUN_REF
+mango runs retry RUN_REF
+mango runs logs RUN_REF [--stream STREAM] [--tail N]
+mango runs prune (--before RFC3339 | --all) --yes
 ```
 
 `task` and `workflow` are execution targets. `schedule`, `webhook`, and
 `manual` are trigger sources. Webhook delivery is available when the optional
 listener is enabled in `daemon.yaml`; otherwise use `mango run task` or
 `mango run workflow` for a manual run.
-`history` is the terminal-only execution-history browser. Use `--json` for
-machine-readable history and status data.
+`runs` is the unified run browser and control surface. It includes active and
+terminal runs; use `--json` for machine-readable run data.
 
 ## Complete YAML reference
 
@@ -829,13 +834,13 @@ Both forms are accepted:
 ```sh
 mango --color=never service list
 mango status demo/api --json
-mango --json history list --limit 20
-mango --no-trunc execution list
+mango --json runs list --limit 20
+mango --no-trunc runs list
 ```
 
 Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
 that setting. Non-interactive lifecycle, inspection, project, task, workflow,
-schedule, daemon, startup, event, and execution commands support `--json`.
+schedule, daemon, startup, event, and run commands support `--json`.
 Interactive monitor and `--follow` log views remain human-readable; `init`
 still intentionally has no JSON output.
 
@@ -858,9 +863,9 @@ commands when you need to manage desired state or daemon ownership directly:
   use `mango service list --json`, `mango status TARGET --json`, or
   `mango logs TARGET --json` for machine-readable alternatives.
 
-`execution` and `history` remain hidden compatibility namespaces while the
-unified `runs` model is planned for Stage 2. They remain callable for existing
-scripts and are documented below for operators.
+`runs` is the canonical run model. The `execution` and `history` namespaces
+remain hidden compatibility interfaces for existing scripts and are documented
+below for operators.
 
 ### `mango init`
 
@@ -1200,26 +1205,29 @@ It does not support `--json`; use `mango service list --json` or
 ```text
 mango task list [--json]
 mango run task PROJECT/TASK [--wait] [--json]
-mango execution list [--status STATUS | --all] [--trigger-type TYPE] [--trigger NAME]
-                       [--project PROJECT] [--target-type task|workflow]
-                       [--target PROJECT/NAME] [--limit N] [--json]
-mango execution get|cancel|retry RUN_REF [--json]
-mango execution watch RUN_REF [--timeout 45s] [--json]
-mango execution logs RUN_REF [--stream stdout|stderr|all] [--tail N] [--json]
+mango runs [--status STATUS] [--active] [--project PROJECT] [--limit N] [--json]
+mango runs list [--status STATUS] [--active] [--project PROJECT] [--limit N] [--json]
+mango runs show RUN_REF [--json]
+mango runs watch RUN_REF [--timeout 45s] [--json]
+mango runs cancel RUN_REF [--json]
+mango runs retry RUN_REF [--json]
+mango runs logs RUN_REF [--stream stdout|stderr|all] [--tail N] [--json]
+mango runs prune (--before RFC3339 | --all) --yes [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
 | `task list` | Lists task name, lifetime logical runs, status, last run, next run, and duration. `ls` remains a deprecated compatibility form. |
 | `run task` | Starts a task asynchronously with trigger `manual`; `--wait` waits for its terminal result. |
-| `execution list` | Lists queued/running executions by default; `--status` selects one status and `--all` includes every status. `execution` remains an advanced compatibility namespace. |
+| `runs list` | Lists active and terminal runs newest-first; `--active` limits the result to queued/running and `--status` selects one status. `--limit 0` returns all matching runs. |
+
 `task list` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
 Without `--json`, `mango run task` prints the accepted state and an operator-friendly
 run reference, for example `Task demo/backup queued (run_id=...)`. JSON keeps
 the canonical durable `run_id`.
 
-The example configuration also includes a long-running execution target for
-testing execution controls:
+The example configuration also includes a long-running task and workflow for
+testing run controls:
 
 ```sh
 mango run task demo/execution-demo-task
@@ -1227,8 +1235,8 @@ mango run workflow demo/execution-demo-workflow
 ```
 
 Both targets run for about 20 seconds and emit both stdout and stderr. Use the
-returned run reference with `execution watch`, `execution cancel`,
-`execution retry`, `execution logs`, or `execution list`.
+returned run reference with `mango runs watch`, `mango runs cancel`,
+`mango runs retry`, `mango runs logs`, or `mango runs list`.
 `RUNS` counts direct task runs and workflow-node invocations; retries do not
 increase it. `NEXT RUN` includes the earliest direct or indirect schedule.
 
@@ -1258,50 +1266,54 @@ mango workflow list
 mango run workflow demo/release
 ```
 
-Use `mango history list --target-type workflow --target demo/release` to inspect
+Use `mango runs list --target-type workflow --target demo/release` to inspect
 workflow runs and their task nodes.
 
-Every task and workflow run returns a durable `run_id`. Use `execution watch`
-or `execution get` to observe its final status, `execution cancel` to terminate
-the managed process tree, `execution retry` to create a new logical execution,
-and `execution logs` to read output after the process exits.
-`execution watch` waits up to 30 seconds by default; use `--timeout 2m` for a
-longer wait (up to 5 minutes).
+### Runs
 
-Execution commands accept either the full `run_id` or a unique prefix of at
-least 8 characters. Exact IDs are checked first; an ambiguous prefix fails
-without performing the requested operation and returns usable candidate refs.
-Human-readable output shows generated UUIDs as 12 compact hexadecimal
-characters. Use the global `--no-trunc` flag to show full IDs. JSON output
-always keeps the canonical full `run_id`.
-
-For example:
+Every task and workflow run returns a durable `run_id`. `mango runs` and
+`mango runs list` include active and terminal runs, newest first:
 
 ```sh
-mango execution watch 7f31a2c4d9e0
-mango execution get 7f31a2c4d9e0 --no-trunc
+mango runs
+mango runs list --active
+mango runs list --status failed
+mango runs list --trigger-type schedule --trigger nightly
+mango runs list --project demo --target-type task
+mango runs list --target demo/execution-demo-task --limit 10
+mango runs list --json
 ```
 
-`execution list` supports the following filters:
+Use `mango runs show` for active metadata or terminal workflow nodes, task
+attempts, and lifecycle events. `watch` waits up to 30 seconds by default;
+`cancel` terminates the managed process tree, `retry` creates a new logical
+run linked with `retried_from_run_id`, and `logs` reads run output after or
+during execution.
 
 ```sh
-mango execution list
-mango execution list --status running
-mango execution list --status failed
-mango execution list --all
-mango execution list --trigger-type schedule --trigger nightly
-mango execution list --project demo --target-type task
-mango execution list --target demo/execution-demo-task --limit 10
-mango execution list --json
+mango runs show 7f31a2c4d9e0
+mango runs watch 7f31a2c4d9e0 --timeout 2m
+mango runs cancel 7f31a2c4d9e0
+mango runs retry 7f31a2c4d9e0
+mango runs logs 7f31a2c4d9e0 --stream all --tail 100
+mango runs prune --before 2026-01-01T00:00:00Z --yes
 ```
 
-By default `execution list` lists only `queued` and `running` executions. Use
-`--status STATUS` for one status or `--all` for every status; `--all` and
-`--status` are mutually exclusive. The human-readable table shows only
-`RUN_ID`, target, status, started, and elapsed. `--target` accepts either
-`PROJECT/NAME` or a name used together with `--project`; `--limit 0` returns
-all matching executions. `--trigger-type` accepts `schedule`, `webhook`, or
-`manual`; `--trigger` filters the trigger name.
+Run controls accept a full `run_id` or a unique prefix of at least 8
+characters. Exact IDs are checked first; an ambiguous prefix fails before a
+mutation and returns usable candidate refs. Human-readable output shortens
+generated UUIDs to 12 compact hexadecimal characters; `--no-trunc` shows the
+full ID and JSON always keeps the canonical full `run_id`.
+
+`--limit 0` returns all matching runs. `--active` is the explicit shortcut for
+queued/running runs; `--status`, `--project`, `--target`, `--target-type`,
+`--trigger-type`, and `--trigger` are available on the list command. `--attempts`
+adds task and attempt details to JSON and text output. `runs prune` requires
+exactly one of `--before` or `--all`, plus `--yes`; it removes terminal
+metadata only and never removes active runs, logs, or lifetime counters.
+
+The old `execution` and `history` commands remain hidden compatibility
+interfaces. Their migration table is in [CLI migration](docs/migration-cli.md).
 
 ### Schedules
 
@@ -1332,7 +1344,7 @@ and survives daemon restarts. A project apply keeps state for unchanged
 for schedules removed from the configuration. Disabled schedules remain in
 `schedule list` with `STATUS=disabled` and no `NEXT_RUN`.
 
-### `mango history`
+### Compatibility: `mango history`
 
 ```text
 mango history list [--limit N] [--status STATUS] [--trigger-type TYPE]
@@ -1343,7 +1355,8 @@ mango history show RUN_REF [--json]
 mango history purge (--before RFC3339 | --all) --yes [--json]
 ```
 
-History is terminal-only and is read from the canonical execution store.
+`history` is a hidden compatibility namespace; use `mango runs` for new
+scripts. It remains terminal-only and is read from the canonical run store.
 `history list` is newest-first and `--limit 0` returns all retained terminal
 runs. `history show` accepts terminal runs and returns workflow nodes, task
 records, attempts, and lifecycle events. `history purge` removes only terminal

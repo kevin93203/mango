@@ -199,6 +199,9 @@ func Call(ctx context.Context, request Request) (Response, error) {
 // The daemon client uses Call, while per-service shims use their own
 // endpoint so mangod never needs to share the daemon listener with a shim.
 func CallEndpoint(ctx context.Context, endpoint string, request Request) (Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if request.Version == 0 {
 		request.Version = ProtocolVersion
 	}
@@ -216,11 +219,26 @@ func CallEndpoint(ctx context.Context, endpoint string, request Request) (Respon
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
+	cancelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-cancelDone:
+		}
+	}()
+	defer close(cancelDone)
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Response{}, ctxErr
+		}
 		return Response{}, err
 	}
 	var response Response
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Response{}, ctxErr
+		}
 		return Response{}, err
 	}
 	if response.Version != ProtocolVersion {

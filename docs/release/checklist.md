@@ -28,9 +28,9 @@
 
 - [ ] Start the packaged daemon with a temporary `MANGO_HOME` and inspect
       `mango doctor --json`.
-- [ ] Verify project apply, service lifecycle, task/watch/log, workflow,
-      artifact metadata, history, schedules, webhooks, events, audit, metrics,
-      and `/api/v1/health`.
+- [ ] Verify project apply, service lifecycle, task/workflow run, unified runs
+      list/show/watch/cancel/retry/logs/prune, artifact metadata, schedules,
+      webhooks, events, audit, metrics, and `/api/v1/health`.
 - [ ] Verify shim start, daemon restart, reattach, and fail-closed mismatch.
 - [ ] Verify secret references and cross-chunk stdout/stderr redaction, POSIX
       normalized `run_as`, and tree-wide resource enforcement on each supported
