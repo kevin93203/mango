@@ -38,7 +38,8 @@ type ProcessSnapshot struct {
 type Collector struct {
 	mu        sync.Mutex
 	processes map[int32]*process.Process
-	registry  *Registry
+	metricsMu sync.Mutex
+	values    map[string]metricValue
 
 	portsMu         sync.Mutex
 	ports           map[int32]portCacheEntry
@@ -59,30 +60,11 @@ type portCacheEntry struct {
 func NewCollector() *Collector {
 	return &Collector{
 		processes:       map[int32]*process.Process{},
-		registry:        NewRegistry(),
+		values:          map[string]metricValue{},
 		ports:           map[int32]portCacheEntry{},
 		portsInflight:   map[int32]struct{}{},
 		portsGeneration: map[int32]uint64{},
 	}
-}
-
-func (c *Collector) Add(name string, value float64, labels map[string]string) {
-	if c != nil && c.registry != nil {
-		c.registry.Add(name, value, labels)
-	}
-}
-
-func (c *Collector) Set(name string, value float64, labels map[string]string) {
-	if c != nil && c.registry != nil {
-		c.registry.Set(name, value, labels)
-	}
-}
-
-func (c *Collector) Prometheus() string {
-	if c == nil || c.registry == nil {
-		return ""
-	}
-	return c.registry.Prometheus()
 }
 
 func (c *Collector) Sample(pid int, interval time.Duration) Sample {

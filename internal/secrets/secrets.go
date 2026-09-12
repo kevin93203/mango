@@ -97,11 +97,7 @@ func resolveFile(ctx context.Context, name string) (string, error) {
 	return value, nil
 }
 
-type Resolver struct{}
-
-func NewResolver() *Resolver { return &Resolver{} }
-
-func (r *Resolver) Resolve(ctx context.Context, ref Reference) (string, error) {
+func Resolve(ctx context.Context, ref Reference) (string, error) {
 	if err := ref.Validate(); err != nil {
 		return "", err
 	}
@@ -127,19 +123,19 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (string, error) {
 }
 
 // ResolveMap resolves only references; plain values are copied unchanged.
-func (r *Resolver) ResolveMap(ctx context.Context, values map[string]string, refs map[string]Reference) (map[string]string, *Redactor, error) {
+func ResolveMap(ctx context.Context, values map[string]string, refs map[string]Reference) (map[string]string, *Redactor, error) {
 	result := make(map[string]string, len(values)+len(refs))
 	for key, value := range values {
 		result[key] = value
 	}
-	redactor := NewRedactor()
+	redactor := &Redactor{}
 	keys := make([]string, 0, len(refs))
 	for key := range refs {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		value, err := r.Resolve(ctx, refs[key])
+		value, err := Resolve(ctx, refs[key])
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve secret for %s: %w", key, err)
 		}
@@ -153,8 +149,6 @@ type Redactor struct {
 	mu     sync.RWMutex
 	values []string
 }
-
-func NewRedactor() *Redactor { return &Redactor{} }
 
 func (r *Redactor) Add(value string) {
 	if r == nil || value == "" {

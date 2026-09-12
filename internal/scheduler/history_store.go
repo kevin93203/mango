@@ -39,7 +39,10 @@ type ScheduleRef struct {
 // HistoryRepository is the scheduler's single persistence boundary. Both the
 // in-memory test store and the durable history repository implement it.
 type HistoryRepository interface {
-	observability.Store
+	AppendEvent(context.Context, observability.Event) (observability.Event, error)
+	ListEvents(context.Context, observability.EventQuery) ([]observability.Event, error)
+	AppendAudit(context.Context, observability.AuditEntry) (observability.AuditEntry, error)
+	ListAudit(context.Context, int) ([]observability.AuditEntry, error)
 	PruneEvents(context.Context, int) error
 	ReplaceSecurityMetadata(context.Context, string, []observability.SecretReferenceMetadata, []observability.ResourcePolicyMetadata) error
 	Record(context.Context, Record, int) error

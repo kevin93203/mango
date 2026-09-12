@@ -286,7 +286,7 @@ func ResolveSecret(reference string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("unsupported webhook secret reference")
 	}
-	value, err := secrets.NewResolver().Resolve(context.Background(), ref)
+	value, err := secrets.Resolve(context.Background(), ref)
 	if err != nil {
 		return nil, err
 	}

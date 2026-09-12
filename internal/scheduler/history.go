@@ -1,5 +1,7 @@
 package scheduler
 
+import "maps"
+
 func counterKey(kind, project, target string) string {
 	return kind + "|" + project + "|" + target
 }
@@ -29,9 +31,5 @@ func CounterKeys(record Record) []string {
 }
 
 func copyCounts(values map[string]uint64) map[string]uint64 {
-	result := make(map[string]uint64, len(values))
-	for key, value := range values {
-		result[key] = value
-	}
-	return result
+	return maps.Clone(values)
 }

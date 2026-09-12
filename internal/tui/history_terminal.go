@@ -7,14 +7,7 @@ import (
 	"golang.org/x/term"
 )
 
-type historyInteractiveModel interface {
-	historyHandleKey(int) (bool, error)
-	historyRender(*cliui.Renderer)
-	historyError() string
-	historySetError(string)
-}
-
-func runHistoryInteractive(output *cliui.Renderer, model historyInteractiveModel) error {
+func runHistoryInteractive(output *cliui.Renderer, model *unifiedHistoryModel) error {
 	state, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return err

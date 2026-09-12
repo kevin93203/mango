@@ -28,7 +28,7 @@ func (d *Daemon) startHTTPServer(ctx context.Context, cfg config.HTTPServerConfi
 		if err != nil {
 			return fmt.Errorf("parse http authentication token: %w", err)
 		}
-		value, err := d.secretResolver.Resolve(ctx, reference)
+		value, err := secrets.Resolve(ctx, reference)
 		if err != nil {
 			return fmt.Errorf("resolve http authentication token: %w", err)
 		}

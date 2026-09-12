@@ -39,13 +39,6 @@ type EventQuery struct {
 	RunID   string
 }
 
-type Store interface {
-	AppendEvent(context.Context, Event) (Event, error)
-	ListEvents(context.Context, EventQuery) ([]Event, error)
-	AppendAudit(context.Context, AuditEntry) (AuditEntry, error)
-	ListAudit(context.Context, int) ([]AuditEntry, error)
-}
-
 type SecretReferenceMetadata struct {
 	Project   string
 	Target    string

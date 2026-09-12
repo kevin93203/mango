@@ -1,10 +1,10 @@
 package metrics
 
 import (
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 type metricValue struct {
@@ -13,46 +13,45 @@ type metricValue struct {
 	Value  float64
 }
 
-type Registry struct {
-	mu     sync.Mutex
-	values map[string]metricValue
-}
-
-func NewRegistry() *Registry { return &Registry{values: map[string]metricValue{}} }
-
-func (r *Registry) Add(name string, value float64, labels map[string]string) {
-	if r == nil || name == "" {
+func (c *Collector) Add(name string, value float64, labels map[string]string) {
+	if c == nil || name == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	c.metricsMu.Lock()
+	defer c.metricsMu.Unlock()
+	if c.values == nil {
+		c.values = map[string]metricValue{}
+	}
 	key := metricKey(name, labels)
-	item := r.values[key]
+	item := c.values[key]
 	item.Name, item.Labels = name, cloneLabels(labels)
 	item.Value += value
-	r.values[key] = item
+	c.values[key] = item
 }
 
-func (r *Registry) Set(name string, value float64, labels map[string]string) {
-	if r == nil || name == "" {
+func (c *Collector) Set(name string, value float64, labels map[string]string) {
+	if c == nil || name == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	c.metricsMu.Lock()
+	defer c.metricsMu.Unlock()
+	if c.values == nil {
+		c.values = map[string]metricValue{}
+	}
 	key := metricKey(name, labels)
-	r.values[key] = metricValue{Name: name, Labels: cloneLabels(labels), Value: value}
+	c.values[key] = metricValue{Name: name, Labels: cloneLabels(labels), Value: value}
 }
 
-func (r *Registry) Prometheus() string {
-	if r == nil {
+func (c *Collector) Prometheus() string {
+	if c == nil {
 		return ""
 	}
-	r.mu.Lock()
-	values := make([]metricValue, 0, len(r.values))
-	for _, item := range r.values {
+	c.metricsMu.Lock()
+	values := make([]metricValue, 0, len(c.values))
+	for _, item := range c.values {
 		values = append(values, item)
 	}
-	r.mu.Unlock()
+	c.metricsMu.Unlock()
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].Name != values[j].Name {
 			return values[i].Name < values[j].Name
@@ -101,14 +100,5 @@ func metricKey(name string, labels map[string]string) string {
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
-	if labels == nil {
-		return nil
-	}
-	result := make(map[string]string, len(labels))
-	for key, value := range labels {
-		result[key] = value
-	}
-	return result
+	return maps.Clone(labels)
 }
-
-func (r *Registry) String() string { return r.Prometheus() }

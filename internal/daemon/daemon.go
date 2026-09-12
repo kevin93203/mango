@@ -59,19 +59,18 @@ const (
 )
 
 type Daemon struct {
-	layout         paths.Layout
-	logs           *logging.Manager
-	metrics        *metrics.Collector
-	secretResolver *secrets.Resolver
-	redactor       *secrets.Redactor
-	structuredLog  *logging.JSONLogger
-	httpServer     *http.Server
-	httpListener   net.Listener
-	scheduler      *scheduler.Scheduler
-	historyRepo    scheduler.HistoryRepository
-	workflow       *workflow.Executor
-	webhookServer  *webhook.Server
-	webhookMu      sync.Mutex
+	layout        paths.Layout
+	logs          *logging.Manager
+	metrics       *metrics.Collector
+	redactor      *secrets.Redactor
+	structuredLog *logging.JSONLogger
+	httpServer    *http.Server
+	httpListener  net.Listener
+	scheduler     *scheduler.Scheduler
+	historyRepo   scheduler.HistoryRepository
+	workflow      *workflow.Executor
+	webhookServer *webhook.Server
+	webhookMu     sync.Mutex
 
 	mu                      sync.RWMutex
 	applyMu                 sync.Mutex
@@ -87,7 +86,6 @@ type Daemon struct {
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	shutdownDone            chan struct{}
-	healthExecutorFactory   func(config.EffectiveService) health.Executor
 }
 
 type projectRuntime struct {
@@ -229,8 +227,7 @@ func New(layout paths.Layout) *Daemon {
 		layout:                  layout,
 		logs:                    logging.NewManager(layout.Logs),
 		metrics:                 metrics.NewCollector(),
-		secretResolver:          secrets.NewResolver(),
-		redactor:                secrets.NewRedactor(),
+		redactor:                &secrets.Redactor{},
 		projects:                map[string]*projectRuntime{},
 		configErrors:            map[string]string{},
 		disabledSchedules:       map[string]bool{},
@@ -326,15 +323,6 @@ func (d *Daemon) recordExecutionProgress(record scheduler.Record) {
 	}
 	d.appendEvent(context.Background(), observability.Event{Type: "execution." + record.Status, Project: record.Project,
 		Target: record.Target, RunID: record.RunID, ConfigurationGeneration: record.ConfigurationGeneration})
-}
-
-// SetHealthExecutorFactory injects probe execution for tests or embedders.
-// Passing nil restores the host command executor. It should be called before
-// the daemon starts services.
-func (d *Daemon) SetHealthExecutorFactory(factory func(config.EffectiveService) health.Executor) {
-	d.mu.Lock()
-	d.healthExecutorFactory = factory
-	d.mu.Unlock()
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -2124,16 +2112,7 @@ func (d *Daemon) startHealthMonitor(projectName string, managed *managedProcess,
 	for index, probe := range cfg.Checks {
 		checks = append(checks, health.Check{Name: healthCheckName(index), Test: probe.Test})
 	}
-	d.mu.RLock()
-	factory := d.healthExecutorFactory
-	d.mu.RUnlock()
-	var executor health.Executor
-	if factory != nil {
-		executor = factory(managed.spec)
-	}
-	if executor == nil {
-		executor = health.DefaultExecutor{Dir: managed.spec.WorkingDir, Env: append([]string(nil), envSlice(serviceEnvironment(managed.spec))...)}
-	}
+	executor := health.DefaultExecutor{Dir: managed.spec.WorkingDir, Env: append([]string(nil), envSlice(serviceEnvironment(managed.spec))...)}
 	go health.Run(ctx, health.Config{
 		Test: cfg.Test, Checks: checks, Policy: cfg.Policy, Interval: cfg.Interval,
 		OnUnhealthy: cfg.OnUnhealthy, Cooldown: cfg.Cooldown, Timeout: cfg.Timeout,
@@ -2337,11 +2316,7 @@ func (d *Daemon) resolveEnvironment(ctx context.Context, values map[string]strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resolver := d.secretResolver
-	if resolver == nil {
-		resolver = secrets.NewResolver()
-	}
-	resolved, redactor, err := resolver.ResolveMap(ctx, values, refs)
+	resolved, redactor, err := secrets.ResolveMap(ctx, values, refs)
 	if err == nil && d.redactor != nil {
 		d.redactor.Merge(redactor)
 	}

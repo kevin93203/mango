@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1306,25 +1307,11 @@ func mergeSecretRefs(base, extra map[string]secrets.Reference, overrides map[str
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-	result := make(map[string]string, len(values))
-	for key, value := range values {
-		result[key] = value
-	}
-	return result
+	return maps.Clone(values)
 }
 
 func cloneSecretRefs(values map[string]secrets.Reference) map[string]secrets.Reference {
-	if values == nil {
-		return nil
-	}
-	result := make(map[string]secrets.Reference, len(values))
-	for key, value := range values {
-		result[key] = value
-	}
-	return result
+	return maps.Clone(values)
 }
 
 func resolveSecretRefs(values map[string]secrets.Reference, base string) map[string]secrets.Reference {

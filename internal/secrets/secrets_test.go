@@ -14,8 +14,7 @@ func TestResolverSupportsEnvironmentAndFileReferences(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolver := NewResolver()
-	env, redactor, err := resolver.ResolveMap(context.Background(), map[string]string{"PLAIN": "ok"}, map[string]Reference{
+	env, redactor, err := ResolveMap(context.Background(), map[string]string{"PLAIN": "ok"}, map[string]Reference{
 		"ENV":  {Provider: "from_env", Name: "MANGO_TEST_SECRET"},
 		"FILE": {Provider: "from_file", Name: path},
 	})
@@ -37,7 +36,7 @@ func TestReferenceValidationRejectsMalformedProvider(t *testing.T) {
 	if _, err := Parse("vault:token"); err == nil {
 		t.Fatal("unsupported provider was accepted")
 	}
-	if got := NewRedactor().Redact(strings.TrimSpace("")); got != "" {
+	if got := (&Redactor{}).Redact(strings.TrimSpace("")); got != "" {
 		t.Fatalf("empty redaction = %q", got)
 	}
 }
