@@ -133,10 +133,16 @@ func (d *Daemon) httpHandler(token string) http.Handler {
 		response := d.Handle(observability.WithActor(r.Context(), "http"), request)
 		if !response.OK {
 			code, message := "REQUEST_FAILED", "request failed"
+			errorResponse := map[string]interface{}{}
 			if response.Error != nil {
 				code, message = response.Error.Code, response.Error.Message
+				if len(response.Error.Candidates) > 0 {
+					errorResponse["candidates"] = response.Error.Candidates
+				}
 			}
-			writeHTTPJSON(w, http.StatusBadRequest, map[string]string{"code": code, "error": message})
+			errorResponse["code"] = code
+			errorResponse["error"] = message
+			writeHTTPJSON(w, http.StatusBadRequest, errorResponse)
 			return
 		}
 		writeHTTPJSON(w, status, response.Data)

@@ -29,6 +29,7 @@ import (
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
+	"github.com/kevin93203/mango/internal/runref"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/startup"
 	"github.com/kevin93203/mango/internal/tui"
@@ -39,8 +40,9 @@ import (
 const processOperationTimeout = 30 * time.Second
 
 var (
-	cliOutput  = cliui.New(os.Stdout, os.Stderr, cliui.Options{Color: cliui.ColorAuto})
-	jsonOutput bool
+	cliOutput     = cliui.New(os.Stdout, os.Stderr, cliui.Options{Color: cliui.ColorAuto})
+	jsonOutput    bool
+	noTruncOutput bool
 )
 
 var cliCommandContext = context.Background()
@@ -1143,7 +1145,7 @@ func printEventTable(events []observability.Event) {
 		rows = append(rows, []cliui.Cell{{Text: fmt.Sprintf("%d", event.ID), Align: cliui.AlignRight},
 			{Text: event.Timestamp.Format(time.RFC3339)}, {Text: event.Type}, {Text: event.Actor},
 			{Text: event.Project + "/" + event.Target, Style: zeroStyle(event.Target)},
-			{Text: event.RunID, Style: zeroStyle(event.RunID)}, {Text: metadata, Style: zeroStyle(metadata)}})
+			{Text: displayRunID(event.RunID), Style: zeroStyle(displayRunID(event.RunID))}, {Text: metadata, Style: zeroStyle(metadata)}})
 	}
 	cliOutput.Table([]string{"ID", "TIME", "TYPE", "ACTOR", "TARGET", "RUN_ID", "METADATA"}, rows)
 }
@@ -1804,7 +1806,7 @@ func taskRunCommandWithCaller(key string, caller func(string, interface{}) (ipc.
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s queued (run_id=%s)", result["key"], result["run_id"])))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Task %s queued (run_id=%s)", result["key"], displayRunID(result["run_id"]))))
 	return nil
 }
 
@@ -1824,7 +1826,7 @@ func workflowRunCommandWithCaller(key string, caller func(string, interface{}) (
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s queued (run_id=%s)", result["key"], result["run_id"])))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Workflow %s queued (run_id=%s)", result["key"], displayRunID(result["run_id"]))))
 	return nil
 }
 
@@ -1844,7 +1846,7 @@ func executionCommand(action, runID string) error {
 		return err
 	}
 	verb := map[string]string{"get": "Execution", "cancel": "Cancellation requested for execution", "retry": "Retry started for execution"}[action]
-	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, verb), info.RunID, info.Status)
+	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, verb), displayRunID(info.RunID), info.Status)
 	return nil
 }
 
@@ -1903,7 +1905,7 @@ func printExecutionTable(items []api.ExecutionInfo) {
 			target = "-"
 		}
 		rows = append(rows, []cliui.Cell{
-			{Text: historyValue(item.RunID)},
+			{Text: displayRunID(item.RunID)},
 			{Text: target},
 			{Text: historyValue(item.Status), Style: cliui.StateStyle(item.Status)},
 			{Text: formatOptionalTime(item.StartedAt)},
@@ -1964,7 +1966,7 @@ func executionWatchCommand(options executionWatchOptions) error {
 	if err := decodeData(response.Data, &info); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, "Execution"), info.RunID, info.Status)
+	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleSuccess, "Execution"), displayRunID(info.RunID), info.Status)
 	return nil
 }
 
@@ -2035,7 +2037,7 @@ func historyListCommandWithCaller(options historyOptions, caller func(string, in
 	}
 	params := historyCLIParams{Tail: options.Tail, TriggerType: options.TriggerType, Trigger: options.Trigger, TargetType: options.TargetType, Target: options.Target}
 	if !jsonOutput && termIsInteractive() {
-		filter := tui.HistoryFilter{Tail: options.Tail, TriggerType: options.TriggerType, Trigger: options.Trigger, TargetType: options.TargetType, Target: options.Target, ShowAttempts: options.Attempts}
+		filter := tui.HistoryFilter{Tail: options.Tail, TriggerType: options.TriggerType, Trigger: options.Trigger, TargetType: options.TargetType, Target: options.Target, ShowAttempts: options.Attempts, NoTrunc: noTruncOutput}
 		method := "history.ls"
 		if scheduleOnly {
 			method = "schedule.history"
@@ -2147,7 +2149,7 @@ func historyListV2Command(options historyListV2Options) error {
 	if !jsonOutput && termIsInteractive() {
 		return tui.RunHistory(cliOutput, load, tui.HistoryFilter{
 			Tail: options.Limit, TriggerType: options.TriggerType, Trigger: options.Trigger,
-			TargetType: options.TargetType, Target: options.Target, ShowAttempts: options.Attempts,
+			TargetType: options.TargetType, Target: options.Target, ShowAttempts: options.Attempts, NoTrunc: noTruncOutput,
 		})
 	}
 	response, err := call("history.ls", params)
@@ -2179,7 +2181,7 @@ func historyShowCommand(runID string) error {
 	if err := decodeData(response.Data, &detail); err != nil {
 		return err
 	}
-	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleHeader, "Execution"), detail.RunID, detail.Status)
+	cliOutput.Printf("%s %s (%s)\n", cliOutput.Text(cliui.StyleHeader, "Execution"), displayRunID(detail.RunID), detail.Status)
 	if len(detail.Tasks) > 0 || len(detail.Attempts) > 0 {
 		printUnifiedHistoryAttempts(historyRecordsFromInfo([]api.HistoryInfo{detail.HistoryInfo}))
 	}
@@ -2296,7 +2298,7 @@ func printHistoryInfoTable(items []api.HistoryInfo) {
 			target = item.Project + "/" + target
 		}
 		rows = append(rows, []cliui.Cell{
-			{Text: historyValue(item.RunID)}, {Text: historyValue(target)},
+			{Text: displayRunID(item.RunID)}, {Text: historyValue(target)},
 			{Text: historyValue(item.Status), Style: cliui.StateStyle(item.Status)},
 			{Text: formatOptionalTime(item.StartedAt)}, {Text: formatHistoryInfoElapsed(item)},
 		})
@@ -3124,7 +3126,7 @@ func printUnifiedHistory(history []scheduler.Record) {
 		status := historyRecordStatus(record)
 		style := cliui.StateStyle(status)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyValue(record.RunID)},
+			{Text: displayRunID(record.RunID)},
 			{Text: historyValue(record.Trigger.Type)},
 			{Text: record.Trigger.Display(), Style: zeroStyle(record.Trigger.Display())},
 			{Text: historyValue(record.TargetType)},
@@ -3147,7 +3149,7 @@ func printUnifiedHistoryAttempts(history []scheduler.Record) {
 			if len(task.Attempts) == 0 {
 				status := historyStatus(task.Status, task.ExitCode, task.Error)
 				rows = append(rows, []cliui.Cell{
-					{Text: historyValue(record.RunID)},
+					{Text: displayRunID(record.RunID)},
 					{Text: historyValue(record.Trigger.Type)},
 					{Text: record.Trigger.Display()},
 					{Text: historyValue(record.TargetType)},
@@ -3172,7 +3174,7 @@ func printUnifiedHistoryAttempts(history []scheduler.Record) {
 			for _, attempt := range task.Attempts {
 				status := historyStatus("", attempt.ExitCode, attempt.Error)
 				rows = append(rows, []cliui.Cell{
-					{Text: historyValue(record.RunID)},
+					{Text: displayRunID(record.RunID)},
 					{Text: historyValue(record.Trigger.Type)},
 					{Text: record.Trigger.Display()},
 					{Text: historyValue(record.TargetType)},
@@ -3247,6 +3249,10 @@ func historyValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func displayRunID(value string) string {
+	return runref.Display(value, noTruncOutput)
 }
 
 func formatHistoryArgs(args []string) string {

@@ -209,13 +209,14 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 		t.Fatal(err)
 	}
 	runID := started["run_id"]
+	runRef := runID[:8]
 	cancel := requestForMethod(t, "execution.cancel")
-	cancel.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))
+	cancel.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runRef))
 	if response := d.Handle(context.Background(), cancel); !response.OK {
 		t.Fatalf("execution.cancel failed: %+v", response.Error)
 	}
 	watch := requestForMethod(t, "execution.watch")
-	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, runID))
+	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, runRef))
 	response = d.Handle(context.Background(), watch)
 	if !response.OK {
 		t.Fatalf("cancelled execution.watch failed: %+v", response.Error)
@@ -231,7 +232,7 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 		t.Fatalf("cancelled execution = %+v, want run %s cancelled", info, runID)
 	}
 	history := requestForMethod(t, "history.get")
-	history.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))
+	history.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runRef))
 	response = d.Handle(context.Background(), history)
 	if !response.OK {
 		t.Fatalf("history.get failed: %+v", response.Error)
@@ -252,7 +253,7 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 		t.Fatalf("history detail events=%+v", detail.Events)
 	}
 	retry := requestForMethod(t, "execution.retry")
-	retry.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runID))
+	retry.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, runRef))
 	response = d.Handle(context.Background(), retry)
 	if !response.OK {
 		t.Fatalf("execution.retry failed: %+v", response.Error)
@@ -268,11 +269,12 @@ func TestExecutionCancelAndRetryKeepLogicalRunID(t *testing.T) {
 	if retried.RunID == "" || retried.RunID == runID || retried.RetriedFromRunID != runID || retried.Status != scheduler.StatusQueued {
 		t.Fatalf("retry response = %+v, want a new queued execution linked to %s", retried, runID)
 	}
-	cancel.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, retried.RunID))
+	retriedRef := retried.RunID[:8]
+	cancel.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q}`, retriedRef))
 	if response := d.Handle(context.Background(), cancel); !response.OK {
 		t.Fatalf("cancel retried execution failed: %+v", response.Error)
 	}
-	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, retried.RunID))
+	watch.Params = json.RawMessage(fmt.Sprintf(`{"run_id":%q,"timeout_ms":3000}`, retriedRef))
 	response = d.Handle(context.Background(), watch)
 	if !response.OK {
 		t.Fatalf("retried execution.watch failed: %+v", response.Error)

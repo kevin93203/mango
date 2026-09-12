@@ -3821,12 +3821,16 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "HISTORY_NOT_FOUND", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
 		if err != nil {
 			return failure(request, "HISTORY_NOT_FOUND", err)
 		}
 		if !isTerminalExecution(execution.Record.Status) {
-			return failure(request, "HISTORY_NOT_FOUND", fmt.Errorf("execution %s is not terminal", p.RunID))
+			return failure(request, "HISTORY_NOT_FOUND", fmt.Errorf("execution %s is not terminal", runID))
 		}
 		detail, err := d.historyDetail(d.executionContext(), execution.Record)
 		if err != nil {
@@ -3972,7 +3976,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
 		if err != nil {
 			return failure(request, "EXECUTION_NOT_FOUND", err)
 		}
@@ -3988,7 +3996,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		if p.TimeoutMS == 0 {
 			p.TimeoutMS = 30000
 		}
-		execution, err := d.watchExecution(p.RunID, p.TimeoutMS)
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		execution, err := d.watchExecution(runID, p.TimeoutMS)
 		if err != nil {
 			return failure(request, "EXECUTION_NOT_FOUND", err)
 		}
@@ -4001,10 +4013,14 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.cancelExecution(p.RunID); err != nil {
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
 			return failure(request, "EXECUTION_CANCEL_FAILED", err)
 		}
-		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		if err := d.cancelExecution(runID); err != nil {
+			return failure(request, "EXECUTION_CANCEL_FAILED", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
 		if err != nil {
 			return failure(request, "EXECUTION_NOT_FOUND", err)
 		}
@@ -4017,7 +4033,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		execution, err := d.retryExecution(p.RunID)
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_RETRY_FAILED", err)
+		}
+		execution, err := d.retryExecution(runID)
 		if err != nil {
 			return failure(request, "EXECUTION_RETRY_FAILED", err)
 		}
@@ -4030,7 +4050,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		execution, err := d.scheduler.GetExecution(d.executionContext(), p.RunID)
+		runID, err := d.scheduler.ResolveExecutionRunID(d.executionContext(), p.RunID)
+		if err != nil {
+			return failure(request, "EXECUTION_NOT_FOUND", err)
+		}
+		execution, err := d.scheduler.GetExecution(d.executionContext(), runID)
 		if err != nil {
 			return failure(request, "EXECUTION_NOT_FOUND", err)
 		}
@@ -4937,7 +4961,15 @@ func success(request ipc.Request, data interface{}) ipc.Response {
 }
 
 func failure(request ipc.Request, code string, err error) ipc.Response {
-	return ipc.Response{Version: ipc.ProtocolVersion, ID: request.ID, OK: false, Error: &ipc.Error{Code: code, Message: err.Error()}}
+	responseError := &ipc.Error{Code: code, Message: err.Error()}
+	if referenceCode := scheduler.RunReferenceCode(err); referenceCode != "" {
+		responseError.Code = referenceCode
+		responseError.Message = scheduler.RunReferenceMessage(err)
+		for _, candidate := range scheduler.RunReferenceCandidates(err) {
+			responseError.Candidates = append(responseError.Candidates, ipc.ErrorCandidate{Ref: candidate.Ref, RunID: candidate.RunID})
+		}
+	}
+	return ipc.Response{Version: ipc.ProtocolVersion, ID: request.ID, OK: false, Error: responseError}
 }
 
 func splitExecutionTarget(key, project, name string) (string, string, error) {

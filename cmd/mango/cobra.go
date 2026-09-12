@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/runref"
 	"github.com/kevin93203/mango/internal/tui"
 	"github.com/kevin93203/mango/internal/version"
 	"github.com/spf13/cobra"
@@ -21,12 +23,13 @@ import (
 // converted to receiver-based handlers; the command boundary is now fully
 // owned and parsed by Cobra.
 type cliApp struct {
-	layout paths.Layout
-	out    io.Writer
-	errOut io.Writer
-	output *cliui.Renderer
-	color  string
-	json   bool
+	layout  paths.Layout
+	out     io.Writer
+	errOut  io.Writer
+	output  *cliui.Renderer
+	color   string
+	json    bool
+	noTrunc bool
 }
 
 func newCLIApp(layout paths.Layout, out, errOut io.Writer) *cliApp {
@@ -38,6 +41,7 @@ func (a *cliApp) configureOutput() error {
 	a.output = cliui.New(a.out, a.errOut, options)
 	cliOutput = a.output
 	jsonOutput = a.json
+	noTruncOutput = a.noTrunc
 	return nil
 }
 
@@ -105,6 +109,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().Var(colorFlagValue{target: &a.color}, "color", "color output: auto, always, or never")
 	root.PersistentFlags().BoolVar(&a.json, "json", false, "emit JSON where supported")
+	root.PersistentFlags().BoolVar(&a.noTrunc, "no-trunc", false, "show full run IDs in human-readable output")
 
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
@@ -174,6 +179,25 @@ func commandErrorWasShown(err error) bool {
 
 func (a *cliApp) printCommandError(err error) {
 	if !commandErrorWasShown(err) {
+		var callErr *ipc.CallError
+		if errors.As(err, &callErr) && len(callErr.Candidates) > 0 {
+			refs := make([]string, 0, len(callErr.Candidates))
+			for _, candidate := range callErr.Candidates {
+				ref := candidate.Ref
+				if a.noTrunc {
+					ref = runref.Display(candidate.RunID, true)
+				}
+				if ref != "" {
+					refs = append(refs, ref)
+				}
+			}
+			message := callErr.Code + ": " + callErr.Message
+			if len(refs) > 0 {
+				message += "; try one of: " + strings.Join(refs, ", ")
+			}
+			a.output.Errorf("error: %s", message)
+			return
+		}
 		a.output.Errorf("error: %v", err)
 	}
 }
@@ -405,7 +429,7 @@ func (a *cliApp) historyCmd() *cobra.Command {
 	list.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
 	list.Flags().StringVar(&target, "target", "", "filter by target")
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.leafCmd("show RUN_ID", "Show terminal execution history", cobra.ExactArgs(1), func(args []string) error { return historyShowCommand(args[0]) }))
+	cmd.AddCommand(a.leafCmd("show RUN_REF", "Show terminal execution history", cobra.ExactArgs(1), func(args []string) error { return historyShowCommand(args[0]) }))
 	var before string
 	var all, yes bool
 	purge := a.simpleCmd("purge", "Purge terminal execution history", func() error {
@@ -437,17 +461,17 @@ func (a *cliApp) executionCmd() *cobra.Command {
 	cmd.AddCommand(ls)
 	for _, action := range []string{"get", "cancel", "retry"} {
 		action := action
-		cmd.AddCommand(a.leafCmd(action+" RUN_ID", action+" an execution", cobra.ExactArgs(1), func(args []string) error { return executionCommand(action, args[0]) }))
+		cmd.AddCommand(a.leafCmd(action+" RUN_REF", action+" an execution", cobra.ExactArgs(1), func(args []string) error { return executionCommand(action, args[0]) }))
 	}
 	var timeout time.Duration
-	watch := a.leafCmd("watch RUN_ID", "Wait for an execution", cobra.ExactArgs(1), func(args []string) error {
+	watch := a.leafCmd("watch RUN_REF", "Wait for an execution", cobra.ExactArgs(1), func(args []string) error {
 		return executionWatchCommand(executionWatchOptions{RunID: args[0], Timeout: timeout})
 	})
 	watch.Flags().DurationVar(&timeout, "timeout", executionWatchDefaultTimeout, "maximum watch wait")
 	cmd.AddCommand(watch)
 	var stream string
 	var tail int
-	logs := a.leafCmd("logs RUN_ID", "Read execution logs", cobra.ExactArgs(1), func(args []string) error {
+	logs := a.leafCmd("logs RUN_REF", "Read execution logs", cobra.ExactArgs(1), func(args []string) error {
 		return executionLogsCommand(executionLogsOptions{RunID: args[0], Stream: stream, Tail: tail})
 	})
 	logs.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")

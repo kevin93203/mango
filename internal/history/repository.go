@@ -779,6 +779,27 @@ func (r *Repository) GetExecution(ctx context.Context, runID string) (scheduler.
 	return execution, nil
 }
 
+// FindExecutionRunIDsByPrefix returns possible root execution IDs without
+// loading their nested task and attempt records. The resolver performs the
+// final literal/UUID-aware match in Go so database collation differences do
+// not change reference semantics.
+func (r *Repository) FindExecutionRunIDsByPrefix(ctx context.Context, prefix string) ([]string, error) {
+	var runIDs []string
+	escaped := escapeLikePrefix(prefix)
+	err := r.db.WithContext(ctx).Model(&runModel{}).
+		Where("run_id LIKE ? ESCAPE '~'", escaped+"%").
+		Order("run_id ASC").
+		Pluck("run_id", &runIDs).Error
+	if err != nil {
+		return nil, err
+	}
+	return runIDs, nil
+}
+
+func escapeLikePrefix(value string) string {
+	return strings.NewReplacer(`~`, `~~`, `%`, `~%`, `_`, `~_`).Replace(value)
+}
+
 func (r *Repository) ListActiveExecutions(ctx context.Context) ([]scheduler.Execution, error) {
 	var runs []runModel
 	if err := r.db.WithContext(ctx).Where("status IN ?", []string{scheduler.StatusQueued, scheduler.StatusRunning}).Order("started ASC, id ASC").Find(&runs).Error; err != nil {

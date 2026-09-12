@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -83,8 +84,45 @@ type Response struct {
 }
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string           `json:"code"`
+	Message    string           `json:"message"`
+	Candidates []ErrorCandidate `json:"candidates,omitempty"`
+}
+
+// ErrorCandidate is a directly usable execution reference returned when a
+// supplied prefix matches more than one execution.
+type ErrorCandidate struct {
+	Ref   string `json:"ref"`
+	RunID string `json:"run_id"`
+}
+
+// CallError preserves structured daemon error details for callers that use
+// the convenience Call API. Its text form remains useful to human callers by
+// including the short candidate references.
+type CallError struct {
+	Code       string
+	Message    string
+	Candidates []ErrorCandidate
+}
+
+func (e *CallError) Error() string {
+	if e == nil {
+		return "daemon request failed"
+	}
+	message := e.Code + ": " + e.Message
+	if len(e.Candidates) == 0 {
+		return message
+	}
+	refs := make([]string, 0, len(e.Candidates))
+	for _, candidate := range e.Candidates {
+		if candidate.Ref != "" {
+			refs = append(refs, candidate.Ref)
+		}
+	}
+	if len(refs) == 0 {
+		return message
+	}
+	return message + "; try one of: " + strings.Join(refs, ", ")
 }
 
 type Handler func(context.Context, Request) Response
@@ -190,7 +228,10 @@ func CallEndpoint(ctx context.Context, endpoint string, request Request) (Respon
 	}
 	if !response.OK {
 		if response.Error != nil {
-			return response, fmt.Errorf("%s: %s", response.Error.Code, response.Error.Message)
+			return response, &CallError{
+				Code: response.Error.Code, Message: response.Error.Message,
+				Candidates: append([]ErrorCandidate(nil), response.Error.Candidates...),
+			}
 		}
 		return response, fmt.Errorf("daemon request failed")
 	}

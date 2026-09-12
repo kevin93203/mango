@@ -18,6 +18,7 @@ type HistoryFilter struct {
 	TargetType   string
 	Target       string
 	ShowAttempts bool
+	NoTrunc      bool
 }
 
 type HistoryLoader func(HistoryFilter) ([]scheduler.Record, error)
@@ -64,9 +65,9 @@ func RunHistory(output *cliui.Renderer, load HistoryLoader, filter HistoryFilter
 			return err
 		}
 		if filter.ShowAttempts {
-			renderUnifiedHistoryAttempts(output, records)
+			renderUnifiedHistoryAttempts(output, records, filter.NoTrunc)
 		} else {
-			renderUnifiedHistoryText(output, records)
+			renderUnifiedHistoryText(output, records, filter.NoTrunc)
 		}
 		return nil
 	}
@@ -548,7 +549,7 @@ func renderUnifiedRuns(output *cliui.Renderer, model *unifiedHistoryModel) {
 		status := historyStatus(record.Status, record.ExitCode, record.Error)
 		rows = append(rows, []cliui.Cell{
 			{Text: historyMarker(globalIndex == model.selected)},
-			{Text: historyDisplay(record.RunID)},
+			{Text: runIDDisplay(record.RunID, model.filter.NoTrunc)},
 			{Text: historyDisplay(record.Trigger.Type)},
 			{Text: record.Trigger.Display()},
 			{Text: historyDisplay(record.TargetType)},
@@ -578,7 +579,7 @@ func renderUnifiedWorkflowTasks(output *cliui.Renderer, model *unifiedHistoryMod
 		return
 	}
 	output.KeyValues([][]cliui.Cell{
-		{{Text: "run_id"}, {Text: historyDisplay(run.RunID)}},
+		{{Text: "run_id"}, {Text: runIDDisplay(run.RunID, model.filter.NoTrunc)}},
 		{{Text: "workflow"}, {Text: run.Project + "/" + historyDisplay(run.Target)}},
 		{{Text: "trigger"}, {Text: run.Trigger.Display()}},
 		{{Text: "started"}, {Text: historyTime(run.Started)}},
@@ -622,8 +623,8 @@ func renderUnifiedWorkflowTasks(output *cliui.Renderer, model *unifiedHistoryMod
 func renderUnifiedTaskDetail(output *cliui.Renderer, model *unifiedHistoryModel, task scheduler.TaskRecord) {
 	status := historyStatus(task.Status, task.ExitCode, task.Error)
 	output.KeyValues([][]cliui.Cell{
-		{{Text: "run_id"}, {Text: historyDisplay(task.RunID)}},
-		{{Text: "parent_run_id"}, {Text: historyDisplay(task.ParentRunID)}},
+		{{Text: "run_id"}, {Text: runIDDisplay(task.RunID, model.filter.NoTrunc)}},
+		{{Text: "parent_run_id"}, {Text: runIDDisplay(task.ParentRunID, model.filter.NoTrunc)}},
 		{{Text: "node"}, {Text: historyDisplay(task.Node)}},
 		{{Text: "task"}, {Text: historyDisplay(task.Task)}},
 		{{Text: "command"}, {Text: historyDisplay(task.Command)}},
@@ -730,7 +731,7 @@ func renderUnifiedOutput(output *cliui.Renderer, model *unifiedHistoryModel) {
 	output.Println(output.Text(cliui.StyleMuted, fmt.Sprintf("lines %d-%d of %d", start+1, end, len(lines))))
 }
 
-func renderUnifiedHistoryText(output *cliui.Renderer, records []scheduler.Record) {
+func renderUnifiedHistoryText(output *cliui.Renderer, records []scheduler.Record, noTrunc bool) {
 	printRecords := append([]scheduler.Record(nil), records...)
 	sort.SliceStable(printRecords, func(i, j int) bool { return printRecords[i].Started.Before(printRecords[j].Started) })
 	if len(printRecords) == 0 {
@@ -741,7 +742,7 @@ func renderUnifiedHistoryText(output *cliui.Renderer, records []scheduler.Record
 	for _, record := range printRecords {
 		status := historyStatus(record.Status, record.ExitCode, record.Error)
 		rows = append(rows, []cliui.Cell{
-			{Text: historyDisplay(record.RunID)},
+			{Text: runIDDisplay(record.RunID, noTrunc)},
 			{Text: historyDisplay(record.Trigger.Type)},
 			{Text: record.Trigger.Display()},
 			{Text: historyDisplay(record.TargetType)},
@@ -757,14 +758,14 @@ func renderUnifiedHistoryText(output *cliui.Renderer, records []scheduler.Record
 	output.Table([]string{"RUN_ID", "TRIGGER_TYPE", "TRIGGER", "TARGET_TYPE", "TARGET", "STARTED", "FINISHED", "DURATION", "STATUS", "EXIT", "ERROR"}, rows)
 }
 
-func renderUnifiedHistoryAttempts(output *cliui.Renderer, records []scheduler.Record) {
+func renderUnifiedHistoryAttempts(output *cliui.Renderer, records []scheduler.Record, noTrunc bool) {
 	rows := make([][]cliui.Cell, 0)
 	for _, record := range records {
 		appendTask := func(task scheduler.TaskRecord) {
 			for _, attempt := range task.Attempts {
 				status := historyStatus("", attempt.ExitCode, attempt.Error)
 				rows = append(rows, []cliui.Cell{
-					{Text: historyDisplay(record.RunID)}, {Text: historyDisplay(record.Trigger.Type)}, {Text: record.Trigger.Display()},
+					{Text: runIDDisplay(record.RunID, noTrunc)}, {Text: historyDisplay(record.Trigger.Type)}, {Text: record.Trigger.Display()},
 					{Text: historyDisplay(record.TargetType)}, {Text: record.Project + "/" + historyDisplay(record.Target)},
 					{Text: historyDisplay(task.Node)}, {Text: historyDisplay(task.Task)},
 					{Text: fmt.Sprintf("%d", attempt.Number), Align: cliui.AlignRight}, {Text: historyTime(attempt.Started)},

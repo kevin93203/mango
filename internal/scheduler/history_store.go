@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type HistoryRepository interface {
 	Record(context.Context, Record, int) error
 	BeginExecution(context.Context, Record, string, uint64) (Execution, bool, error)
 	GetExecution(context.Context, string) (Execution, error)
+	FindExecutionRunIDsByPrefix(context.Context, string) ([]string, error)
 	ListActiveExecutions(context.Context) ([]Execution, error)
 	ListExecutions(context.Context, ExecutionQuery) ([]Execution, error)
 	UpdateExecution(context.Context, Record) error
@@ -480,6 +482,29 @@ func (r *memoryHistoryRepository) GetExecution(_ context.Context, runID string) 
 		return Execution{}, ErrExecutionNotFound
 	}
 	return cloneExecution(execution), nil
+}
+
+func (r *memoryHistoryRepository) FindExecutionRunIDsByPrefix(_ context.Context, prefix string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[string]struct{}, len(r.executions)+len(r.records))
+	result := make([]string, 0, len(r.executions)+len(r.records))
+	for runID := range r.executions {
+		if strings.HasPrefix(runID, prefix) {
+			seen[runID] = struct{}{}
+			result = append(result, runID)
+		}
+	}
+	for _, record := range r.records {
+		if strings.HasPrefix(record.RunID, prefix) {
+			if _, ok := seen[record.RunID]; !ok {
+				seen[record.RunID] = struct{}{}
+				result = append(result, record.RunID)
+			}
+		}
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func (r *memoryHistoryRepository) ListActiveExecutions(_ context.Context) ([]Execution, error) {

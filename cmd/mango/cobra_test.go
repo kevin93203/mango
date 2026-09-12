@@ -11,10 +11,11 @@ import (
 )
 
 func newTestRoot(t *testing.T) (*cliApp, *bytes.Buffer) {
-	previousOutput, previousJSON := cliOutput, jsonOutput
+	previousOutput, previousJSON, previousNoTrunc := cliOutput, jsonOutput, noTruncOutput
 	t.Cleanup(func() {
 		cliOutput = previousOutput
 		jsonOutput = previousJSON
+		noTruncOutput = previousNoTrunc
 	})
 	buffer := &bytes.Buffer{}
 	app := newCLIApp(paths.Layout{}, buffer, buffer)
@@ -47,7 +48,7 @@ func TestCobraHelpComesFromCommandTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"List executions", "--status", "--trigger-type", "--project", "--limit", "--json", "--color"} {
+	for _, want := range []string{"List executions", "--status", "--trigger-type", "--project", "--limit", "--json", "--color", "--no-trunc"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("execution ls help = %q, want %q", text, want)
 		}
@@ -57,13 +58,13 @@ func TestCobraHelpComesFromCommandTree(t *testing.T) {
 func TestCobraAcceptsPersistentFlagsAfterLeafFlags(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
-	root.SetArgs([]string{"execution", "ls", "--limit", "-1", "--json", "--color=never"})
+	root.SetArgs([]string{"execution", "ls", "--limit", "-1", "--json", "--color=never", "--no-trunc"})
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "limit must be non-negative") {
 		t.Fatalf("error = %v, want execution limit validation", err)
 	}
-	if !app.json || app.color != "never" {
-		t.Fatalf("global options = json:%v color:%q", app.json, app.color)
+	if !app.json || app.color != "never" || !app.noTrunc {
+		t.Fatalf("global options = json:%v color:%q no-trunc:%v", app.json, app.color, app.noTrunc)
 	}
 }
 
@@ -207,7 +208,7 @@ func TestCobraHelpSkipsLeafExecution(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "Usage:") || !strings.Contains(output.String(), "execution get RUN_ID") {
+	if !strings.Contains(output.String(), "Usage:") || !strings.Contains(output.String(), "execution get RUN_REF") {
 		t.Fatalf("help output = %q", output.String())
 	}
 	if strings.Contains(output.String(), "error:") {

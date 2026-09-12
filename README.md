@@ -422,7 +422,7 @@ mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 
 mango history ls
-mango history show RUN_ID
+mango history show RUN_REF
 mango history purge (--before RFC3339 | --all) --yes
 ```
 
@@ -808,6 +808,7 @@ Global options may appear before or after the command:
 | --- | --- | --- |
 | `--color` | `auto` (default), `always`, `never` | Controls ANSI colors. `auto` enables colors for interactive terminals and disables them for pipes/CI. |
 | `--json` | off by default | Prints structured JSON where the command supports it. JSON output never contains ANSI color codes. |
+| `--no-trunc` | off by default | Shows full execution IDs in human-readable output; JSON already uses full IDs. |
 
 Both forms are accepted:
 
@@ -815,6 +816,7 @@ Both forms are accepted:
 mango --color=never ls
 mango status demo/api --json
 mango --json history ls --limit 20
+mango --no-trunc execution ls
 ```
 
 Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
@@ -1026,6 +1028,9 @@ Reads the durable event stream covering administrative operations, execution
 transitions, service state, configuration, schedule, webhook, and audit
 activity. `--follow` polls after the last event ID and exits cleanly on Ctrl-C.
 Event metadata contains only safe fields; secret values are never included.
+Human-readable event rows use the same short-ID display rule. The API event
+filter keeps `run_id` exact because events may reference workflow child task
+IDs rather than root executions.
 
 ### Service lifecycle commands
 
@@ -1155,9 +1160,9 @@ mango task run PROJECT/TASK [--json]
 mango execution ls [--status STATUS | --all] [--trigger-type TYPE] [--trigger NAME]
                        [--project PROJECT] [--target-type task|workflow]
                        [--target PROJECT/NAME] [--limit N] [--json]
-mango execution get|cancel|retry RUN_ID [--json]
-mango execution watch RUN_ID [--timeout 45s] [--json]
-mango execution logs RUN_ID [--stream stdout|stderr|all] [--tail N] [--json]
+mango execution get|cancel|retry RUN_REF [--json]
+mango execution watch RUN_REF [--timeout 45s] [--json]
+mango execution logs RUN_REF [--stream stdout|stderr|all] [--tail N] [--json]
 ```
 
 | Command / flag | Description |
@@ -1166,8 +1171,9 @@ mango execution logs RUN_ID [--stream stdout|stderr|all] [--tail N] [--json]
 | `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
 | `execution ls` | Lists queued/running executions by default; `--status` selects one status and `--all` includes every status. |
 `task ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
-Without `--json`, `task run` prints the accepted state and durable run ID, for
-example `Task demo/backup queued (run_id=...)`.
+Without `--json`, `task run` prints the accepted state and an operator-friendly
+run reference, for example `Task demo/backup queued (run_id=...)`. JSON keeps
+the canonical durable `run_id`.
 
 The example configuration also includes a long-running execution target for
 testing execution controls:
@@ -1178,8 +1184,8 @@ mango workflow run demo/execution-demo-workflow
 ```
 
 Both targets run for about 20 seconds and emit both stdout and stderr. Use the
-returned run ID with `execution watch`, `execution cancel`, `execution retry`,
-`execution logs`, or `execution ls`.
+returned run reference with `execution watch`, `execution cancel`,
+`execution retry`, `execution logs`, or `execution ls`.
 `RUNS` counts direct task runs and workflow-node invocations; retries do not
 increase it. `NEXT RUN` includes the earliest direct or indirect schedule.
 
@@ -1197,8 +1203,10 @@ mango workflow run PROJECT/WORKFLOW [--json]
 `workflow ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and
 `DURATION`. `RUNS` counts workflow root invocations and `NEXT RUN` is the
 earliest direct schedule for the workflow.
-Without `--json`, `workflow run` prints the accepted state and durable run ID,
-for example `Workflow demo/release queued (run_id=...)`.
+Without `--json`, `workflow run` prints the accepted state and an
+operator-friendly run reference, for example
+`Workflow demo/release queued (run_id=...)`. JSON keeps the canonical durable
+`run_id`.
 
 Examples:
 
@@ -1216,6 +1224,20 @@ the managed process tree, `execution retry` to create a new logical execution,
 and `execution logs` to read output after the process exits.
 `execution watch` waits up to 30 seconds by default; use `--timeout 2m` for a
 longer wait (up to 5 minutes).
+
+Execution commands accept either the full `run_id` or a unique prefix of at
+least 8 characters. Exact IDs are checked first; an ambiguous prefix fails
+without performing the requested operation and returns usable candidate refs.
+Human-readable output shows generated UUIDs as 12 compact hexadecimal
+characters. Use the global `--no-trunc` flag to show full IDs. JSON output
+always keeps the canonical full `run_id`.
+
+For example:
+
+```sh
+mango execution watch 7f31a2c4d9e0
+mango execution get 7f31a2c4d9e0 --no-trunc
+```
 
 `execution ls` supports the following filters:
 
@@ -1274,7 +1296,7 @@ mango history ls [--limit N] [--status STATUS] [--trigger-type TYPE]
                  [--trigger NAME] [--project PROJECT]
                  [--target-type task|workflow] [--target PROJECT/NAME]
                  [--attempts] [--json]
-mango history show RUN_ID [--json]
+mango history show RUN_REF [--json]
 mango history purge (--before RFC3339 | --all) --yes [--json]
 ```
 
@@ -1293,6 +1315,8 @@ interactive terminal, the shared browser navigates `run → task → attempts` o
 Runs are ordered newest-first, while tasks and attempts are ordered oldest-first.
 Use `←`/`→` (or PageUp/PageDown) to change pages, `↑`/`↓` to select within the
 current page, `Esc` to go back, `r` to refresh, and `q` to quit.
+Nested task run IDs are displayed with the same shortening rule for readability;
+execution commands resolve root execution IDs only.
 
 ### Startup integration
 
@@ -1637,7 +1661,7 @@ GET  /api/v1/events?after_id=42
 GET  /api/v1/audit
 GET  /api/v1/metrics
 POST /api/v1/services/demo/api/restart
-POST /api/v1/executions/RUN_ID/cancel
+POST /api/v1/executions/RUN_REF/cancel
 ```
 
 The API is intended for local administration or a trusted reverse proxy; Mango

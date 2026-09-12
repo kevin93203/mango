@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/runref"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"golang.org/x/term"
 )
@@ -71,6 +72,10 @@ func historyDisplay(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func runIDDisplay(value string, noTrunc bool) string {
+	return runref.Display(value, noTrunc)
 }
 
 func historyTaskArgs(args []string) string {
