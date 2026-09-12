@@ -127,6 +127,10 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		&cobra.Group{ID: groupManage, Title: "Manage:"},
 		&cobra.Group{ID: groupAdvanced, Title: "Advanced:"},
 	)
+	doctor := a.groupedSimpleCmd("doctor", "Inspect Mango environment and daemon health", groupAdvanced, func() error {
+		return doctorCommand(a.layout)
+	})
+	a.addJSONFlag(doctor)
 
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
@@ -135,7 +139,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		a.compatProcessCmd("enable"), a.compatProcessCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
 		a.historyCmd(), a.executionCmd(), a.startupCmd(), a.runCmd(),
-		a.groupedSimpleCmd("doctor", "Inspect Mango environment and daemon health", groupAdvanced, func() error { return doctorCommand(a.layout) }),
+		doctor,
 	)
 	var watchStatus bool
 	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
@@ -156,6 +160,8 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		}
 		return eventsCommandWithContext(ctx, eventLimit, followEvents)
 	})
+	events.Long = "Read the durable event stream. Use `mango events --json` for machine-readable output; --json cannot be combined with --follow."
+	events.Example = "  mango events --json\n  mango events --follow"
 	events.Flags().IntVar(&eventLimit, "limit", 100, "maximum events per read")
 	events.Flags().BoolVar(&followEvents, "follow", false, "follow new events")
 	a.addJSONFlag(events)
@@ -182,12 +188,9 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	case "up":
 		var noDaemon bool
 		cmd := a.leafCmd("up [PATH]", "Start a project", cobra.MaximumNArgs(1), func(args []string) error {
-			if len(args) == 1 && file != "" {
-				return errors.New("up accepts PATH or --file, not both")
-			}
-			path := file
-			if len(args) == 1 {
-				path = args[0]
+			path, err := upConfigPath(args, file)
+			if err != nil {
+				return err
 			}
 			return upCommand(a.layout, composeProjectOptions{Project: project, File: path, NoDaemon: noDaemon})
 		})
@@ -221,6 +224,16 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	default:
 		return a.actionCmd(action, "", func() error { return fmt.Errorf("unsupported compose command %q", action) })
 	}
+}
+
+func upConfigPath(args []string, file string) (string, error) {
+	if len(args) == 1 && file != "" {
+		return "", errors.New("up accepts PATH or --file, not both")
+	}
+	if len(args) == 1 {
+		return args[0], nil
+	}
+	return file, nil
 }
 
 func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {
@@ -296,6 +309,11 @@ func commandErrorWasShown(err error) bool {
 
 func (a *cliApp) printCommandError(err error) {
 	if !commandErrorWasShown(err) {
+		var autoStartErr daemonAutoStartError
+		if errors.As(err, &autoStartErr) {
+			a.output.Errorf("error: %s; recovery: %s", err, daemonAutoStartRecoveryHint(autoStartErr.err))
+			return
+		}
 		if errors.Is(err, ipc.ErrDaemonUnavailable) && !strings.Contains(err.Error(), "--no-daemon") && !strings.Contains(err.Error(), "mango up could not start mangod") {
 			a.output.Errorf("error: %s", daemonRecoveryHint(a.command))
 			return
@@ -331,6 +349,17 @@ func daemonRecoveryHint(command string) string {
 		return "daemon is not running; run `mango daemon start`"
 	}
 	return "daemon is not running; run `mango up` for the guided path or `mango daemon start` for explicit daemon control"
+}
+
+func daemonAutoStartRecoveryHint(err error) string {
+	message := err.Error()
+	if strings.Contains(message, "mangod executable not found") {
+		return "install mango and mangod together or add mangod to PATH; run `mango doctor` to verify, then retry `mango up`"
+	}
+	if strings.Contains(message, "did not become ready") || strings.Contains(message, "failed to start") {
+		return "run `mango daemon status` and `mango doctor` for details; after fixing mangod, retry `mango daemon start` or `mango up`"
+	}
+	return "run `mango doctor` for details; after fixing mangod, retry `mango daemon start` or `mango up`"
 }
 
 func usageOnError(validate cobra.PositionalArgs) cobra.PositionalArgs {
@@ -376,23 +405,33 @@ func (a *cliApp) actionCmdWithContext(use, short string, run func(context.Contex
 
 func (a *cliApp) deprecatedActionCmd(use, short, replacement string, run func() error) *cobra.Command {
 	cmd := a.actionCmd(use, short, run)
-	cmd.Hidden = true
-	original := cmd.RunE
-	cmd.RunE = func(command *cobra.Command, args []string) error {
-		a.warnDeprecated(command.CommandPath(), replacement)
-		return original(command, args)
-	}
-	return cmd
+	return a.markDeprecated(cmd, replacement)
 }
 
 func (a *cliApp) deprecatedLeafCmd(use, short, replacement string, validate cobra.PositionalArgs, run func([]string) error) *cobra.Command {
 	cmd := a.leafCmd(use, short, validate, run)
+	return a.markDeprecated(cmd, replacement)
+}
+
+func (a *cliApp) markDeprecated(cmd *cobra.Command, replacement string) *cobra.Command {
 	cmd.Hidden = true
+	originalArgs := cmd.Args
+	cmd.Args = func(command *cobra.Command, args []string) error {
+		err := originalArgs(command, args)
+		if err != nil {
+			a.warnDeprecated(command.CommandPath(), replacement)
+		}
+		return err
+	}
 	original := cmd.RunE
 	cmd.RunE = func(command *cobra.Command, args []string) error {
 		a.warnDeprecated(command.CommandPath(), replacement)
 		return original(command, args)
 	}
+	cmd.SetFlagErrorFunc(func(command *cobra.Command, err error) error {
+		a.warnDeprecated(command.CommandPath(), replacement)
+		return err
+	})
 	return cmd
 }
 
@@ -450,6 +489,8 @@ func (a *cliApp) daemonCmd() *cobra.Command {
 		}
 		return daemonLogsCommandWithContext(ctx, a.layout, daemonLogsOptions{Tail: tail, Follow: follow})
 	})
+	logs.Long = "Read daemon logs. Use `mango daemon logs --json` for machine-readable output; --json cannot be combined with --follow."
+	logs.Example = "  mango daemon logs --json\n  mango daemon logs --follow"
 	logs.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
 	logs.Flags().BoolVar(&follow, "follow", false, "follow new output")
 	a.addJSONFlag(logs)
@@ -480,7 +521,9 @@ func (a *cliApp) projectCmd() *cobra.Command {
 	list := a.simpleCmd("list", "List registered projects", projectListCommand)
 	a.addJSONFlag(list)
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.deprecatedActionCmd("ls", "List registered projects", "mango project list", projectListCommand))
+	legacyList := a.deprecatedActionCmd("ls", "List registered projects", "mango project list", projectListCommand)
+	a.addJSONFlag(legacyList)
+	cmd.AddCommand(legacyList)
 
 	status := a.leafCmd("status PROJECT", "Show project status", cobra.ExactArgs(1), func(args []string) error {
 		if _, err := clitarget.ParseProject(args[0]); err != nil {
@@ -572,6 +615,8 @@ func (a *cliApp) logsCmd() *cobra.Command {
 		}
 		return logsCommandWithContext(ctx, args, logsOptions{stream: stream, tail: tail, follow: follow})
 	})
+	cmd.Long = "Read service, task, or workflow-node logs. Use `mango logs TARGET --json` for machine-readable output; --json cannot be combined with --follow."
+	cmd.Example = "  mango logs demo/api --json\n  mango logs demo/api --follow"
 	cmd.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
 	cmd.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
 	cmd.Flags().BoolVar(&follow, "follow", false, "follow new output")
@@ -595,6 +640,8 @@ func (a *cliApp) monitorCmd() *cobra.Command {
 		}
 		return tui.Run(cliOutput, monitorLogs)
 	})
+	cmd.Long = "Open the interactive service monitor. For machine-readable output, use `mango service list --json` or `mango status TARGET --json`; use `mango logs TARGET --json` for one-shot logs."
+	cmd.Example = "  mango monitor\n  mango service list --json\n  mango status demo/api --json"
 	return cmd
 }
 
@@ -603,7 +650,9 @@ func (a *cliApp) scheduleCmd() *cobra.Command {
 	list := a.simpleCmd("list", "List schedules", scheduleListCommand)
 	a.addJSONFlag(list)
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.deprecatedActionCmd("ls", "List schedules", "mango schedule list", scheduleListCommand))
+	legacyList := a.deprecatedActionCmd("ls", "List schedules", "mango schedule list", scheduleListCommand)
+	a.addJSONFlag(legacyList)
+	cmd.AddCommand(legacyList)
 	for _, action := range []string{"enable", "disable"} {
 		action := action
 		child := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" schedules", cobra.MinimumNArgs(1), func(args []string) error {
@@ -625,7 +674,9 @@ func (a *cliApp) workflowCmd() *cobra.Command {
 	list := a.simpleCmd("list", "List workflows", workflowListCommand)
 	a.addJSONFlag(list)
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.deprecatedActionCmd("ls", "List workflows", "mango workflow list", workflowListCommand))
+	legacyList := a.deprecatedActionCmd("ls", "List workflows", "mango workflow list", workflowListCommand)
+	a.addJSONFlag(legacyList)
+	cmd.AddCommand(legacyList)
 	legacyRun := a.legacyWorkflowRunCmd()
 	cmd.AddCommand(legacyRun)
 	return cmd
@@ -636,7 +687,9 @@ func (a *cliApp) taskCmd() *cobra.Command {
 	list := a.simpleCmd("list", "List tasks", taskListCommand)
 	a.addJSONFlag(list)
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.deprecatedActionCmd("ls", "List tasks", "mango task list", taskListCommand))
+	legacyList := a.deprecatedActionCmd("ls", "List tasks", "mango task list", taskListCommand)
+	a.addJSONFlag(legacyList)
+	cmd.AddCommand(legacyList)
 	cmd.AddCommand(a.legacyTaskRunCmd())
 	return cmd
 }
@@ -814,6 +867,7 @@ func (a *cliApp) historyCmd() *cobra.Command {
 	purge.Flags().StringVar(&before, "before", "", "purge terminal runs finished before RFC3339 timestamp")
 	purge.Flags().BoolVar(&all, "all", false, "purge all terminal runs")
 	purge.Flags().BoolVar(&yes, "yes", false, "confirm the purge")
+	a.addJSONFlag(purge)
 	cmd.AddCommand(purge)
 	return cmd
 }

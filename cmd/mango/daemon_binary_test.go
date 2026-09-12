@@ -33,17 +33,29 @@ func TestResolveDaemonExecutablePrefersSibling(t *testing.T) {
 }
 
 func TestResolveDaemonExecutableFallsBackToPATH(t *testing.T) {
-	path, err := resolveDaemonExecutableFrom("", "darwin", func(name string) (string, error) {
-		if name != "mangod" {
-			t.Fatalf("lookPath name = %q, want mangod", name)
-		}
-		return "/usr/local/bin/mangod", nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != "/usr/local/bin/mangod" {
-		t.Fatalf("path = %q", path)
+	for _, test := range []struct {
+		goos string
+		name string
+		path string
+	}{
+		{goos: "linux", name: "mangod", path: "/usr/local/bin/mangod"},
+		{goos: "darwin", name: "mangod", path: "/usr/local/bin/mangod"},
+		{goos: "windows", name: "mangod.exe", path: `C:\Program Files\Mango\mangod.exe`},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			path, err := resolveDaemonExecutableFrom("", test.goos, func(name string) (string, error) {
+				if name != test.name {
+					t.Fatalf("lookPath name = %q, want %q", name, test.name)
+				}
+				return test.path, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != test.path {
+				t.Fatalf("path = %q, want %q", path, test.path)
+			}
+		})
 	}
 }
 
@@ -51,7 +63,7 @@ func TestResolveDaemonExecutableReportsMissingBinary(t *testing.T) {
 	_, err := resolveDaemonExecutableFrom("", "darwin", func(string) (string, error) {
 		return "", os.ErrNotExist
 	})
-	if err == nil || !strings.Contains(err.Error(), "mangod executable not found") {
+	if err == nil || !strings.Contains(err.Error(), "mangod executable not found") || !strings.Contains(err.Error(), "mango doctor") {
 		t.Fatalf("err = %v, want missing mangod error", err)
 	}
 }

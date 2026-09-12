@@ -38,6 +38,31 @@ func TestParseLogTargets(t *testing.T) {
 	}
 }
 
+func TestParseScheduleAndServiceOperationTargets(t *testing.T) {
+	schedule, err := ParseSchedule("demo")
+	if err != nil || schedule.Kind != Schedule || schedule.Project != "demo" {
+		t.Fatalf("ParseSchedule(project) = %#v, %v", schedule, err)
+	}
+	service, err := ParseServiceOperation("demo")
+	if err != nil || service.Kind != Service || service.Project != "demo" {
+		t.Fatalf("ParseServiceOperation(project) = %#v, %v", service, err)
+	}
+	for _, value := range []string{"demo/nightly"} {
+		if _, err := ParseSchedule(value); err != nil {
+			t.Fatalf("ParseSchedule(%q) = %v", value, err)
+		}
+	}
+}
+
+func TestParseRunAcceptsUniqueReferencePrefixes(t *testing.T) {
+	for _, value := range []string{"run-2026", "a1b2c3"} {
+		got, err := ParseRun(value)
+		if err != nil || got != value {
+			t.Fatalf("ParseRun(%q) = %q, %v", value, got, err)
+		}
+	}
+}
+
 func TestParseRejectsAmbiguousForms(t *testing.T) {
 	for _, test := range []struct {
 		name  string

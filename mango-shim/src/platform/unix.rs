@@ -193,15 +193,15 @@ pub fn cleanup_tree(_tree: &TreeHandle) {
         break;
     }
     #[cfg(target_os = "linux")]
-    if let Some(path) = &_tree.cgroup {
-        if fs::remove_dir(path).is_err() {
-            let _ = fs::write(path.join("cgroup.kill"), b"1");
-            for _ in 0..10 {
-                if fs::remove_dir(path).is_ok() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
+    if let Some(path) = &_tree.cgroup
+        && fs::remove_dir(path).is_err()
+    {
+        let _ = fs::write(path.join("cgroup.kill"), b"1");
+        for _ in 0..10 {
+            if fs::remove_dir(path).is_ok() {
+                break;
             }
+            thread::sleep(Duration::from_millis(10));
         }
     }
 }

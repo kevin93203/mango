@@ -854,7 +854,9 @@ commands when you need to manage desired state or daemon ownership directly:
   normal `mango up` does not require these commands first.
 - `mango events` reads the durable event stream, and `mango startup` manages
   per-user boot integration.
-- `mango monitor` is an interactive terminal view and does not support JSON.
+- `mango monitor` is an interactive terminal view and does not support JSON;
+  use `mango service list --json`, `mango status TARGET --json`, or
+  `mango logs TARGET --json` for machine-readable alternatives.
 
 `execution` and `history` remain hidden compatibility namespaces while the
 unified `runs` model is planned for Stage 2. They remain callable for existing
@@ -1167,7 +1169,8 @@ rotation files; a running service can continue writing after the clear.
 Service log files use the service-level log rotation settings, with runtime
 defaults when they are omitted. One-shot `logs --json` returns ordered
 `target`, `stream`, and `data` entries; `--json` cannot be combined with
-`--follow`.
+`--follow`. For a machine-readable service snapshot, use
+`mango service list --json` or `mango status PROJECT/SERVICE --json`.
 
 ### `mango monitor`
 
@@ -1177,7 +1180,9 @@ mango monitor
 
 With a TTY, `monitor` redraws the service table every second and allows actions
 on the selected service. Without a TTY it prints one service table and exits.
-It does not support `--json`.
+It does not support `--json`; use `mango service list --json` or
+`mango status PROJECT/SERVICE --json` for machine-readable status, and
+`mango logs PROJECT/SERVICE --json` for one-shot logs.
 
 | Key | Action |
 | --- | --- |

@@ -411,7 +411,7 @@ func startDaemonWithOptions(layout paths.Layout, announce bool) (daemonHealthDat
 		return daemonHealthData{}, err
 	}
 	defer logFile.Close()
-	cmd := exec.Command(executable, "run")
+	cmd := exec.Command(executable, "run", "--home", layout.Root)
 	configureDaemonCommand(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -475,15 +475,7 @@ func sameConfigPath(left, right string) bool {
 }
 
 func upCommand(layout paths.Layout, options composeProjectOptions) error {
-	path, err := composeConfigPath(options.File)
-	if err != nil {
-		return err
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		return err
-	}
-	projectName, err := config.ResolveProjectName(loaded, options.Project)
+	loaded, projectName, err := resolveUpConfig(options)
 	if err != nil {
 		return err
 	}
@@ -543,18 +535,49 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 	return nil
 }
 
+func resolveUpConfig(options composeProjectOptions) (config.File, string, error) {
+	path, err := composeConfigPath(options.File)
+	if err != nil {
+		return config.File{}, "", err
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		return config.File{}, "", err
+	}
+	projectName, err := config.ResolveProjectName(loaded, options.Project)
+	if err != nil {
+		return config.File{}, "", err
+	}
+	return loaded, projectName, nil
+}
+
 func ensureDaemon(layout paths.Layout, noDaemon bool) error {
-	_, initialErr := call("health", nil)
+	return ensureDaemonWith(
+		noDaemon,
+		func() error {
+			_, err := call("health", nil)
+			return err
+		},
+		prepareDaemonEndpoint,
+		func() error {
+			_, err := startDaemonWithOptions(layout, !jsonOutput)
+			return err
+		},
+	)
+}
+
+func ensureDaemonWith(noDaemon bool, health, prepare, start func() error) error {
+	initialErr := health()
 	if initialErr == nil {
 		return nil
 	}
 	if noDaemon {
 		return fmt.Errorf("daemon is unavailable for mango up --no-daemon; run mango daemon start or remove --no-daemon: %w", initialErr)
 	}
-	if healthErr := prepareDaemonEndpoint(); healthErr != nil && !errors.Is(initialErr, ipc.ErrDaemonUnavailable) {
+	if healthErr := prepare(); healthErr != nil && !errors.Is(initialErr, ipc.ErrDaemonUnavailable) {
 		return daemonAutoStartError{err: fmt.Errorf("daemon health check failed; use mango daemon status for details: %w", healthErr)}
 	}
-	if _, err := startDaemonWithOptions(layout, !jsonOutput); err != nil {
+	if err := start(); err != nil {
 		return daemonAutoStartError{err: err}
 	}
 	return nil
@@ -613,6 +636,12 @@ func resolveRegisteredComposeTarget(layout paths.Layout, options composeProjectO
 }
 
 func downCommand(layout paths.Layout, options composeProjectOptions) error {
+	return downCommandWithCaller(layout, options, func(method string, params interface{}, timeout time.Duration) (ipc.Response, error) {
+		return callWithTimeout(method, params, timeout)
+	})
+}
+
+func downCommandWithCaller(layout paths.Layout, options composeProjectOptions, caller func(string, interface{}, time.Duration) (ipc.Response, error)) error {
 	name, _, registered, err := resolveRegisteredComposeTarget(layout, options)
 	if err != nil {
 		return err
@@ -626,11 +655,11 @@ func downCommand(layout paths.Layout, options composeProjectOptions) error {
 	}
 	// These calls are best-effort. Registry reload below is authoritative and
 	// also stops any process left after an individual operation fails.
-	_, _ = callWithTimeout("service.bulk", struct {
+	_, _ = caller("service.bulk", struct {
 		Action  string   `json:"action"`
 		Targets []string `json:"targets"`
 	}{Action: "stop", Targets: []string{name}}, processOperationTimeout)
-	_, _ = callWithTimeout("schedule.bulk", struct {
+	_, _ = caller("schedule.bulk", struct {
 		Action  string   `json:"action"`
 		Targets []string `json:"targets"`
 	}{Action: "disable", Targets: []string{name}}, processOperationTimeout)
@@ -647,7 +676,7 @@ func downCommand(layout paths.Layout, options composeProjectOptions) error {
 	if err := registry.Save(layout.Registry, reg); err != nil {
 		return err
 	}
-	if _, reloadErr := call("project.reload", nil); reloadErr != nil && !errors.Is(reloadErr, ipc.ErrDaemonUnavailable) {
+	if _, reloadErr := caller("project.reload", nil, processOperationTimeout); reloadErr != nil && !errors.Is(reloadErr, ipc.ErrDaemonUnavailable) {
 		return reloadErr
 	}
 	if jsonOutput {
@@ -764,7 +793,7 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("mangod executable not found; install mango and mangod together or add %s to PATH", name)
+	return "", fmt.Errorf("mangod executable not found; install mango and mangod together or add %s to PATH, then run `mango doctor` and retry `mango daemon start`", name)
 }
 
 func projectAddCommand(layout paths.Layout, projectName, configPath string) error {

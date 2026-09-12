@@ -1,6 +1,6 @@
 # Phase 07: CLI Simplification and Progressive Migration
 
-Status: In progress.
+Status: Stage 1 complete; Stage 2 pending.
 
 ## Objective
 
@@ -77,8 +77,11 @@ Stage 1 的新手入口建議固定為：
     mango logs TARGET [--follow]
     mango run task TARGET [--wait]
     mango run workflow TARGET [--wait]
-    mango runs ...
     mango down [PROJECT]
+
+`mango runs ...` is intentionally deferred to Stage 2; the existing hidden
+`execution` and `history` namespaces remain compatibility interfaces until
+the unified run facade is implemented.
 
 資源與進階命令則使用一致的 noun-first 形式：
 
@@ -118,7 +121,7 @@ Advanced 區段。是否在 Stage 3 移到 system 或其他進階 namespace，�
 - 在 root help 中加入明確的 command groups：
 
       Start here:
-        init, up, status, logs, run, runs, down
+        init, up, status, logs, run, down
 
       Manage:
         service, project, task, workflow, schedule
@@ -235,7 +238,7 @@ Stage 1 應新增共用 target parser 或 resolver，避免各 command 自行解
 
       mango init
       mango up
-      mango status
+      mango status demo/api
       mango logs demo/api --follow
       mango down
 
@@ -565,11 +568,11 @@ CLI-specific checks：
 
 ### Before Stage 1 release
 
-- [ ] Canonical command specification review complete。
-- [ ] Target grammar and ambiguity rules documented。
-- [ ] Root help groups and examples approved。
-- [ ] --json support matrix finalized。
-- [ ] Deprecation policy and warning format finalized。
+- [x] Canonical command specification review complete。
+- [x] Target grammar and ambiguity rules documented。
+- [x] Root help groups and examples approved。
+- [x] --json support matrix finalized。
+- [x] Deprecation policy and warning format finalized。
 - [x] README schema version contradiction fixed。
 
 ### Before Stage 2 release
