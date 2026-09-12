@@ -126,8 +126,8 @@ Copy-Item mango-shim/target/release/mango-shim.exe bin/mango-shim.exe
 ```
 
 Generate and start the example project. `mango up` starts `mangod` when it is
-not already running, registers the YAML, applies it, and waits for the project
-to become ready:
+not already running, registers the YAML, and applies it. Add `--wait` to wait
+for the project to become ready:
 
 ```sh
 ./bin/mango init
@@ -212,7 +212,7 @@ schedules:
 ### Compose-like project lifecycle
 
 ```text
-mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
+mango up [PATH] [--project NAME] [--file PATH] [--no-daemon] [--wait]
 mango list [PROJECT]
 mango down [PROJECT] [--project NAME] [--file PATH]
 ```
@@ -380,7 +380,7 @@ services.
 ### Services
 
 ```sh
-mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
+mango up [PATH] [--project NAME] [--file PATH] [--no-daemon] [--wait]
 mango list [PROJECT]
 mango down [PROJECT] [--project NAME] [--file PATH]
 mango status PROJECT/SERVICE

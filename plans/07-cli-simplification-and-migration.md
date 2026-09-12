@@ -157,7 +157,8 @@ Advanced 區段。是否在 Stage 3 移到 system 或其他進階 namespace，�
 - mango up [PATH] 新增 positional config path；--file PATH 保留為相容形式。
 - mango down [PROJECT] 支援從目前目錄的 config 或明確 project name 解決目標；
   --project 保留為相容形式。
-- up 的公開語意定義為「讀取、驗證、註冊或更新、apply，並等待 project ready」。
+- up 的公開語意定義為「讀取、驗證、註冊或更新、apply 並啟動 project」；
+  使用 --wait 時才等待 project ready。
 - down 的公開語意定義為「停止並停用 project，但不刪除 registry、config、logs、
   generation snapshots 或 history」。
 - project add/apply/plan/status/rollback 不刪除，但在文件中明確標示為 advanced
@@ -203,8 +204,9 @@ Stage 1 應新增共用 target parser 或 resolver，避免各 command 自行解
   說明替代的 machine-readable command。
 - --no-trunc 應只在輸出 run references 的 commands 中顯示；JSON 永遠輸出完整 ID。
 - --tail、--limit 的 default 與 0 語意需在所有相關 command 統一。
-- --wait 成為 asynchronous operation 的一致選項；up 可維持預設等待 ready，
-  run 則預設回傳 accepted run reference，使用 --wait 等待 terminal result。
+- --wait 成為 asynchronous operation 的一致選項；up 預設回傳 accepted generation，
+  使用 --wait 等待 ready；run 則預設回傳 accepted run reference，使用 --wait
+  等待 terminal result。
 - daemon unavailable 錯誤不應硬編碼成只有 mango daemon start 一條路；依 command
   context 顯示 mango up 或 advanced daemon recovery suggestion。
 

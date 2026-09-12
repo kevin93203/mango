@@ -199,16 +199,17 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 
 	switch action {
 	case "up":
-		var noDaemon bool
+		var noDaemon, wait bool
 		cmd := a.leafCmd("up [PATH]", "Start a project", cobra.MaximumNArgs(1), func(args []string) error {
 			path, err := upConfigPath(args, file)
 			if err != nil {
 				return err
 			}
-			return upCommand(a.layout, composeProjectOptions{Project: project, File: path, NoDaemon: noDaemon})
+			return upCommand(a.layout, composeProjectOptions{Project: project, File: path, NoDaemon: noDaemon, Wait: wait})
 		})
 		projectFlag(cmd)
 		cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "do not start mangod automatically")
+		cmd.Flags().BoolVar(&wait, "wait", false, "wait until services are ready/healthy")
 		a.addJSONFlag(cmd)
 		cmd.GroupID = groupStart
 		return cmd

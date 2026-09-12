@@ -421,6 +421,18 @@ func TestCobraProjectExposesPlanAsOnlyPreviewCommand(t *testing.T) {
 	}
 }
 
+func TestCobraUpExposesWaitFlag(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	up, _, err := root.Find([]string{"up"})
+	if err != nil || up == root {
+		t.Fatalf("up command missing: command=%v err=%v", up, err)
+	}
+	if up.Flag("wait") == nil {
+		t.Fatal("up --wait flag missing")
+	}
+}
+
 func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
 	cases := [][]string{
 		{"status"}, {"start"}, {"stop"}, {"restart"}, {"enable"}, {"disable"}, {"logs"},

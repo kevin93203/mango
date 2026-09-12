@@ -449,6 +449,7 @@ type composeProjectOptions struct {
 	Project  string
 	File     string
 	NoDaemon bool
+	Wait     bool
 }
 
 func composeConfigPath(value string) (string, error) {
@@ -514,6 +515,18 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 	var result api.ApplyResult
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
+	}
+	if !options.Wait {
+		if len(loaded.Schedules) > 0 {
+			if err := setProjectSchedules(projectName, "enable"); err != nil {
+				return err
+			}
+		}
+		if jsonOutput {
+			return cliOutput.JSON(result)
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s accepted as generation %d", result.Project, result.Generation)))
+		return nil
 	}
 	status, err := waitForProjectGenerationWithTimeout(projectName, result.Generation, 60*time.Second)
 	if err != nil {
