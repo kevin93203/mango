@@ -1,6 +1,6 @@
 # Phase 07: CLI Simplification and Progressive Migration
 
-Status: Stage 2 complete; Stage 3 pending.
+Status: Stage 2 complete; Stage 3 in progress.
 
 ## Objective
 
@@ -609,9 +609,9 @@ CLI-specific checks：
 
 ### Before Stage 3 major release
 
-- [ ] Repository and package examples use canonical commands only。
-- [ ] Root help contains no duplicate primary entries。
-- [ ] Removed command migration errors are tested。
+- [x] Repository and package examples use canonical commands only。
+- [x] Root help contains no duplicate primary entries。
+- [x] Removed command migration errors are tested。
 - [ ] Completion and all platform smoke tests are updated。
 - [ ] Upgrade, rollback and compatibility matrix pass。
 - [ ] Release notes contain a complete CLI migration table。

@@ -38,8 +38,12 @@ mango down
 compatibility `--file PATH`) for another file and `--project NAME` to override the resolved name. The resolution order
 is `--project`, YAML `name`, then the YAML directory name.
 
-The older `mango project add` remains a compatibility alias for
-`mango project register`. `project apply/plan/status/rollback` and service lifecycle
-commands remain available as advanced operator interfaces. `mango down` keeps
-the project registry, generation snapshots, logs, and execution history, so a
-later `mango up` can restore and reconcile the project.
+In the Stage 3 major release, use `mango project register`; the older project
+registration spelling returns a migration error. `project apply/plan/status/rollback`
+and service lifecycle commands remain available as advanced operator
+interfaces. `mango down` keeps the project registry, generation snapshots,
+logs, and execution history, so a later `mango up` can restore and reconcile
+the project.
+
+See [the CLI migration guide](migration-cli.md) for the complete removed-command
+map and rollback instructions.

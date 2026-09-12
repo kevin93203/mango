@@ -297,11 +297,7 @@ func TestRunPruneRequiresExplicitConfirmation(t *testing.T) {
 	}
 }
 
-func TestStage2CompatibilityCommandsPointToRuns(t *testing.T) {
-	previousOutput, previousJSON, previousNoTrunc := cliOutput, jsonOutput, noTruncOutput
-	t.Cleanup(func() {
-		cliOutput, jsonOutput, noTruncOutput = previousOutput, previousJSON, previousNoTrunc
-	})
+func TestStage3RemovedRunNamespacesReturnMigrationErrors(t *testing.T) {
 	for _, test := range []struct {
 		args []string
 		want string
@@ -315,14 +311,16 @@ func TestStage2CompatibilityCommandsPointToRuns(t *testing.T) {
 			app := newCLIApp(paths.Layout{}, &stdout, &stderr)
 			root := app.rootCommand()
 			root.SetArgs(test.args)
-			if err := root.Execute(); err == nil {
-				t.Fatal("compatibility command unexpectedly reached a daemon")
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "was removed in this major release") {
+				t.Fatalf("error = %v, want migration error", err)
 			}
-			if !strings.Contains(stderr.String(), "warning: mango "+strings.Join(test.args[:2], " ")+" is deprecated; use "+test.want) {
-				t.Fatalf("stderr = %q, want replacement %q", stderr.String(), test.want)
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %q, want replacement %q", err, test.want)
 			}
-			if strings.Contains(stdout.String(), "warning:") {
-				t.Fatalf("stdout contains migration warning: %q", stdout.String())
+			app.printCommandError(err)
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "error:") {
+				t.Fatalf("stdout = %q, stderr = %q, want stderr-only error", stdout.String(), stderr.String())
 			}
 		})
 	}

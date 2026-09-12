@@ -21,6 +21,13 @@
 - [ ] Test migration lock, marker retry, stale marker, missing backup, checksum
       mismatch, and newer-schema refusal.
 - [ ] Confirm old history rows, registry JSON, and legacy state remain readable.
+- [ ] Verify the Stage 3 root-help snapshot contains canonical grouped entries
+      and no duplicate or storage-model command names.
+- [ ] Verify every removed command returns a non-zero migration error on
+      stderr, leaves stdout empty, and is absent from Bash, Zsh, Fish, and
+      PowerShell completion.
+- [ ] Verify README, examples, CI, PowerShell scripts, release notes, and
+      packaged smoke tests use canonical CLI syntax.
 - [ ] For PostgreSQL/MySQL, complete an external backup and review the
       idempotent DDL plan before migration.
 
@@ -39,6 +46,8 @@
       unsupported/degraded result on the platform.
 - [ ] Publish the migration guide, rollback guide, and this checklist with the
       artifact.
+- [ ] Publish the complete Stage 3 CLI migration table with the major-version
+      boundary and rollback command.
 
 ## Fixed rollout order
 

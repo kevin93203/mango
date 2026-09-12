@@ -20,7 +20,8 @@ Kubernetes orchestration, or multi-host high availability.
 | [03 Workflow, Schedule, and Webhook](03-workflow-schedule-and-webhook.md) | Completed | 01, 02 |
 | [04 Security, Resources, and Observability](04-security-resources-and-observability.md) | Completed | 01, 02, 03 |
 | [05 Release, Migration, and Rollout](05-release-migration-and-rollout.md) | Completed | 00–04 |
-| [06 Execution / History Major Release](06-execution-history-major-release.md) | In progress | 01, Cobra migration |
+| [06 Execution / History Major Release](06-execution-history-major-release.md) | Completed | 01, Cobra migration |
+| [07 CLI Simplification and Progressive Migration](07-cli-simplification-and-migration.md) | Stage 3 in progress | 00–06 |
 
 ## Implementation Audit
 
@@ -76,6 +77,10 @@ Kubernetes orchestration, or multi-host high availability.
   sibling resolution, YAML v3 validation, daemon startup, health, and clean
   shutdown; broader feature coverage remains in the existing cross-platform
   integration suite.
+- **Phase 07 — Stage 3 in progress.** The canonical service, project, task,
+  workflow, schedule, and unified run commands are now the executable CLI
+  surface. Removed names fail with stderr migration errors, stay out of help
+  and completion, and do not contact the daemon.
 
 ## Dependency Flow
 
@@ -91,13 +96,17 @@ Kubernetes orchestration, or multi-host high availability.
 04 Security / Resources / Observability
       ↓
 05 Release / Migration / Rollout
+      ↓
+06 Execution / History Major Release
+      ↓
+07 CLI Simplification / Major-release Cleanup
 ```
 
 ## Shared Decisions
 
 - Existing YAML version 3 remains compatible. The Cobra-equivalence release
-  preserves the public CLI; the Phase 2 major release intentionally changes
-  execution/history defaults and removes the commands listed in plan 06.
+  preserved the public CLI; the Stage 2 and Stage 3 releases moved run queries
+  to `runs` and removed the legacy command names listed in plan 07.
 - Unix domain sockets and Windows named pipes remain the default local control
   transport.
 - HTTP is optional, loopback-only by default, and versioned under `/api/v1`.
@@ -140,3 +149,5 @@ cargo clippy --manifest-path mango-shim/Cargo.toml --all-targets -- -D warnings
 4. Add richer DAG semantics, schedule occurrence handling, and webhooks.
 5. Add secrets, resource controls, events, metrics, and auditability.
 6. Perform migration, release, upgrade, and rollback validation.
+7. Complete the Stage 3 CLI removal, migration-error, completion, and
+   packaged smoke-test gates.

@@ -1,5 +1,10 @@
 # Mango metadata migration guide
 
+The Stage 3 CLI cutover is documented separately in
+[the CLI migration guide](../migration-cli.md). Removed command names fail
+closed with a replacement hint; this metadata migration never deletes or
+rewrites CLI, registry, log, or run-reference state.
+
 The current metadata schema is version 11. Migration steps are explicit and
 named; they are not production `AutoMigrate` operations. Every step is
 idempotent, runs in its own transaction where the database supports that

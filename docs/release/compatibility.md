@@ -23,19 +23,17 @@ live v2 shim and reports the service that requires migration; dead v2 shim
 state is safe to clean up. Do not start a v3 daemon against a v2 daemon or
 shim and do not expect automatic fallback to the legacy supervisor.
 
-The execution/history model remains an advanced compatibility surface while
-plan 07 migrates users to the unified `runs` model:
+The Stage 3 major release completes the CLI cutover to the unified `runs`
+model. Removed command names are listed in
+[the CLI migration guide](../migration-cli.md). The new `mango` binary returns
+a non-zero migration error for those names, writes it to stderr, and does not
+contact the daemon. Hidden migration stubs are excluded from help and shell
+completion; they do not preserve the old operation.
 
-- `mango project add` is retained as an alias for `mango project register`.
-- `mango ps` and `mango ls` are retained as aliases for `mango service list`.
-- `mango task ls` and `mango workflow ls` become hidden aliases for `list`.
-- `mango task run` and `mango workflow run` are retained as aliases for
-  `mango run task` and `mango run workflow`.
-- `mango history` and `mango execution` remain callable but are hidden from
-  the default root help; their leaf commands warn with the `mango runs`
-  replacement.
-- `history clear` becomes `history purge ... --yes`.
-- `mango schedule history` is removed.
+The data and protocol contract is unchanged by the CLI cleanup:
+
 - Retry creates a new run ID and records `retried_from_run_id`.
 - `mango runs list` includes active and terminal runs by default; `--active`
   is the explicit queued/running-only shortcut.
+- Registry entries, generation snapshots, logs, history records, and run
+  references remain readable after upgrade, downgrade, and rollback.

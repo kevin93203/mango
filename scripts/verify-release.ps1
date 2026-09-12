@@ -84,6 +84,22 @@ try {
         }
     }
 
+    $helpOutput = & $cli --help 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "packaged CLI help failed: $($helpOutput -join "`n")"
+    }
+    $helpText = $helpOutput -join "`n"
+    foreach ($removedCommand in @("ps", "ls", "execution", "history", "enable", "disable")) {
+        $pattern = '(?m)^\s+' + [regex]::Escape($removedCommand) + '(?:\s|$)'
+        if ([regex]::IsMatch($helpText, $pattern)) {
+            throw "packaged root help exposes removed command: $removedCommand"
+        }
+    }
+    $completionOutput = & $cli completion powershell 2>&1
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($completionOutput -join "`n"))) {
+        throw "packaged PowerShell completion failed"
+    }
+
     $env:MANGO_HOME = $homeRoot
     Push-Location $probeRoot
     try {
@@ -98,7 +114,7 @@ try {
         }
         & $cli config validate (Join-Path $extractRoot "mango.example.yaml") 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw "packaged YAML v3 example failed validation"
+            throw "packaged YAML v4 example failed validation"
         }
 
         & $cli daemon start 2>&1 | Out-Null
@@ -119,6 +135,14 @@ try {
         }
         if ([string]$health.database.migration.status -notin @("completed", "complete")) {
             throw "daemon health did not report a completed metadata migration"
+        }
+        & $cli service list --json 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "packaged canonical service list failed"
+        }
+        & $cli runs list --json 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "packaged canonical runs list failed"
         }
     } finally {
         Pop-Location
