@@ -707,14 +707,7 @@ func (a *cliApp) runCmd() *cobra.Command {
 }
 
 func (a *cliApp) runsCmd() *cobra.Command {
-	var options runListOptions
 	cmd := a.groupedNamespace("runs", "List and control runs", groupStart)
-	cmd.RunE = func(_ *cobra.Command, _ []string) error {
-		return runListCommand(options)
-	}
-	addRunListFlags(cmd, &options)
-	a.addJSONFlag(cmd)
-	a.addNoTruncFlag(cmd)
 
 	listOptions := runListOptions{}
 	list := a.actionCmd("list", "List runs", func() error { return runListCommand(listOptions) })

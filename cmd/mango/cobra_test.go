@@ -369,7 +369,7 @@ func TestCobraRejectsInvalidColorBeforeHelp(t *testing.T) {
 }
 
 func TestCobraNamespaceWithoutSubcommandPrintsHelp(t *testing.T) {
-	for _, name := range []string{"daemon", "project", "config", "schedule", "workflow", "task", "startup"} {
+	for _, name := range []string{"daemon", "project", "config", "schedule", "workflow", "task", "startup", "runs"} {
 		t.Run(name, func(t *testing.T) {
 			app, output := newTestRoot(t)
 			root := app.rootCommand()

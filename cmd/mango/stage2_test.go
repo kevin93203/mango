@@ -40,7 +40,10 @@ func TestCobraRunsCommandSurface(t *testing.T) {
 		t.Fatalf("runs prune flags = %v, err=%v", prune, err)
 	}
 	if runs.RunE == nil || runs.Args == nil {
-		t.Fatal("runs must execute list by default and validate arguments")
+		t.Fatal("runs namespace must validate arguments")
+	}
+	if runs.LocalNonPersistentFlags().Lookup("limit") != nil || runs.LocalNonPersistentFlags().Lookup("status") != nil {
+		t.Fatal("runs list flags must only be exposed on runs list")
 	}
 }
 
