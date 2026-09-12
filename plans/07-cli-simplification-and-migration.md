@@ -1,6 +1,6 @@
 # Phase 07: CLI Simplification and Progressive Migration
 
-Status: Proposed.
+Status: In progress.
 
 ## Objective
 
@@ -570,7 +570,7 @@ CLI-specific checks：
 - [ ] Root help groups and examples approved。
 - [ ] --json support matrix finalized。
 - [ ] Deprecation policy and warning format finalized。
-- [ ] README schema version contradiction fixed。
+- [x] README schema version contradiction fixed。
 
 ### Before Stage 2 release
 

@@ -22,6 +22,7 @@ shell-based process definition.
 - [Security and observability](#security-and-observability)
 - [Release, migration, and rollback](#release-migration-and-rollback)
 - [YAML v4 migration](docs/migration-v4.md)
+- [CLI migration](docs/migration-cli.md)
 - [Development](#development)
 
 ## What Mango provides
@@ -124,20 +125,22 @@ cargo build --release --manifest-path mango-shim/Cargo.toml
 Copy-Item mango-shim/target/release/mango-shim.exe bin/mango-shim.exe
 ```
 
-Start the daemon explicitly, then generate and start the example project.
-`mango up` connects to the running daemon, registers the YAML, applies it, and
-waits for services to become ready:
+Generate and start the example project. `mango up` starts `mangod` when it is
+not already running, registers the YAML, applies it, and waits for the project
+to become ready:
 
 ```sh
 ./bin/mango init
-./bin/mango daemon start
 ./bin/mango up
-./bin/mango ps
+./bin/mango status demo/api
+./bin/mango service list
+./bin/mango logs demo/api --tail 50
 ./bin/mango down
 ```
 
 In Windows PowerShell, replace `./bin/mango` with `.\bin\mango.exe`.
-The default file is `./mango.yaml`; use `--file PATH` for another file and
+The default file is `./mango.yaml`; pass `PATH` to `up` for another file.
+`--file PATH` remains a compatibility form, and
 `--project NAME` to override the project name.
 
 Inspect the sample service and its logs:
@@ -148,9 +151,9 @@ Inspect the sample service and its logs:
 ./bin/mango logs demo/api --follow
 ```
 
-`mango up` does not start the daemon automatically. To run the daemon in the
-background, use `mango daemon start`. This command expects `mangod` next to
-`mango` or somewhere on `PATH`.
+For controlled environments, use `mango up --no-daemon` and manage daemon
+ownership separately with `mango daemon start`. If automatic startup is
+enabled, `mangod` must be next to `mango` or somewhere on `PATH`.
 
 The starter configuration contains one service, one task, one schedule, and a
 single healthcheck. See
@@ -209,14 +212,14 @@ schedules:
 ### Compose-like project lifecycle
 
 ```text
-mango up [--project NAME] [--file PATH]
-mango ps [--project NAME] [--file PATH]
-mango down [--project NAME] [--file PATH]
+mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
+mango service list [PROJECT]
+mango down [PROJECT] [--project NAME] [--file PATH]
 ```
 
 With no `--file`, Mango reads `./mango.yaml`. Project resolution is
-`--project`, then YAML `name`, then the YAML directory name. The daemon must
-already be running; `up` registers or updates the project, applies the
+`--project`, then YAML `name`, then the YAML directory name. `up` starts the
+daemon when needed, registers or updates the project, applies the
 configuration, enables schedules, starts autostart services, and waits up to
 60 seconds for readiness. If the effective configuration is unchanged, apply
 reuses the current generation and does not restart services. A readiness
@@ -225,8 +228,8 @@ timeout returns a non-zero status while background reconciliation continues.
 `down` stops services, disables schedules, and marks the project disabled. It
 does not delete YAML, registry data, generations, logs, or execution history.
 It can use a registered project with `--project` even when the YAML is
-currently invalid. `ps` shows the compact service state table; `ls` remains an
-alias.
+currently invalid. `mango service list` shows the compact service state table;
+`ps` and `ls` remain compatibility aliases.
 
 ### Services
 
@@ -355,17 +358,17 @@ Validate and register the generated configuration separately:
 
 ```sh
 mango config validate PATH
-mango project add NAME PATH
+mango project register NAME PATH
 mango project plan PROJECT
 mango project status PROJECT [--json]
 mango project apply NAME [--wait]
 mango project rollback PROJECT [GENERATION] [--wait]
-mango project ls
+mango project list
 mango project rename OLD NEW
 mango project remove NAME
 ```
 
-`project add` stores the absolute YAML path in the registry. It does not copy
+`project register` stores the absolute YAML path in the registry. It does not copy
 or modify the configuration file. `project plan` explicitly reads the YAML and
 previews the changes. `project apply` accepts a validated and compiled desired
 snapshot when the effective configuration changes, then reconciles the daemon
@@ -378,17 +381,20 @@ services.
 ### Services
 
 ```sh
-mango up [--project NAME] [--file PATH]
-mango ps [--project NAME] [--file PATH]
-mango down [--project NAME] [--file PATH]
-mango ls
+mango up [PATH] [--project NAME] [--file PATH] [--no-daemon]
+mango service list [PROJECT]
+mango down [PROJECT] [--project NAME] [--file PATH]
 mango status PROJECT/SERVICE
-mango start PROJECT/SERVICE
-mango stop PROJECT/SERVICE
-mango restart PROJECT/SERVICE
-mango enable PROJECT/SERVICE
-mango disable PROJECT/SERVICE
+mango service start PROJECT/SERVICE
+mango service stop PROJECT/SERVICE
+mango service restart PROJECT/SERVICE
+mango service enable PROJECT/SERVICE
+mango service disable PROJECT/SERVICE
 ```
+
+The root `start`, `stop`, and `restart` shortcuts remain available for
+frequent service operations. `ps` and `ls` are compatibility aliases for
+`mango service list`.
 
 Lifecycle commands also accept a project name to operate on all services in
 that project, a numeric service ID, or multiple targets. Service IDs are
@@ -398,7 +404,7 @@ and service names are the stable form.
 ### Logs and monitoring
 
 ```sh
-mango logs PROJECT/SERVICE --stream all --tail 15
+mango logs PROJECT/SERVICE --stream all --tail 100
 mango logs PROJECT/SERVICE --follow
 mango logs clear PROJECT/SERVICE
 mango monitor
@@ -411,25 +417,25 @@ Task logs use `PROJECT/task/TASK`. Workflow-node logs use
 ### Tasks, workflows, and schedules
 
 ```sh
-mango task ls
-mango task run PROJECT/TASK
+mango task list
+mango run task PROJECT/TASK [--wait]
 
-mango workflow ls
-mango workflow run PROJECT/WORKFLOW
+mango workflow list
+mango run workflow PROJECT/WORKFLOW [--wait]
 
-mango schedule ls
+mango schedule list
 mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...]
 
-mango history ls
+mango history list
 mango history show RUN_REF
 mango history purge (--before RFC3339 | --all) --yes
 ```
 
 `task` and `workflow` are execution targets. `schedule`, `webhook`, and
 `manual` are trigger sources. Webhook delivery is available when the optional
-listener is enabled in `daemon.yaml`; otherwise use `task run` or `workflow
-run` for a manual run.
+listener is enabled in `daemon.yaml`; otherwise use `mango run task` or
+`mango run workflow` for a manual run.
 `history` is the terminal-only execution-history browser. Use `--json` for
 machine-readable history and status data.
 
@@ -438,7 +444,7 @@ machine-readable history and status data.
 ### File rules
 
 - Configuration files must use the `.yaml` extension.
-- `version` must be `3`; older versions are rejected and are not converted.
+- `version` must be `4`; older versions are rejected and are not converted.
 - Unknown YAML fields are rejected, so misspelled options fail validation.
 - A file must define at least one service, task, workflow, or schedule.
 - Names use letters, digits, `.`, `_`, and `-`, and must start with a letter or
@@ -797,38 +803,62 @@ Project names must start with an ASCII letter and may then contain letters,
 digits, `.`, `_`, and `-`. Service, task, workflow, schedule, and workflow-node
 names may also start with a digit.
 
-Most commands require the daemon. If it is unavailable, Mango reports:
-`daemon is not running; start it with: mango daemon start`.
+Stable target forms are `PROJECT/SERVICE`, `PROJECT/TASK`,
+`PROJECT/WORKFLOW`, and `PROJECT/SCHEDULE`. Log targets are
+`PROJECT/SERVICE`, `PROJECT/task/TASK`, or
+`PROJECT/workflow/WORKFLOW/NODE`. Numeric service IDs remain a compatibility
+form. Ambiguous targets are rejected instead of guessed.
+
+`mango up` starts the daemon automatically when needed. Other daemon-backed
+commands report a recovery hint: use `mango up` for the guided path or
+`mango daemon start` when daemon ownership is explicit.
 
 ### Global options
 
-Global options may appear before or after the command:
+`--color` is global. `--json` and `--no-trunc` are shown only on commands that
+support them, but remain accepted before a command for script compatibility:
 
 | Option | Values / default | Description |
 | --- | --- | --- |
 | `--color` | `auto` (default), `always`, `never` | Controls ANSI colors. `auto` enables colors for interactive terminals and disables them for pipes/CI. |
 | `--json` | off by default | Prints structured JSON where the command supports it. JSON output never contains ANSI color codes. |
-| `--no-trunc` | off by default | Shows full execution IDs in human-readable output; JSON already uses full IDs. |
+| `--no-trunc` | off by default | Shows full run references on run/execution/history/event output; JSON already uses full IDs. |
 
 Both forms are accepted:
 
 ```sh
-mango --color=never ls
+mango --color=never service list
 mango status demo/api --json
-mango --json history ls --limit 20
-mango --no-trunc execution ls
+mango --json history list --limit 20
+mango --no-trunc execution list
 ```
 
 Set `NO_COLOR` to disable colors in `auto` mode. `--color=always` overrides
-that setting. `--json` is supported by daemon status, project listing/apply,
-service inspection and lifecycle commands, task/workflow/schedule queries,
-startup status, and `doctor`. It is not supported by interactive monitor/log
-commands, configuration initialization/validation, daemon
-start/stop/restart/logs, project add/remove/rename, or startup
-install/uninstall.
+that setting. Non-interactive lifecycle, inspection, project, task, workflow,
+schedule, daemon, startup, event, and execution commands support `--json`.
+Interactive monitor and `--follow` log views remain human-readable; `init`
+still intentionally has no JSON output.
 
 `--` ends global-option parsing and passes remaining values as command
 arguments.
+
+### Advanced commands
+
+The beginner workflow is `init → up → status → logs → down`. Use the advanced
+commands when you need to manage desired state or daemon ownership directly:
+
+- `mango project plan`, `apply`, `status`, and `rollback` inspect or accept
+  project generations without changing the YAML schema or deleting runtime
+  history.
+- `mango daemon start|stop|restart|status|logs` manages the daemon explicitly;
+  normal `mango up` does not require these commands first.
+- `mango events` reads the durable event stream, and `mango startup` manages
+  per-user boot integration.
+- `mango monitor` is an interactive terminal view and does not support JSON.
+
+`execution` and `history` remain hidden compatibility namespaces while the
+unified `runs` model is planned for Stage 2. They remain callable for existing
+scripts and are documented below for operators.
 
 ### `mango init`
 
@@ -865,18 +895,18 @@ mango daemon start
 mango daemon stop
 mango daemon restart
 mango daemon status [--json]
-mango daemon logs [--tail N] [--follow]
+mango daemon logs [--tail N] [--follow] [--json]
 ```
 
 | Command | Arguments / flags | Description |
 | --- | --- | --- |
-| `start` | none | Starts `mangod` in the background and waits for its health endpoint. It is idempotent: concurrent callers succeed while only one daemon runs. `mangod` must be next to `mango` or on `PATH`. |
-| `stop` | none | Requests a graceful daemon shutdown. |
-| `restart` | none | Stops the daemon, waits for the IPC endpoint to close, then starts it again. |
+| `start` | `--json` | Starts `mangod` in the background and waits for its health endpoint. It is idempotent: concurrent callers succeed while only one daemon runs. `mangod` must be next to `mango` or on `PATH`. |
+| `stop` | `--json` | Requests a graceful daemon shutdown. |
+| `restart` | `--json` | Stops the daemon, waits for the IPC endpoint to close, then starts it again. |
 | `status` | `--json` | Shows daemon status, PID, API version, and project configuration errors. A stopped daemon is reported as `stopped`. |
-| `logs` | `--tail N`, `--follow` | Reads the local daemon log without requiring a running daemon. |
+| `logs` | `--tail N`, `--follow`, `--json` | Reads the local daemon log without requiring a running daemon. JSON returns log lines without display prefixes; `--json` cannot be combined with `--follow`. |
 
-`daemon logs` defaults to the last 15 lines. `--tail 0` prints the complete
+`daemon logs` defaults to the last 100 lines. `--tail 0` prints the complete
 daemon log. `--follow` prints the initial tail and then waits for new lines;
 press Ctrl+C to stop following.
 
@@ -899,26 +929,26 @@ mango daemon stop
 ### `mango project`
 
 ```text
-mango project add NAME PATH
+mango project register NAME PATH
 mango project remove NAME
 mango project rename OLD NEW
 mango project plan PROJECT [--json]
 mango project status PROJECT [--json]
 mango project apply NAME [--wait] [--json]
 mango project rollback PROJECT [GENERATION] [--wait] [--json]
-mango project ls [--json]
+mango project list [--json]
 ```
 
 | Command | Parameters | Description |
 | --- | --- | --- |
-| `add` | `NAME`, `PATH` | Validates and registers a `.yaml` file. The stored path is absolute. Duplicate names are rejected. |
+| `register` | `NAME`, `PATH` | Validates and registers a `.yaml` file. The stored path is absolute. Duplicate names are rejected. `add` remains a deprecated compatibility form. |
 | `remove` | `NAME` | Removes the project from the registry. It does not delete the YAML file, application files, or logs. A running daemon unloads the project's services and execution definitions. |
 | `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
 | `plan` | `PROJECT` | Reads the current YAML and shows the deterministic plan v2 resources for services, tasks, workflows, and schedules without changing runtime or metadata state. |
 | `status` | `PROJECT` | Shows the accepted generation, reconciliation phase, readiness, last project error, and resource status. |
 | `apply` | `NAME`, optional `--wait` | Validates and compiles the YAML, stores an immutable accepted generation when the effective configuration changes, and starts background reconciliation. Unchanged effective configuration reuses the current generation. Runtime failures are shown by `status`; `--wait` waits until ready. |
 | `rollback` | `PROJECT`, optional `GENERATION`, `--wait` | Accepts an earlier accepted snapshot as a new generation and starts background reconciliation. `--wait` waits until ready. |
-| `ls` | none | Lists registered projects, enabled status, YAML path, config version, and last accepted time. Requires the daemon. |
+| `list` | none | Lists registered projects, enabled status, YAML path, config version, and last accepted time. Requires the daemon. `ls` remains a deprecated compatibility form. |
 
 Plan v2 JSON has `plan_version: 2`, a current generation, an advisory
 `proposed_generation`, and one sorted `resources` array. Each resource has a
@@ -936,14 +966,14 @@ Examples:
 
 ```sh
 mango config validate ./mango.yaml
-mango project add demo ./mango.yaml
-mango project ls
+mango project register demo ./mango.yaml
+mango project list
 mango project apply demo
 mango project rename demo staging
 mango project remove staging
 ```
 
-`project add`, `remove`, and `rename` update the local registry even if the
+`project register`, `remove`, and `rename` update the local registry even if the
 daemon is not running; they attempt to notify a running daemon to reload.
 
 ### `mango config validate`
@@ -962,12 +992,10 @@ zones, and schedule targets.
 mango config validate mango.example.yaml
 ```
 
-### Service inspection
-
-#### `mango ls`
+### `mango service list`
 
 ```text
-mango ls [--json]
+mango service list [PROJECT] [--json]
 ```
 
 Lists every managed service. The text table contains:
@@ -992,9 +1020,12 @@ operating system permits inspection; child CPU and memory values are shown in
 their own rows.
 
 ```sh
-mango ls
-mango ls --json > services.json
+mango service list
+mango service list --json > services.json
 ```
+
+`mango ps` and `mango ls` remain hidden, deprecated compatibility commands
+that use the same service-list handler.
 
 #### `mango status`
 
@@ -1035,11 +1066,14 @@ IDs rather than root executions.
 ### Service lifecycle commands
 
 ```text
+mango service start TARGET [TARGET ...] [--json]
+mango service stop TARGET [TARGET ...] [--json]
+mango service restart TARGET [TARGET ...] [--json]
+mango service enable TARGET [TARGET ...] [--json]
+mango service disable TARGET [TARGET ...] [--json]
 mango start   TARGET [TARGET ...] [--json]
 mango stop    TARGET [TARGET ...] [--json]
 mango restart TARGET [TARGET ...] [--json]
-mango enable  TARGET [TARGET ...] [--json]
-mango disable TARGET [TARGET ...] [--json]
 ```
 
 `TARGET` can be:
@@ -1054,8 +1088,8 @@ Multiple targets are accepted:
 mango start demo
 mango stop demo/api 2 other/web
 mango restart demo/api
-mango disable demo/api
-mango enable demo/api
+mango service disable demo/api
+mango service enable demo/api
 ```
 
 | Command | Behavior |
@@ -1070,7 +1104,9 @@ For a project target, `start`/`enable` use dependency-first order and
 `stop`/`disable` use dependent-first order. A project `restart` stops in reverse
 order and starts in dependency-first order. Bulk operations continue after an
 individual failure and return a non-zero exit status if any target failed.
-These commands have no command-specific flags; `--follow` belongs to `logs`.
+The root `start`, `stop`, and `restart` forms are shortcuts for the canonical
+`service` commands. Root `enable` and `disable` remain compatibility commands;
+use `mango service enable` and `mango service disable` in new scripts.
 
 Possible lifecycle states are `stopped`, `starting`, `waiting`, `running`,
 `stopping`, `exited`, `backing_off`, `crash_loop`, `failed`, `disabled`, and
@@ -1091,8 +1127,8 @@ minute. When the restart limit is exceeded, the service enters `crash_loop`.
 Read service, task, or workflow-node output:
 
 ```text
-mango logs TARGET [TARGET ...] [--stream STREAM] [--tail N] [--follow]
-mango logs clear TARGET
+mango logs TARGET [TARGET ...] [--stream STREAM] [--tail N] [--follow] [--json]
+mango logs clear TARGET [--json]
 ```
 
 Log targets are:
@@ -1109,7 +1145,7 @@ Flags:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--stream` | `all` | Select `stdout`, `stderr`, or `all`. |
-| `--tail` | `15` | Number of lines to read initially. |
+| `--tail` | `100` | Number of lines to read initially; `0` means all. |
 | `--follow` | off | Continue reading new output until Ctrl+C. |
 
 Examples:
@@ -1129,7 +1165,9 @@ canonical target. `stdout` and `stderr` are color-coded in interactive output.
 rotation files; a running service can continue writing after the clear.
 
 Service log files use the service-level log rotation settings, with runtime
-defaults when they are omitted. `logs` does not support `--json`.
+defaults when they are omitted. One-shot `logs --json` returns ordered
+`target`, `stream`, and `data` entries; `--json` cannot be combined with
+`--follow`.
 
 ### `mango monitor`
 
@@ -1155,9 +1193,9 @@ It does not support `--json`.
 ### Tasks
 
 ```text
-mango task ls [--json]
-mango task run PROJECT/TASK [--json]
-mango execution ls [--status STATUS | --all] [--trigger-type TYPE] [--trigger NAME]
+mango task list [--json]
+mango run task PROJECT/TASK [--wait] [--json]
+mango execution list [--status STATUS | --all] [--trigger-type TYPE] [--trigger NAME]
                        [--project PROJECT] [--target-type task|workflow]
                        [--target PROJECT/NAME] [--limit N] [--json]
 mango execution get|cancel|retry RUN_REF [--json]
@@ -1167,11 +1205,11 @@ mango execution logs RUN_REF [--stream stdout|stderr|all] [--tail N] [--json]
 
 | Command / flag | Description |
 | --- | --- |
-| `task ls` | Lists task name, lifetime logical runs, status, last run, next run, and duration. |
-| `task run` | Starts a task asynchronously with trigger `manual`; the command returns after the run is accepted. |
-| `execution ls` | Lists queued/running executions by default; `--status` selects one status and `--all` includes every status. |
-`task ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
-Without `--json`, `task run` prints the accepted state and an operator-friendly
+| `task list` | Lists task name, lifetime logical runs, status, last run, next run, and duration. `ls` remains a deprecated compatibility form. |
+| `run task` | Starts a task asynchronously with trigger `manual`; `--wait` waits for its terminal result. |
+| `execution list` | Lists queued/running executions by default; `--status` selects one status and `--all` includes every status. `execution` remains an advanced compatibility namespace. |
+`task list` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and `DURATION`.
+Without `--json`, `mango run task` prints the accepted state and an operator-friendly
 run reference, for example `Task demo/backup queued (run_id=...)`. JSON keeps
 the canonical durable `run_id`.
 
@@ -1179,31 +1217,31 @@ The example configuration also includes a long-running execution target for
 testing execution controls:
 
 ```sh
-mango task run demo/execution-demo-task
-mango workflow run demo/execution-demo-workflow
+mango run task demo/execution-demo-task
+mango run workflow demo/execution-demo-workflow
 ```
 
 Both targets run for about 20 seconds and emit both stdout and stderr. Use the
 returned run reference with `execution watch`, `execution cancel`,
-`execution retry`, `execution logs`, or `execution ls`.
+`execution retry`, `execution logs`, or `execution list`.
 `RUNS` counts direct task runs and workflow-node invocations; retries do not
 increase it. `NEXT RUN` includes the earliest direct or indirect schedule.
 
 ### Workflows
 
 ```text
-mango workflow ls [--json]
-mango workflow run PROJECT/WORKFLOW [--json]
+mango workflow list [--json]
+mango run workflow PROJECT/WORKFLOW [--wait] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
-| `workflow ls` | Lists workflow name, lifetime logical runs, status, last run, next run, and duration. |
-| `workflow run` | Starts a workflow asynchronously with trigger `manual`. |
-`workflow ls` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and
+| `workflow list` | Lists workflow name, lifetime logical runs, status, last run, next run, and duration. `ls` remains a deprecated compatibility form. |
+| `run workflow` | Starts a workflow asynchronously with trigger `manual`; `--wait` waits for its terminal result. |
+`workflow list` includes `RUNS`, `STATUS`, `LAST RUN`, `NEXT RUN`, and
 `DURATION`. `RUNS` counts workflow root invocations and `NEXT RUN` is the
 earliest direct schedule for the workflow.
-Without `--json`, `workflow run` prints the accepted state and an
+Without `--json`, `mango run workflow` prints the accepted state and an
 operator-friendly run reference, for example
 `Workflow demo/release queued (run_id=...)`. JSON keeps the canonical durable
 `run_id`.
@@ -1211,11 +1249,11 @@ operator-friendly run reference, for example
 Examples:
 
 ```sh
-mango workflow ls
-mango workflow run demo/release
+mango workflow list
+mango run workflow demo/release
 ```
 
-Use `mango history ls --target-type workflow --target demo/release` to inspect
+Use `mango history list --target-type workflow --target demo/release` to inspect
 workflow runs and their task nodes.
 
 Every task and workflow run returns a durable `run_id`. Use `execution watch`
@@ -1239,20 +1277,20 @@ mango execution watch 7f31a2c4d9e0
 mango execution get 7f31a2c4d9e0 --no-trunc
 ```
 
-`execution ls` supports the following filters:
+`execution list` supports the following filters:
 
 ```sh
-mango execution ls
-mango execution ls --status running
-mango execution ls --status failed
-mango execution ls --all
-mango execution ls --trigger-type schedule --trigger nightly
-mango execution ls --project demo --target-type task
-mango execution ls --target demo/execution-demo-task --limit 10
-mango execution ls --json
+mango execution list
+mango execution list --status running
+mango execution list --status failed
+mango execution list --all
+mango execution list --trigger-type schedule --trigger nightly
+mango execution list --project demo --target-type task
+mango execution list --target demo/execution-demo-task --limit 10
+mango execution list --json
 ```
 
-By default `execution ls` lists only `queued` and `running` executions. Use
+By default `execution list` lists only `queued` and `running` executions. Use
 `--status STATUS` for one status or `--all` for every status; `--all` and
 `--status` are mutually exclusive. The human-readable table shows only
 `RUN_ID`, target, status, started, and elapsed. `--target` accepts either
@@ -1263,21 +1301,21 @@ all matching executions. `--trigger-type` accepts `schedule`, `webhook`, or
 ### Schedules
 
 ```text
-mango schedule ls [--json]
+mango schedule list [--json]
 mango schedule enable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
 mango schedule disable PROJECT|PROJECT/SCHEDULE [PROJECT|PROJECT/SCHEDULE ...] [--json]
 ```
 
 | Command / flag | Description |
 | --- | --- |
-| `schedule ls` | Lists schedule, trigger type, target, cron expression, time zone, lifetime runs, status, last run, next run, and duration. |
+| `schedule list` | Lists schedule, trigger type, target, cron expression, time zone, lifetime runs, status, last run, next run, and duration. `ls` remains a deprecated compatibility form. |
 | `schedule enable TARGET ...` | Enables future cron triggers for one or more schedules. A `PROJECT` target enables every schedule in that project. |
 | `schedule disable TARGET ...` | Disables future cron triggers for one or more schedules. A `PROJECT` target disables every schedule in that project. Existing task/workflow runs are not interrupted. |
 
 Examples:
 
 ```sh
-mango schedule ls
+mango schedule list
 mango schedule disable demo/nightly-release
 mango schedule enable demo/nightly-release
 mango schedule disable demo
@@ -1287,12 +1325,12 @@ Schedule enable/disable state is stored in `MANGO_HOME/state/schedules.json`
 and survives daemon restarts. A project apply keeps state for unchanged
 `PROJECT/SCHEDULE` keys, enables new schedules by default, and removes state
 for schedules removed from the configuration. Disabled schedules remain in
-`schedule ls` with `STATUS=disabled` and no `NEXT_RUN`.
+`schedule list` with `STATUS=disabled` and no `NEXT_RUN`.
 
 ### `mango history`
 
 ```text
-mango history ls [--limit N] [--status STATUS] [--trigger-type TYPE]
+mango history list [--limit N] [--status STATUS] [--trigger-type TYPE]
                  [--trigger NAME] [--project PROJECT]
                  [--target-type task|workflow] [--target PROJECT/NAME]
                  [--attempts] [--json]
@@ -1301,7 +1339,7 @@ mango history purge (--before RFC3339 | --all) --yes [--json]
 ```
 
 History is terminal-only and is read from the canonical execution store.
-`history ls` is newest-first and `--limit 0` returns all retained terminal
+`history list` is newest-first and `--limit 0` returns all retained terminal
 runs. `history show` accepts terminal runs and returns workflow nodes, task
 records, attempts, and lifecycle events. `history purge` removes only terminal
 runs and their tasks, attempts, and events; it never removes active metadata,

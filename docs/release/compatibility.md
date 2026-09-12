@@ -23,10 +23,17 @@ live v2 shim and reports the service that requires migration; dead v2 shim
 state is safe to clean up. Do not start a v3 daemon against a v2 daemon or
 shim and do not expect automatic fallback to the legacy supervisor.
 
-The Phase 2 CLI/history cutover is intentionally coordinated with plan 06:
+The execution/history model remains an advanced compatibility surface during
+Stage 1 of plan 07:
 
-- `mango history` becomes `mango history ls`.
+- `mango project add` is retained as an alias for `mango project register`.
+- `mango ps` and `mango ls` are retained as aliases for `mango service list`.
+- `mango task ls` and `mango workflow ls` become hidden aliases for `list`.
+- `mango task run` and `mango workflow run` are retained as aliases for
+  `mango run task` and `mango run workflow`.
+- `mango history` and `mango execution` remain callable but are hidden from
+  the default root help until the Stage 2 runs model is available.
 - `history clear` becomes `history purge ... --yes`.
 - `mango schedule history` is removed.
 - Retry creates a new run ID and records `retried_from_run_id`.
-- `execution ls` defaults to queued/running; terminal history is separate.
+- `execution list` defaults to queued/running; terminal history is separate.

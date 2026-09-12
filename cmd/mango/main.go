@@ -76,7 +76,6 @@ func initCommand(options initOptions) error {
 	if err := rejectJSON("init"); err != nil {
 		return err
 	}
-
 	path := "mango.yaml"
 	if options.HasPath || options.Path != "" {
 		path = options.Path
@@ -169,24 +168,31 @@ func copyExampleFiles(root string, force bool) error {
 }
 
 func daemonStartCommand(layout paths.Layout) error {
-	if err := rejectJSON("daemon start"); err != nil {
+	if err := prepareDaemonEndpoint(); err != nil {
 		return err
 	}
-	return startDaemon(layout)
+	health, err := startDaemonWithOptions(layout, !jsonOutput)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(health)
+	}
+	return nil
 }
 
 func daemonStopCommand() error {
-	if err := rejectJSON("daemon stop"); err != nil {
+	response, err := callWithTimeout("daemon.stop", nil, processOperationTimeout)
+	if err != nil {
 		return err
 	}
-	_, err := callWithTimeout("daemon.stop", nil, processOperationTimeout)
-	return err
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
+	}
+	return nil
 }
 
 func daemonRestartCommand(layout paths.Layout) error {
-	if err := rejectJSON("daemon restart"); err != nil {
-		return err
-	}
 	if _, err := callWithTimeout("daemon.stop", nil, processOperationTimeout); err == nil {
 		if err := waitForDaemonStop(); err != nil {
 			return err
@@ -194,7 +200,17 @@ func daemonRestartCommand(layout paths.Layout) error {
 	} else if !errors.Is(err, ipc.ErrDaemonUnavailable) {
 		return fmt.Errorf("stop daemon before restart: %w", err)
 	}
-	return startDaemon(layout)
+	if err := prepareDaemonEndpoint(); err != nil {
+		return err
+	}
+	health, err := startDaemonWithOptions(layout, !jsonOutput)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(health)
+	}
+	return nil
 }
 
 func daemonStatusCommand() error {
@@ -218,23 +234,29 @@ type daemonLogsOptions struct {
 }
 
 func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
+	if jsonOutput {
+		return rejectJSON("daemon logs")
+	}
 	return daemonLogsCommandWithContext(cliCommandContext, layout, options)
 }
 
 func daemonLogsCommandWithContext(ctx context.Context, layout paths.Layout, options daemonLogsOptions) error {
-	if err := rejectJSON("daemon logs"); err != nil {
-		return err
-	}
 	if options.Tail < 0 {
 		return errors.New("daemon logs tail must be non-negative")
 	}
 	if options.Follow {
+		if jsonOutput {
+			return errors.New("--json is not supported with daemon logs --follow; use daemon logs without --follow")
+		}
 		return followDaemonLogsWithContext(ctx, layout.DaemonLog, options.Tail)
 	}
 
 	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, options.Tail)
 	if err != nil {
 		return fmt.Errorf("read daemon log: %w", err)
+	}
+	if jsonOutput {
+		return cliOutput.JSON(lines)
 	}
 	writer := newDaemonLogWriter()
 	for _, line := range lines {
@@ -354,21 +376,39 @@ func (w *daemonLogWriter) write(line string) {
 }
 
 func startDaemon(layout paths.Layout) error {
+	if err := prepareDaemonEndpoint(); err != nil {
+		return err
+	}
+	_, err := startDaemonWithOptions(layout, true)
+	return err
+}
+
+func prepareDaemonEndpoint() error {
+	return ipc.PrepareEndpoint(context.Background())
+}
+
+func startDaemonWithOptions(layout paths.Layout, announce bool) (daemonHealthData, error) {
 	if response, err := call("health", nil); err == nil {
-		cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon already running"))
-		_ = printDaemonWarnings(response.Data)
-		return nil
+		health, decodeErr := decodeDaemonHealth(response.Data)
+		if decodeErr != nil {
+			return daemonHealthData{}, decodeErr
+		}
+		if announce {
+			cliOutput.Println(cliOutput.Text(cliui.StyleWarning, "Daemon already running"))
+			_ = printDaemonWarnings(response.Data)
+		}
+		return health, nil
 	}
 	executable, err := resolveDaemonExecutable()
 	if err != nil {
-		return err
+		return daemonHealthData{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(layout.DaemonLog), 0o700); err != nil {
-		return err
+		return daemonHealthData{}, err
 	}
 	logFile, err := os.OpenFile(layout.DaemonLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return daemonHealthData{}, err
 	}
 	defer logFile.Close()
 	cmd := exec.Command(executable, "run")
@@ -380,29 +420,35 @@ func startDaemon(layout paths.Layout) error {
 		defer devNull.Close()
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return daemonHealthData{}, err
 	}
 	go func() { _ = cmd.Wait() }()
 	response, err := waitForDaemon(layout)
 	if err != nil {
-		return fmt.Errorf("daemon failed to start: %w", err)
+		return daemonHealthData{}, fmt.Errorf("daemon failed to start: %w", err)
 	}
 	health, err := decodeDaemonHealth(response.Data)
-	if err != nil || health.PID <= 0 {
+	if err != nil {
+		return daemonHealthData{}, err
+	}
+	if health.PID <= 0 {
 		health.PID = cmd.Process.Pid
 	}
-	if health.PID == cmd.Process.Pid {
-		cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), health.PID)
-	} else {
-		cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleWarning, "Daemon already running"), health.PID)
+	if announce {
+		if health.PID == cmd.Process.Pid {
+			cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleSuccess, "Daemon started"), health.PID)
+		} else {
+			cliOutput.Printf("%s (pid %d)\n", cliOutput.Text(cliui.StyleWarning, "Daemon already running"), health.PID)
+		}
+		_ = printDaemonWarnings(response.Data)
 	}
-	_ = printDaemonWarnings(response.Data)
-	return nil
+	return health, nil
 }
 
 type composeProjectOptions struct {
-	Project string
-	File    string
+	Project  string
+	File     string
+	NoDaemon bool
 }
 
 func composeConfigPath(value string) (string, error) {
@@ -429,9 +475,6 @@ func sameConfigPath(left, right string) bool {
 }
 
 func upCommand(layout paths.Layout, options composeProjectOptions) error {
-	if err := rejectJSON("up"); err != nil {
-		return err
-	}
 	path, err := composeConfigPath(options.File)
 	if err != nil {
 		return err
@@ -458,7 +501,7 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 		existing.Enabled = true
 		reg.Projects[projectName] = existing
 	}
-	if _, err := call("health", nil); err != nil {
+	if err := ensureDaemon(layout, options.NoDaemon); err != nil {
 		return err
 	}
 	if _, ok := reg.Projects[projectName]; !ok {
@@ -489,8 +532,44 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 			return err
 		}
 	}
+	if jsonOutput {
+		return cliOutput.JSON(struct {
+			Project    string `json:"project"`
+			Generation uint64 `json:"generation"`
+			Status     string `json:"status"`
+		}{Project: projectName, Generation: status.Generation, Status: status.Phase})
+	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s is ready at generation %d", projectName, status.Generation)))
 	return nil
+}
+
+func ensureDaemon(layout paths.Layout, noDaemon bool) error {
+	_, initialErr := call("health", nil)
+	if initialErr == nil {
+		return nil
+	}
+	if noDaemon {
+		return fmt.Errorf("daemon is unavailable for mango up --no-daemon; run mango daemon start or remove --no-daemon: %w", initialErr)
+	}
+	if healthErr := prepareDaemonEndpoint(); healthErr != nil && !errors.Is(initialErr, ipc.ErrDaemonUnavailable) {
+		return daemonAutoStartError{err: fmt.Errorf("daemon health check failed; use mango daemon status for details: %w", healthErr)}
+	}
+	if _, err := startDaemonWithOptions(layout, !jsonOutput); err != nil {
+		return daemonAutoStartError{err: err}
+	}
+	return nil
+}
+
+type daemonAutoStartError struct {
+	err error
+}
+
+func (e daemonAutoStartError) Error() string {
+	return "mango up could not start mangod: " + e.err.Error()
+}
+
+func (e daemonAutoStartError) Unwrap() []error {
+	return []error{ipc.ErrDaemonUnavailable, e.err}
 }
 
 func resolveRegisteredComposeTarget(layout paths.Layout, options composeProjectOptions) (string, registry.Project, bool, error) {
@@ -534,14 +613,14 @@ func resolveRegisteredComposeTarget(layout paths.Layout, options composeProjectO
 }
 
 func downCommand(layout paths.Layout, options composeProjectOptions) error {
-	if err := rejectJSON("down"); err != nil {
-		return err
-	}
 	name, _, registered, err := resolveRegisteredComposeTarget(layout, options)
 	if err != nil {
 		return err
 	}
 	if !registered {
+		if jsonOutput {
+			return cliOutput.JSON(map[string]interface{}{"project": name, "status": "not_registered"})
+		}
 		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleMuted, fmt.Sprintf("Project %s is not registered; nothing to stop", name)))
 		return nil
 	}
@@ -570,6 +649,9 @@ func downCommand(layout paths.Layout, options composeProjectOptions) error {
 	}
 	if _, reloadErr := call("project.reload", nil); reloadErr != nil && !errors.Is(reloadErr, ipc.ErrDaemonUnavailable) {
 		return reloadErr
+	}
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"project": name, "status": "disabled"})
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s stopped and disabled", name)))
 	return nil
@@ -686,9 +768,6 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 }
 
 func projectAddCommand(layout paths.Layout, projectName, configPath string) error {
-	if err := rejectJSON("project add"); err != nil {
-		return err
-	}
 	if err := config.ValidateProjectName(projectName); err != nil {
 		return err
 	}
@@ -707,14 +786,14 @@ func projectAddCommand(layout paths.Layout, projectName, configPath string) erro
 		return err
 	}
 	_, _ = call("project.reload", nil)
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"project": projectName, "path": loaded.Path, "status": "registered"})
+	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", projectName)))
 	return nil
 }
 
 func projectRemoveCommand(layout paths.Layout, name string) error {
-	if err := rejectJSON("project remove"); err != nil {
-		return err
-	}
 	reg, err := registry.Load(layout.Registry)
 	if err != nil {
 		return err
@@ -726,14 +805,14 @@ func projectRemoveCommand(layout paths.Layout, name string) error {
 		return err
 	}
 	_, _ = call("project.reload", nil)
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"project": name, "status": "removed"})
+	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
 	return nil
 }
 
 func projectRenameCommand(layout paths.Layout, oldName, newName string) error {
-	if err := rejectJSON("project rename"); err != nil {
-		return err
-	}
 	if oldName == newName {
 		return fmt.Errorf("project %q is already named %q", oldName, newName)
 	}
@@ -765,6 +844,9 @@ func projectRenameCommand(layout paths.Layout, oldName, newName string) error {
 		return err
 	}
 	_, _ = call("project.reload", nil)
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"project": oldName, "new_project": newName, "status": "renamed"})
+	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", oldName, newName)))
 	return nil
 }
@@ -808,12 +890,16 @@ func removeProjectFromRegistry(reg *registry.File, name string) (registry.Projec
 }
 
 func configValidateCommand(path string) error {
-	if err := rejectJSON("config validate"); err != nil {
-		return err
-	}
 	loaded, err := config.Load(path)
 	if err != nil {
 		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(map[string]interface{}{
+			"valid": true, "path": loaded.Path, "version": loaded.Version,
+			"services": len(loaded.Services), "tasks": len(loaded.Tasks),
+			"workflows": len(loaded.Workflows), "schedules": len(loaded.Schedules),
+		})
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: services=%d tasks=%d workflows=%d schedules=%d path=%s", len(loaded.Services), len(loaded.Tasks), len(loaded.Workflows), len(loaded.Schedules), loaded.Path)))
 	return nil
@@ -1033,22 +1119,6 @@ func printProjectPlan(plan reconcile.Plan) error {
 		return nil
 	}
 	cliOutput.Table([]string{"KIND", "NAME", "ACTION", "REASON", "PENDING", "PROCESS"}, rows)
-	return nil
-}
-
-func lsCommand() error {
-	response, err := call("service.ls", nil)
-	if err != nil {
-		return err
-	}
-	var items []api.ServiceInfo
-	if err := decodeData(response.Data, &items); err != nil {
-		return err
-	}
-	if jsonOutput {
-		return cliOutput.JSON(items)
-	}
-	printServiceTable(items)
 	return nil
 }
 
@@ -1340,11 +1410,14 @@ func logsCommandWithCaller(targets []string, options logsOptions, caller logsCal
 }
 
 func logsCommandWithCallerAndContext(ctx context.Context, targets []string, options logsOptions, caller logsCaller) error {
-	if err := rejectJSON("logs"); err != nil {
-		return err
-	}
 	if len(targets) == 0 {
 		return errors.New("logs requires PROJECT/SERVICE, PROJECT/task/TASK, PROJECT/workflow/WORKFLOW/NODE, or ID")
+	}
+	if options.tail < 0 {
+		return errors.New("logs tail must be non-negative")
+	}
+	if options.stream != "" && options.stream != "stdout" && options.stream != "stderr" && options.stream != "all" {
+		return fmt.Errorf("logs stream must be stdout, stderr, or all")
 	}
 	resolved, err := resolveLogTargetsWithContext(ctx, targets, caller)
 	if err != nil {
@@ -1357,9 +1430,55 @@ func logsCommandWithCallerAndContext(ctx context.Context, targets []string, opti
 		return nil
 	}
 	if options.follow {
+		if jsonOutput {
+			return errors.New("--json is not supported with logs --follow; use logs without --follow")
+		}
 		return followLogsTargetsWithContext(ctx, resolved, options.stream, options.tail, caller, newLogWriter())
 	}
+	if jsonOutput {
+		return readLogsTargetsJSONWithContext(ctx, resolved, options.stream, options.tail, caller)
+	}
 	return readLogsTargetsWithContext(ctx, resolved, options.stream, options.tail, caller)
+}
+
+type logJSONEntry struct {
+	Target string `json:"target"`
+	Stream string `json:"stream"`
+	Data   string `json:"data"`
+}
+
+func readLogsTargetsJSONWithContext(ctx context.Context, targets []resolvedLogTarget, stream string, tail int, caller logsCaller) error {
+	streams := logStreams(targets, stream)
+	events, errs := readLogEvents(streams, func(item *logStream) (ipc.Response, error) {
+		return caller(ctx, "logs.read", struct {
+			Key    string
+			Stream string
+			Tail   int
+		}{item.target, item.stream, tail})
+	}, func(response ipc.Response) (string, int64, error) {
+		var data struct {
+			Data string `json:"data"`
+		}
+		if err := decodeData(response.Data, &data); err != nil {
+			return "", 0, err
+		}
+		return data.Data, 0, nil
+	})
+	if err := joinLogErrors(errs); err != nil {
+		return err
+	}
+	streamOrder := map[string]int{"stdout": 0, "stderr": 1}
+	sort.SliceStable(events, func(left, right int) bool {
+		if events[left].stream.targetIndex != events[right].stream.targetIndex {
+			return events[left].stream.targetIndex < events[right].stream.targetIndex
+		}
+		return streamOrder[events[left].stream.stream] < streamOrder[events[right].stream.stream]
+	})
+	entries := make([]logJSONEntry, 0, len(events))
+	for _, event := range events {
+		entries = append(entries, logJSONEntry{Target: event.stream.target, Stream: event.stream.stream, Data: event.data})
+	}
+	return cliOutput.JSON(entries)
 }
 
 func resolveLogTargets(targets []string, caller logsCaller) ([]resolvedLogTarget, error) {
@@ -1505,6 +1624,9 @@ func clearLogsCommand(target string) error {
 	var result map[string]string
 	if err := decodeData(response.Data, &result); err != nil {
 		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(response.Data)
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Logs cleared for %s", result["key"])))
 	return nil
@@ -1795,9 +1917,27 @@ func taskRunCommand(key string) error {
 }
 
 func taskRunCommandWithCaller(key string, caller func(string, interface{}) (ipc.Response, error)) error {
+	return taskRunCommandWithCallerAndOptions(key, false, caller)
+}
+
+func taskRunCommandWithOptions(key string, wait bool) error {
+	return taskRunCommandWithCallerAndOptions(key, wait, call)
+}
+
+func taskRunCommandWithCallerAndOptions(key string, wait bool, caller func(string, interface{}) (ipc.Response, error)) error {
 	response, err := caller("task.run", struct{ Key string }{key})
 	if err != nil {
 		return err
+	}
+	if wait {
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			return err
+		}
+		if result["run_id"] == "" {
+			return errors.New("task.run did not return a run reference")
+		}
+		return executionWatchCommand(executionWatchOptions{RunID: result["run_id"], Timeout: executionWatchDefaultTimeout})
 	}
 	if jsonOutput {
 		return cliOutput.JSON(response.Data)
@@ -1815,9 +1955,27 @@ func workflowRunCommand(key string) error {
 }
 
 func workflowRunCommandWithCaller(key string, caller func(string, interface{}) (ipc.Response, error)) error {
+	return workflowRunCommandWithCallerAndOptions(key, false, caller)
+}
+
+func workflowRunCommandWithOptions(key string, wait bool) error {
+	return workflowRunCommandWithCallerAndOptions(key, wait, call)
+}
+
+func workflowRunCommandWithCallerAndOptions(key string, wait bool, caller func(string, interface{}) (ipc.Response, error)) error {
 	response, err := caller("workflow.run", struct{ Key string }{key})
 	if err != nil {
 		return err
+	}
+	if wait {
+		var result map[string]string
+		if err := decodeData(response.Data, &result); err != nil {
+			return err
+		}
+		if result["run_id"] == "" {
+			return errors.New("workflow.run did not return a run reference")
+		}
+		return executionWatchCommand(executionWatchOptions{RunID: result["run_id"], Timeout: executionWatchDefaultTimeout})
 	}
 	if jsonOutput {
 		return cliOutput.JSON(response.Data)
@@ -1867,10 +2025,10 @@ func executionListCommand(options executionListCLIParams) error {
 
 func executionListCommandWithCaller(options executionListCLIParams, caller func(string, interface{}) (ipc.Response, error)) error {
 	if options.Limit < 0 {
-		return errors.New("execution ls limit must be non-negative")
+		return errors.New("execution list limit must be non-negative")
 	}
 	if options.All && options.Status != "" {
-		return errors.New("execution ls --all and --status are mutually exclusive")
+		return errors.New("execution list --all and --status are mutually exclusive")
 	}
 	response, err := caller("execution.ls", options)
 	if err != nil {
@@ -2117,7 +2275,7 @@ type historyListV2Params struct {
 
 func historyListV2Command(options historyListV2Options) error {
 	if options.Limit < 0 {
-		return errors.New("history ls limit must be non-negative")
+		return errors.New("history list limit must be non-negative")
 	}
 	if options.TargetType != "" && options.TargetType != "task" && options.TargetType != "workflow" {
 		return fmt.Errorf("unknown target type %q", options.TargetType)
@@ -2326,9 +2484,6 @@ func termIsInteractive() bool {
 }
 
 func startupInstallCommand() error {
-	if err := rejectJSON("startup install"); err != nil {
-		return err
-	}
 	executable, err := resolveDaemonExecutable()
 	if err != nil {
 		return err
@@ -2336,16 +2491,19 @@ func startupInstallCommand() error {
 	if err := startup.Install(executable); err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"status": "installed", "executable": executable})
+	}
 	cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration installed"))
 	return nil
 }
 
 func startupUninstallCommand() error {
-	if err := rejectJSON("startup uninstall"); err != nil {
-		return err
-	}
 	if err := startup.Uninstall(); err != nil {
 		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(map[string]string{"status": "uninstalled"})
 	}
 	cliOutput.Println(cliOutput.Text(cliui.StyleSuccess, "Startup integration uninstalled"))
 	return nil

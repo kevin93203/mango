@@ -14,7 +14,7 @@ Copy the file and update it explicitly before using `mango up`.
 | v3 | v4 |
 | --- | --- |
 | `version: 3` | `version: 4` |
-| project name stored only by `mango project add` | optional top-level `name`; otherwise directory name |
+| project name stored only by `mango project register` | optional top-level `name`; otherwise directory name |
 | task `env` | task `environment` |
 | `workflows.<name>.tasks` | `workflows.<name>.steps` |
 | workflow node `uses: task-name` | workflow node `task: task-name` |
@@ -30,15 +30,16 @@ The normal registration/apply sequence is now:
 
 ```sh
 mango up
-mango ps
+mango service list
 mango down
 ```
 
-`mango up` reads `./mango.yaml` by default. Use `--file PATH` for another
-file and `--project NAME` to override the resolved name. The resolution order
+`mango up` reads `./mango.yaml` by default. Use positional `PATH` (or the
+compatibility `--file PATH`) for another file and `--project NAME` to override the resolved name. The resolution order
 is `--project`, YAML `name`, then the YAML directory name.
 
-The older `mango project add/apply/plan/status/rollback` and service lifecycle
+The older `mango project add` remains a compatibility alias for
+`mango project register`. `project apply/plan/status/rollback` and service lifecycle
 commands remain available as advanced operator interfaces. `mango down` keeps
 the project registry, generation snapshots, logs, and execution history, so a
 later `mango up` can restore and reconcile the project.

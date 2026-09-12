@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -26,9 +27,9 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
 	want := []string{
-		"config", "daemon", "doctor", "enable", "execution", "history", "init", "logs",
-		"ls", "monitor", "project", "restart", "schedule", "start", "startup", "status",
-		"stop", "task", "workflow",
+		"config", "daemon", "doctor", "down", "events", "execution", "history", "init", "logs",
+		"monitor", "project", "restart", "run", "schedule", "service", "start", "startup", "status",
+		"stop", "task", "up", "workflow",
 	}
 	for _, name := range want {
 		if command, _, err := root.Find([]string{name}); err != nil || command == root || command.Name() != name {
@@ -37,6 +38,103 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	}
 	if command, _, err := root.Find([]string{"completion"}); err == nil && command != root {
 		t.Fatal("unexpected default completion command")
+	}
+}
+
+func TestCobraRootHelpGroupsCanonicalCommands(t *testing.T) {
+	app, output := newTestRoot(t)
+	root := app.rootCommand()
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Start here:", "Manage:", "Advanced:", "service", "run", "completion"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("root help = %q, want %q", text, want)
+		}
+	}
+	for _, forbidden := range []string{"\n  ps ", "\n  ls ", "\n  enable ", "\n  disable ", "\n  execution ", "\n  history "} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("root help exposes compatibility command %q: %q", forbidden, text)
+		}
+	}
+}
+
+func TestCobraDeprecatedCommandsWarnOnStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := newCLIApp(paths.Layout{}, &stdout, &stderr)
+	root := app.rootCommand()
+	root.SetArgs([]string{"task", "ls"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("deprecated command unexpectedly reached a daemon")
+	}
+	if !strings.Contains(stderr.String(), "warning: mango task ls is deprecated; use mango task list") {
+		t.Fatalf("stderr = %q, want migration warning", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "warning:") {
+		t.Fatalf("stdout contains migration warning: %q", stdout.String())
+	}
+}
+
+func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	for _, path := range [][]string{
+		{"service", "list"}, {"project", "list"}, {"task", "list"}, {"workflow", "list"},
+		{"schedule", "list"}, {"run", "task"}, {"run", "workflow"},
+	} {
+		command, _, err := root.Find(path)
+		if err != nil || command == root {
+			t.Fatalf("canonical command %v missing: command=%v err=%v", path, command, err)
+		}
+	}
+	for _, path := range [][]string{{"service", "list"}, {"status"}, {"init"}} {
+		command, _, err := root.Find(path)
+		if err != nil || command == root {
+			t.Fatalf("command %v missing: command=%v err=%v", path, command, err)
+		}
+		if command.LocalNonPersistentFlags().Lookup("json") == nil && strings.Join(path, " ") != "init" {
+			t.Fatalf("command %v missing JSON flag", path)
+		}
+		if command.LocalNonPersistentFlags().Lookup("no-trunc") != nil {
+			t.Fatalf("command %v exposes no-trunc unexpectedly", path)
+		}
+	}
+	runTask, _, err := root.Find([]string{"run", "task"})
+	if err != nil || runTask.Flag("wait") == nil || runTask.Flag("no-trunc") == nil {
+		t.Fatalf("run task flags missing: command=%v err=%v", runTask, err)
+	}
+	for _, path := range [][]string{{"ps"}, {"ls"}, {"task", "ls"}, {"workflow", "ls"}, {"schedule", "ls"}, {"project", "ls"}} {
+		command, _, err := root.Find(path)
+		if err != nil || command == root || command.IsAvailableCommand() {
+			t.Fatalf("compatibility command %v = command:%v err:%v available:%v", path, command, err, command != nil && command.IsAvailableCommand())
+		}
+	}
+}
+
+func TestCobraGeneratesAllSupportedShellCompletions(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	generators := []struct {
+		name     string
+		generate func(io.Writer) error
+	}{
+		{"bash", root.GenBashCompletion},
+		{"zsh", root.GenZshCompletion},
+		{"fish", func(writer io.Writer) error { return root.GenFishCompletion(writer, true) }},
+		{"powershell", root.GenPowerShellCompletion},
+	}
+	for _, generator := range generators {
+		t.Run(generator.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := generator.generate(&output); err != nil {
+				t.Fatal(err)
+			}
+			if output.Len() == 0 {
+				t.Fatal("completion output is empty")
+			}
+		})
 	}
 }
 
@@ -93,15 +191,15 @@ func TestCobraAcceptsPersistentFlagsAroundPositionalArguments(t *testing.T) {
 	}
 }
 
-func TestCobraDisablesRemovedGeneratorCommands(t *testing.T) {
+func TestCobraEnablesShellCompletion(t *testing.T) {
 	app, output := newTestRoot(t)
 	root := app.rootCommand()
 	root.SetArgs([]string{"--help"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(output.String(), "completion ") {
-		t.Fatalf("root help unexpectedly exposes completion: %q", output.String())
+	if !strings.Contains(output.String(), "completion  Generate the autocompletion script") {
+		t.Fatalf("root help does not expose completion: %q", output.String())
 	}
 }
 

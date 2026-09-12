@@ -13,6 +13,7 @@ import (
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/runref"
+	clitarget "github.com/kevin93203/mango/internal/target"
 	"github.com/kevin93203/mango/internal/tui"
 	"github.com/kevin93203/mango/internal/version"
 	"github.com/spf13/cobra"
@@ -30,6 +31,7 @@ type cliApp struct {
 	color   string
 	json    bool
 	noTrunc bool
+	command string
 }
 
 func newCLIApp(layout paths.Layout, out, errOut io.Writer) *cliApp {
@@ -92,8 +94,12 @@ func (*singleStringFlag) Type() string { return "string" }
 
 func (a *cliApp) rootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "mango",
-		Short:         "Cross-platform service manager",
+		Use:   "mango",
+		Short: "Cross-platform service manager",
+		Long: "Cross-platform service manager.\n\n" +
+			"Start with init, up, status, logs, run, and down. Advanced operational\n" +
+			"commands remain available under the Advanced group.",
+		Example:       "  mango init\n  mango up\n  mango status demo/api\n  mango logs demo/api --follow\n  mango down",
 		Version:       version.String(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -101,60 +107,120 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
-		PersistentPreRunE: func(*cobra.Command, []string) error { return a.configureOutput() },
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			a.command = cmd.CommandPath()
+			return a.configureOutput()
+		},
 	}
 	root.SetOut(a.out)
 	root.SetErr(a.errOut)
 	root.TraverseChildren = true
-	root.CompletionOptions.DisableDefaultCmd = true
+	root.CompletionOptions.DisableDefaultCmd = false
+	root.SetCompletionCommandGroupID(groupAdvanced)
 	root.PersistentFlags().Var(colorFlagValue{target: &a.color}, "color", "color output: auto, always, or never")
 	root.PersistentFlags().BoolVar(&a.json, "json", false, "emit JSON where supported")
 	root.PersistentFlags().BoolVar(&a.noTrunc, "no-trunc", false, "show full run IDs in human-readable output")
+	_ = root.PersistentFlags().MarkHidden("json")
+	_ = root.PersistentFlags().MarkHidden("no-trunc")
+	root.AddGroup(
+		&cobra.Group{ID: groupStart, Title: "Start here:"},
+		&cobra.Group{ID: groupManage, Title: "Manage:"},
+		&cobra.Group{ID: groupAdvanced, Title: "Advanced:"},
+	)
 
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
 		a.composeProjectCmd("up"), a.composeProjectCmd("down"), a.composeProjectCmd("ps"), a.composeProjectCmd("ls"),
-		a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"), a.processCmd("enable"), a.processCmd("disable"),
+		a.serviceCmd(), a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"),
+		a.compatProcessCmd("enable"), a.compatProcessCmd("disable"),
 		a.logsCmd(), a.monitorCmd(), a.scheduleCmd(), a.workflowCmd(), a.taskCmd(),
-		a.historyCmd(), a.executionCmd(), a.startupCmd(),
-		a.simpleCmd("doctor", "Inspect Mango environment and daemon health", func() error { return doctorCommand(a.layout) }),
+		a.historyCmd(), a.executionCmd(), a.startupCmd(), a.runCmd(),
+		a.groupedSimpleCmd("doctor", "Inspect Mango environment and daemon health", groupAdvanced, func() error { return doctorCommand(a.layout) }),
 	)
 	var watchStatus bool
 	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
+		if err := validateServiceTarget(args[0]); err != nil {
+			return err
+		}
 		return statusCommandWithOptions(ctx, args[0], watchStatus)
 	})
 	status.Flags().BoolVar(&watchStatus, "watch", false, "watch service status until interrupted")
+	a.addJSONFlag(status)
+	status.GroupID = groupStart
 	root.AddCommand(status)
 	var followEvents bool
 	var eventLimit int
 	events := a.actionCmdWithContext("events", "Read the event stream", func(ctx context.Context) error {
+		if jsonOutput && followEvents {
+			return errors.New("--json is not supported with events --follow; use events without --follow")
+		}
 		return eventsCommandWithContext(ctx, eventLimit, followEvents)
 	})
 	events.Flags().IntVar(&eventLimit, "limit", 100, "maximum events per read")
 	events.Flags().BoolVar(&followEvents, "follow", false, "follow new events")
+	a.addJSONFlag(events)
+	a.addNoTruncFlag(events)
+	events.GroupID = groupAdvanced
 	root.AddCommand(events)
 	return root
 }
 
+const (
+	groupStart    = "start"
+	groupManage   = "manage"
+	groupAdvanced = "advanced"
+)
+
 func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	var project, file string
-	short := map[string]string{"up": "Create and start a project", "down": "Stop and disable a project", "ps": "Show project services", "ls": "Show project services"}[action]
-	cmd := a.actionCmd(action, short, func() error {
-		opts := composeProjectOptions{Project: project, File: file}
-		switch action {
-		case "up":
-			return upCommand(a.layout, opts)
-		case "down":
-			return downCommand(a.layout, opts)
-		case "ps", "ls":
-			return psCommand(a.layout, opts)
-		default:
-			return fmt.Errorf("unsupported compose command %q", action)
-		}
-	})
-	cmd.Flags().Var(&singleStringFlag{target: &project, name: "project"}, "project", "project name")
-	cmd.Flags().Var(&singleStringFlag{target: &file, name: "file"}, "file", "path to mango.yaml")
-	return cmd
+	projectFlag := func(cmd *cobra.Command) {
+		cmd.Flags().Var(&singleStringFlag{target: &project, name: "project"}, "project", "project name")
+		cmd.Flags().Var(&singleStringFlag{target: &file, name: "file"}, "file", "path to mango.yaml (compatibility form)")
+	}
+
+	switch action {
+	case "up":
+		var noDaemon bool
+		cmd := a.leafCmd("up [PATH]", "Start a project", cobra.MaximumNArgs(1), func(args []string) error {
+			if len(args) == 1 && file != "" {
+				return errors.New("up accepts PATH or --file, not both")
+			}
+			path := file
+			if len(args) == 1 {
+				path = args[0]
+			}
+			return upCommand(a.layout, composeProjectOptions{Project: project, File: path, NoDaemon: noDaemon})
+		})
+		projectFlag(cmd)
+		cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "do not start mangod automatically")
+		a.addJSONFlag(cmd)
+		cmd.GroupID = groupStart
+		return cmd
+	case "down":
+		cmd := a.leafCmd("down [PROJECT]", "Stop a project", cobra.MaximumNArgs(1), func(args []string) error {
+			if len(args) == 1 && project != "" {
+				return errors.New("down accepts PROJECT or --project, not both")
+			}
+			name := project
+			if len(args) == 1 {
+				name = args[0]
+			}
+			return downCommand(a.layout, composeProjectOptions{Project: name, File: file})
+		})
+		projectFlag(cmd)
+		a.addJSONFlag(cmd)
+		cmd.GroupID = groupStart
+		return cmd
+	case "ps", "ls":
+		cmd := a.deprecatedActionCmd(action, "List services", "mango service list", func() error {
+			return psCommand(a.layout, composeProjectOptions{Project: project, File: file})
+		})
+		projectFlag(cmd)
+		a.addJSONFlag(cmd)
+		return cmd
+	default:
+		return a.actionCmd(action, "", func() error { return fmt.Errorf("unsupported compose command %q", action) })
+	}
 }
 
 func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {
@@ -162,7 +228,58 @@ func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {
 }
 
 func (a *cliApp) namespaceCmd(use, short string) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short}
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Long:  short + ".\n\nUse the canonical commands below for common operations.",
+		Args:  usageOnError(cobra.NoArgs),
+		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
+	if example := namespaceExample(use); example != "" {
+		cmd.Example = example
+	}
+	return cmd
+}
+
+func namespaceExample(use string) string {
+	examples := map[string]string{
+		"config":    "  mango config validate ./mango.yaml",
+		"daemon":    "  mango daemon status\n  mango daemon logs --tail 100",
+		"execution": "  mango execution list\n  mango execution watch RUN_REF",
+		"history":   "  mango history list\n  mango history show RUN_REF",
+		"project":   "  mango project list\n  mango project plan demo",
+		"run":       "  mango run task demo/backup\n  mango run workflow demo/release --wait",
+		"schedule":  "  mango schedule list\n  mango schedule disable demo/nightly",
+		"service":   "  mango service list\n  mango service status demo/api",
+		"startup":   "  mango startup status",
+		"task":      "  mango task list",
+		"workflow":  "  mango workflow list",
+	}
+	return examples[use]
+}
+
+func (a *cliApp) groupedNamespace(use, short, group string) *cobra.Command {
+	cmd := a.namespaceCmd(use, short)
+	cmd.GroupID = group
+	return cmd
+}
+
+func (a *cliApp) groupedSimpleCmd(use, short, group string, run func() error) *cobra.Command {
+	cmd := a.simpleCmd(use, short, run)
+	cmd.GroupID = group
+	return cmd
+}
+
+func (a *cliApp) addJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&a.json, "json", false, "emit JSON")
+}
+
+func (a *cliApp) addNoTruncFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&a.noTrunc, "no-trunc", false, "show full run IDs")
+}
+
+func (a *cliApp) warnDeprecated(command, replacement string) {
+	_, _ = fmt.Fprintf(a.errOut, "warning: %s is deprecated; use %s\n", command, replacement)
 }
 
 type usageShownError struct {
@@ -179,6 +296,10 @@ func commandErrorWasShown(err error) bool {
 
 func (a *cliApp) printCommandError(err error) {
 	if !commandErrorWasShown(err) {
+		if errors.Is(err, ipc.ErrDaemonUnavailable) && !strings.Contains(err.Error(), "--no-daemon") && !strings.Contains(err.Error(), "mango up could not start mangod") {
+			a.output.Errorf("error: %s", daemonRecoveryHint(a.command))
+			return
+		}
 		var callErr *ipc.CallError
 		if errors.As(err, &callErr) && len(callErr.Candidates) > 0 {
 			refs := make([]string, 0, len(callErr.Candidates))
@@ -200,6 +321,16 @@ func (a *cliApp) printCommandError(err error) {
 		}
 		a.output.Errorf("error: %v", err)
 	}
+}
+
+func daemonRecoveryHint(command string) string {
+	if strings.HasPrefix(command, "mango up") {
+		return "daemon is unavailable; Mango could not reach mangod. Check `mango doctor` or run `mango daemon start`"
+	}
+	if strings.HasPrefix(command, "mango daemon") {
+		return "daemon is not running; run `mango daemon start`"
+	}
+	return "daemon is not running; run `mango up` for the guided path or `mango daemon start` for explicit daemon control"
 }
 
 func usageOnError(validate cobra.PositionalArgs) cobra.PositionalArgs {
@@ -243,6 +374,28 @@ func (a *cliApp) actionCmdWithContext(use, short string, run func(context.Contex
 	}
 }
 
+func (a *cliApp) deprecatedActionCmd(use, short, replacement string, run func() error) *cobra.Command {
+	cmd := a.actionCmd(use, short, run)
+	cmd.Hidden = true
+	original := cmd.RunE
+	cmd.RunE = func(command *cobra.Command, args []string) error {
+		a.warnDeprecated(command.CommandPath(), replacement)
+		return original(command, args)
+	}
+	return cmd
+}
+
+func (a *cliApp) deprecatedLeafCmd(use, short, replacement string, validate cobra.PositionalArgs, run func([]string) error) *cobra.Command {
+	cmd := a.leafCmd(use, short, validate, run)
+	cmd.Hidden = true
+	original := cmd.RunE
+	cmd.RunE = func(command *cobra.Command, args []string) error {
+		a.warnDeprecated(command.CommandPath(), replacement)
+		return original(command, args)
+	}
+	return cmd
+}
+
 func (a *cliApp) leafCmdWithContext(use, short string, validate cobra.PositionalArgs, run func(context.Context, []string) error) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
@@ -262,11 +415,12 @@ func (a *cliApp) initCmd() *cobra.Command {
 		return initCommand(initOptions{Path: path, HasPath: len(args) == 1, Force: force})
 	})
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
+	cmd.GroupID = groupStart
 	return cmd
 }
 
 func (a *cliApp) daemonCmd() *cobra.Command {
-	cmd := a.namespaceCmd("daemon", "Manage the Mango daemon")
+	cmd := a.groupedNamespace("daemon", "Manage the Mango daemon", groupAdvanced)
 	for _, action := range []string{"start", "stop", "restart", "status"} {
 		action := action
 		var run func() error
@@ -280,66 +434,84 @@ func (a *cliApp) daemonCmd() *cobra.Command {
 		case "status":
 			run = daemonStatusCommand
 		}
-		cmd.AddCommand(a.simpleCmd(action, action+" the daemon", run))
+		child := a.simpleCmd(action, strings.Title(action)+" the daemon", run)
+		if action != "status" {
+			a.addJSONFlag(child)
+		} else {
+			a.addJSONFlag(child)
+		}
+		cmd.AddCommand(child)
 	}
 	var tail int
 	var follow bool
 	logs := a.actionCmdWithContext("logs", "Read daemon logs", func(ctx context.Context) error {
+		if jsonOutput && follow {
+			return errors.New("--json is not supported with daemon logs --follow; use daemon logs without --follow")
+		}
 		return daemonLogsCommandWithContext(ctx, a.layout, daemonLogsOptions{Tail: tail, Follow: follow})
 	})
-	logs.Flags().IntVar(&tail, "tail", 15, "number of lines")
+	logs.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
 	logs.Flags().BoolVar(&follow, "follow", false, "follow new output")
+	a.addJSONFlag(logs)
 	cmd.AddCommand(logs)
 	return cmd
 }
 
 func (a *cliApp) projectCmd() *cobra.Command {
-	cmd := a.namespaceCmd("project", "Manage registered projects")
-	for _, spec := range []struct{ use, short, action string }{
-		{"add NAME PATH", "Register a project", "add"}, {"remove NAME", "Remove a project", "remove"},
-		{"rename OLD NEW", "Rename a project", "rename"},
-		{"ls", "List registered projects", "ls"},
-		{"status PROJECT", "Show desired-state reconciliation status", "status"},
-	} {
-		spec := spec
-		validate := cobra.ArbitraryArgs
-		switch spec.action {
-		case "add", "rename":
-			validate = cobra.ExactArgs(2)
-		case "remove":
-			validate = cobra.ExactArgs(1)
-		case "ls":
-			validate = cobra.NoArgs
-		case "status":
-			validate = cobra.ExactArgs(1)
+	cmd := a.groupedNamespace("project", "Manage registered projects", groupManage)
+	register := a.leafCmd("register NAME PATH", "Register a project", cobra.ExactArgs(2), func(args []string) error {
+		return projectAddCommand(a.layout, args[0], args[1])
+	})
+	a.addJSONFlag(register)
+	cmd.AddCommand(register)
+	add := a.deprecatedLeafCmd("add NAME PATH", "Register a project", "mango project register NAME PATH", cobra.ExactArgs(2), func(args []string) error {
+		return projectAddCommand(a.layout, args[0], args[1])
+	})
+	a.addJSONFlag(add)
+	cmd.AddCommand(add)
+
+	remove := a.leafCmd("remove NAME", "Remove a project", cobra.ExactArgs(1), func(args []string) error { return projectRemoveCommand(a.layout, args[0]) })
+	a.addJSONFlag(remove)
+	cmd.AddCommand(remove)
+	rename := a.leafCmd("rename OLD NEW", "Rename a project", cobra.ExactArgs(2), func(args []string) error { return projectRenameCommand(a.layout, args[0], args[1]) })
+	a.addJSONFlag(rename)
+	cmd.AddCommand(rename)
+
+	list := a.simpleCmd("list", "List registered projects", projectListCommand)
+	a.addJSONFlag(list)
+	cmd.AddCommand(list)
+	cmd.AddCommand(a.deprecatedActionCmd("ls", "List registered projects", "mango project list", projectListCommand))
+
+	status := a.leafCmd("status PROJECT", "Show project status", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseProject(args[0]); err != nil {
+			return err
 		}
-		var run func([]string) error
-		switch spec.action {
-		case "add":
-			run = func(args []string) error { return projectAddCommand(a.layout, args[0], args[1]) }
-		case "remove":
-			run = func(args []string) error { return projectRemoveCommand(a.layout, args[0]) }
-		case "rename":
-			run = func(args []string) error { return projectRenameCommand(a.layout, args[0], args[1]) }
-		case "ls":
-			run = func([]string) error { return projectListCommand() }
-		case "status":
-			run = func(args []string) error { return projectStatusCommand(args[0]) }
-		}
-		cmd.AddCommand(a.leafCmd(spec.use, spec.short, validate, run))
-	}
+		return projectStatusCommand(args[0])
+	})
+	a.addJSONFlag(status)
+	cmd.AddCommand(status)
+
 	var waitApply bool
 	apply := a.leafCmd("apply NAME", "Accept and reconcile project configuration", cobra.ExactArgs(1), func(args []string) error {
 		return applyProjectCommandWithOptions(args[0], waitApply)
 	})
 	apply.Flags().BoolVar(&waitApply, "wait", false, "wait until the accepted generation is ready")
+	a.addJSONFlag(apply)
 	cmd.AddCommand(apply)
 
-	cmd.AddCommand(a.leafCmd("plan PROJECT", "Preview the desired-state apply plan", cobra.ExactArgs(1), func(args []string) error {
+	plan := a.leafCmd("plan PROJECT", "Preview the desired-state apply plan", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseProject(args[0]); err != nil {
+			return err
+		}
 		return projectPlanCommand(args[0])
-	}))
+	})
+	a.addJSONFlag(plan)
+	cmd.AddCommand(plan)
 	var waitRollback bool
 	rollback := a.leafCmd("rollback PROJECT [GENERATION]", "Accept a previous configuration generation as new desired state", cobra.RangeArgs(1, 2), func(args []string) error {
+		if _, err := clitarget.ParseProject(args[0]); err != nil {
+			return err
+		}
 		generation := uint64(0)
 		if len(args) == 2 {
 			value, err := strconv.ParseUint(args[1], 10, 64)
@@ -351,18 +523,40 @@ func (a *cliApp) projectCmd() *cobra.Command {
 		return projectRollbackCommandWithOptions(args[0], generation, waitRollback)
 	})
 	rollback.Flags().BoolVar(&waitRollback, "wait", false, "wait until the accepted generation is ready")
+	a.addJSONFlag(rollback)
 	cmd.AddCommand(rollback)
 	return cmd
 }
 
 func (a *cliApp) configCmd() *cobra.Command {
-	cmd := a.namespaceCmd("config", "Inspect configuration")
-	cmd.AddCommand(a.leafCmd("validate PATH", "Validate a configuration", cobra.ExactArgs(1), func(args []string) error { return configValidateCommand(args[0]) }))
+	cmd := a.groupedNamespace("config", "Inspect configuration", groupAdvanced)
+	validate := a.leafCmd("validate PATH", "Validate a configuration", cobra.ExactArgs(1), func(args []string) error { return configValidateCommand(args[0]) })
+	a.addJSONFlag(validate)
+	cmd.AddCommand(validate)
 	return cmd
 }
 
 func (a *cliApp) processCmd(action string) *cobra.Command {
-	return a.leafCmd(action+" TARGET [TARGET...]", action+" services", cobra.MinimumNArgs(1), func(args []string) error { return processCommand(action, args) })
+	cmd := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" one or more services", cobra.MinimumNArgs(1), func(args []string) error {
+		if err := validateServiceOperationTargets(args); err != nil {
+			return err
+		}
+		return processCommand(action, args)
+	})
+	a.addJSONFlag(cmd)
+	cmd.GroupID = groupManage
+	return cmd
+}
+
+func (a *cliApp) compatProcessCmd(action string) *cobra.Command {
+	cmd := a.deprecatedLeafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" one or more services", "mango service "+action+" TARGET", cobra.MinimumNArgs(1), func(args []string) error {
+		if err := validateServiceOperationTargets(args); err != nil {
+			return err
+		}
+		return processCommand(action, args)
+	})
+	a.addJSONFlag(cmd)
+	return cmd
 }
 
 func (a *cliApp) logsCmd() *cobra.Command {
@@ -370,54 +564,212 @@ func (a *cliApp) logsCmd() *cobra.Command {
 	var tail int
 	var follow bool
 	cmd := a.leafCmdWithContext("logs TARGET [TARGET...]", "Read service logs", cobra.MinimumNArgs(1), func(ctx context.Context, args []string) error {
+		if err := validateLogTargets(args); err != nil {
+			return err
+		}
+		if jsonOutput && follow {
+			return errors.New("--json is not supported with logs --follow; use logs without --follow")
+		}
 		return logsCommandWithContext(ctx, args, logsOptions{stream: stream, tail: tail, follow: follow})
 	})
 	cmd.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
-	cmd.Flags().IntVar(&tail, "tail", 15, "number of lines")
+	cmd.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
 	cmd.Flags().BoolVar(&follow, "follow", false, "follow new output")
-	cmd.AddCommand(a.leafCmd("clear TARGET", "Clear service logs", cobra.ExactArgs(1), func(args []string) error { return clearLogsCommand(args[0]) }))
+	a.addJSONFlag(cmd)
+	cmd.GroupID = groupStart
+	clear := a.leafCmd("clear TARGET", "Clear service logs", cobra.ExactArgs(1), func(args []string) error {
+		if err := validateLogTargets(args); err != nil {
+			return err
+		}
+		return clearLogsCommand(args[0])
+	})
+	a.addJSONFlag(clear)
+	cmd.AddCommand(clear)
 	return cmd
 }
 
 func (a *cliApp) monitorCmd() *cobra.Command {
-	return a.simpleCmd("monitor", "Open the interactive service monitor", func() error {
+	cmd := a.groupedSimpleCmd("monitor", "Open the interactive service monitor", groupAdvanced, func() error {
 		if err := rejectJSON("monitor"); err != nil {
 			return err
 		}
 		return tui.Run(cliOutput, monitorLogs)
 	})
+	return cmd
 }
 
 func (a *cliApp) scheduleCmd() *cobra.Command {
-	cmd := a.namespaceCmd("schedule", "Manage schedules")
-	cmd.AddCommand(a.simpleCmd("ls", "List schedules", scheduleListCommand))
+	cmd := a.groupedNamespace("schedule", "Manage schedules", groupManage)
+	list := a.simpleCmd("list", "List schedules", scheduleListCommand)
+	a.addJSONFlag(list)
+	cmd.AddCommand(list)
+	cmd.AddCommand(a.deprecatedActionCmd("ls", "List schedules", "mango schedule list", scheduleListCommand))
 	for _, action := range []string{"enable", "disable"} {
 		action := action
-		cmd.AddCommand(a.leafCmd(action+" TARGET [TARGET...]", action+" schedules", cobra.MinimumNArgs(1), func(args []string) error { return scheduleOperationCommand(action, args) }))
+		child := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" schedules", cobra.MinimumNArgs(1), func(args []string) error {
+			for _, value := range args {
+				if _, err := clitarget.ParseSchedule(value); err != nil {
+					return err
+				}
+			}
+			return scheduleOperationCommand(action, args)
+		})
+		a.addJSONFlag(child)
+		cmd.AddCommand(child)
 	}
 	return cmd
 }
 
 func (a *cliApp) workflowCmd() *cobra.Command {
-	cmd := a.namespaceCmd("workflow", "Manage workflows")
-	cmd.AddCommand(a.simpleCmd("ls", "List workflows", workflowListCommand))
-	cmd.AddCommand(a.leafCmd("run PROJECT/WORKFLOW", "Run a workflow", cobra.ExactArgs(1), func(args []string) error { return workflowRunCommand(args[0]) }))
+	cmd := a.groupedNamespace("workflow", "Manage workflows", groupManage)
+	list := a.simpleCmd("list", "List workflows", workflowListCommand)
+	a.addJSONFlag(list)
+	cmd.AddCommand(list)
+	cmd.AddCommand(a.deprecatedActionCmd("ls", "List workflows", "mango workflow list", workflowListCommand))
+	legacyRun := a.legacyWorkflowRunCmd()
+	cmd.AddCommand(legacyRun)
 	return cmd
 }
 
 func (a *cliApp) taskCmd() *cobra.Command {
-	cmd := a.namespaceCmd("task", "Manage tasks")
-	cmd.AddCommand(a.simpleCmd("ls", "List tasks", taskListCommand))
-	cmd.AddCommand(a.leafCmd("run PROJECT/TASK", "Run a task", cobra.ExactArgs(1), func(args []string) error { return taskRunCommand(args[0]) }))
+	cmd := a.groupedNamespace("task", "Manage tasks", groupManage)
+	list := a.simpleCmd("list", "List tasks", taskListCommand)
+	a.addJSONFlag(list)
+	cmd.AddCommand(list)
+	cmd.AddCommand(a.deprecatedActionCmd("ls", "List tasks", "mango task list", taskListCommand))
+	cmd.AddCommand(a.legacyTaskRunCmd())
 	return cmd
 }
 
+func (a *cliApp) runCmd() *cobra.Command {
+	cmd := a.groupedNamespace("run", "Run a task or workflow", groupStart)
+	cmd.AddCommand(a.runTargetCmd("task"), a.runTargetCmd("workflow"))
+	return cmd
+}
+
+func (a *cliApp) runTargetCmd(kind string) *cobra.Command {
+	var wait bool
+	use := kind + " PROJECT/" + strings.ToUpper(kind)
+	short := "Run a " + kind
+	cmd := a.leafCmd(use, short, cobra.ExactArgs(1), func(args []string) error {
+		if kind == "task" {
+			if _, err := clitarget.ParseTask(args[0]); err != nil {
+				return err
+			}
+			return taskRunCommandWithOptions(args[0], wait)
+		}
+		if _, err := clitarget.ParseWorkflow(args[0]); err != nil {
+			return err
+		}
+		return workflowRunCommandWithOptions(args[0], wait)
+	})
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the run to finish")
+	a.addJSONFlag(cmd)
+	a.addNoTruncFlag(cmd)
+	return cmd
+}
+
+func (a *cliApp) legacyTaskRunCmd() *cobra.Command {
+	var wait bool
+	cmd := a.deprecatedLeafCmd("run PROJECT/TASK", "Run a task", "mango run task PROJECT/TASK", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseTask(args[0]); err != nil {
+			return err
+		}
+		return taskRunCommandWithOptions(args[0], wait)
+	})
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the run to finish")
+	a.addJSONFlag(cmd)
+	a.addNoTruncFlag(cmd)
+	return cmd
+}
+
+func (a *cliApp) legacyWorkflowRunCmd() *cobra.Command {
+	var wait bool
+	cmd := a.deprecatedLeafCmd("run PROJECT/WORKFLOW", "Run a workflow", "mango run workflow PROJECT/WORKFLOW", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseWorkflow(args[0]); err != nil {
+			return err
+		}
+		return workflowRunCommandWithOptions(args[0], wait)
+	})
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the run to finish")
+	a.addJSONFlag(cmd)
+	a.addNoTruncFlag(cmd)
+	return cmd
+}
+
+func (a *cliApp) serviceCmd() *cobra.Command {
+	cmd := a.groupedNamespace("service", "Manage services", groupManage)
+	list := a.leafCmd("list [PROJECT]", "List services", cobra.MaximumNArgs(1), func(args []string) error {
+		project := ""
+		if len(args) == 1 {
+			if _, err := clitarget.ParseProject(args[0]); err != nil {
+				return err
+			}
+			project = args[0]
+		}
+		return psCommand(a.layout, composeProjectOptions{Project: project})
+	})
+	a.addJSONFlag(list)
+	cmd.AddCommand(list)
+
+	var watch bool
+	status := a.leafCmdWithContext("status TARGET", "Show service status", cobra.ExactArgs(1), func(ctx context.Context, args []string) error {
+		if err := validateServiceTarget(args[0]); err != nil {
+			return err
+		}
+		if watch && jsonOutput {
+			return errors.New("--json is not supported with service status --watch")
+		}
+		return statusCommandWithOptions(ctx, args[0], watch)
+	})
+	status.Flags().BoolVar(&watch, "watch", false, "watch service status until interrupted")
+	a.addJSONFlag(status)
+	cmd.AddCommand(status)
+
+	for _, action := range []string{"start", "stop", "restart", "enable", "disable"} {
+		action := action
+		child := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" one or more services", cobra.MinimumNArgs(1), func(args []string) error {
+			if err := validateServiceOperationTargets(args); err != nil {
+				return err
+			}
+			return processCommand(action, args)
+		})
+		a.addJSONFlag(child)
+		cmd.AddCommand(child)
+	}
+	return cmd
+}
+
+func validateServiceTarget(value string) error {
+	_, err := clitarget.ParseService(value)
+	return err
+}
+
+func validateServiceOperationTargets(values []string) error {
+	for _, value := range values {
+		if _, err := clitarget.ParseServiceOperation(value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLogTargets(values []string) error {
+	for _, value := range values {
+		if _, err := clitarget.ParseLog(value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *cliApp) historyCmd() *cobra.Command {
-	cmd := a.namespaceCmd("history", "Browse execution history")
+	cmd := a.groupedNamespace("history", "Browse execution history", groupAdvanced)
+	cmd.Hidden = true
 	var limit int
 	var attempts bool
 	var status, triggerType, trigger, project, targetType, target string
-	list := a.simpleCmd("ls", "List execution history", func() error {
+	list := a.simpleCmd("list", "List execution history", func() error {
 		return historyListV2Command(historyListV2Options{Limit: limit, Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Attempts: attempts})
 	})
 	list.Flags().IntVar(&limit, "limit", 100, "maximum number of terminal records; 0 means all")
@@ -428,8 +780,32 @@ func (a *cliApp) historyCmd() *cobra.Command {
 	list.Flags().StringVar(&project, "project", "", "filter by project")
 	list.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
 	list.Flags().StringVar(&target, "target", "", "filter by target")
+	a.addJSONFlag(list)
+	a.addNoTruncFlag(list)
 	cmd.AddCommand(list)
-	cmd.AddCommand(a.leafCmd("show RUN_REF", "Show terminal execution history", cobra.ExactArgs(1), func(args []string) error { return historyShowCommand(args[0]) }))
+	legacyList := a.deprecatedActionCmd("ls", "List execution history", "mango history list", func() error {
+		return historyListV2Command(historyListV2Options{Limit: limit, Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Attempts: attempts})
+	})
+	legacyList.Flags().IntVar(&limit, "limit", 100, "maximum number of terminal records; 0 means all")
+	legacyList.Flags().StringVar(&status, "status", "", "filter by terminal status")
+	legacyList.Flags().BoolVar(&attempts, "attempts", false, "include task and attempt details")
+	legacyList.Flags().StringVar(&triggerType, "trigger-type", "", "filter by trigger type")
+	legacyList.Flags().StringVar(&trigger, "trigger", "", "filter by trigger name")
+	legacyList.Flags().StringVar(&project, "project", "", "filter by project")
+	legacyList.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
+	legacyList.Flags().StringVar(&target, "target", "", "filter by target")
+	a.addJSONFlag(legacyList)
+	a.addNoTruncFlag(legacyList)
+	cmd.AddCommand(legacyList)
+	show := a.leafCmd("show RUN_REF", "Show terminal execution history", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseRun(args[0]); err != nil {
+			return err
+		}
+		return historyShowCommand(args[0])
+	})
+	a.addJSONFlag(show)
+	a.addNoTruncFlag(show)
+	cmd.AddCommand(show)
 	var before string
 	var all, yes bool
 	purge := a.simpleCmd("purge", "Purge terminal execution history", func() error {
@@ -443,11 +819,12 @@ func (a *cliApp) historyCmd() *cobra.Command {
 }
 
 func (a *cliApp) executionCmd() *cobra.Command {
-	cmd := a.namespaceCmd("execution", "Inspect and control executions")
+	cmd := a.groupedNamespace("execution", "Inspect and control executions", groupAdvanced)
+	cmd.Hidden = true
 	var status, triggerType, trigger, project, targetType, target string
 	var limit int
 	var all bool
-	ls := a.simpleCmd("ls", "List executions", func() error {
+	ls := a.simpleCmd("list", "List executions", func() error {
 		return executionListCommand(executionListCLIParams{Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Limit: limit, All: all})
 	})
 	ls.Flags().StringVar(&status, "status", "", "filter by status")
@@ -456,32 +833,66 @@ func (a *cliApp) executionCmd() *cobra.Command {
 	ls.Flags().StringVar(&project, "project", "", "filter by project")
 	ls.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
 	ls.Flags().StringVar(&target, "target", "", "filter by target")
-	ls.Flags().IntVar(&limit, "limit", 0, "maximum number of executions; 0 means all")
+	ls.Flags().IntVar(&limit, "limit", 100, "maximum number of executions; 0 means all")
 	ls.Flags().BoolVar(&all, "all", false, "include terminal executions")
 	cmd.AddCommand(ls)
+	a.addJSONFlag(ls)
+	a.addNoTruncFlag(ls)
+	legacyList := a.deprecatedActionCmd("ls", "List executions", "mango execution list", func() error {
+		return executionListCommand(executionListCLIParams{Status: status, TriggerType: triggerType, Trigger: trigger, Project: project, TargetType: targetType, Target: target, Limit: limit, All: all})
+	})
+	legacyList.Flags().StringVar(&status, "status", "", "filter by status")
+	legacyList.Flags().StringVar(&triggerType, "trigger-type", "", "filter by trigger type")
+	legacyList.Flags().StringVar(&trigger, "trigger", "", "filter by trigger name")
+	legacyList.Flags().StringVar(&project, "project", "", "filter by project")
+	legacyList.Flags().StringVar(&targetType, "target-type", "", "filter by target type")
+	legacyList.Flags().StringVar(&target, "target", "", "filter by target")
+	legacyList.Flags().IntVar(&limit, "limit", 100, "maximum number of executions; 0 means all")
+	legacyList.Flags().BoolVar(&all, "all", false, "include terminal executions")
+	a.addJSONFlag(legacyList)
+	a.addNoTruncFlag(legacyList)
+	cmd.AddCommand(legacyList)
 	for _, action := range []string{"get", "cancel", "retry"} {
 		action := action
-		cmd.AddCommand(a.leafCmd(action+" RUN_REF", action+" an execution", cobra.ExactArgs(1), func(args []string) error { return executionCommand(action, args[0]) }))
+		child := a.leafCmd(action+" RUN_REF", strings.Title(action)+" an execution", cobra.ExactArgs(1), func(args []string) error {
+			if _, err := clitarget.ParseRun(args[0]); err != nil {
+				return err
+			}
+			return executionCommand(action, args[0])
+		})
+		a.addJSONFlag(child)
+		a.addNoTruncFlag(child)
+		cmd.AddCommand(child)
 	}
 	var timeout time.Duration
 	watch := a.leafCmd("watch RUN_REF", "Wait for an execution", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseRun(args[0]); err != nil {
+			return err
+		}
 		return executionWatchCommand(executionWatchOptions{RunID: args[0], Timeout: timeout})
 	})
 	watch.Flags().DurationVar(&timeout, "timeout", executionWatchDefaultTimeout, "maximum watch wait")
+	a.addJSONFlag(watch)
+	a.addNoTruncFlag(watch)
 	cmd.AddCommand(watch)
 	var stream string
 	var tail int
 	logs := a.leafCmd("logs RUN_REF", "Read execution logs", cobra.ExactArgs(1), func(args []string) error {
+		if _, err := clitarget.ParseRun(args[0]); err != nil {
+			return err
+		}
 		return executionLogsCommand(executionLogsOptions{RunID: args[0], Stream: stream, Tail: tail})
 	})
 	logs.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
-	logs.Flags().IntVar(&tail, "tail", 0, "number of lines")
+	logs.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
+	a.addJSONFlag(logs)
+	a.addNoTruncFlag(logs)
 	cmd.AddCommand(logs)
 	return cmd
 }
 
 func (a *cliApp) startupCmd() *cobra.Command {
-	cmd := a.namespaceCmd("startup", "Manage startup integration")
+	cmd := a.groupedNamespace("startup", "Manage startup integration", groupAdvanced)
 	for _, action := range []string{"install", "uninstall", "status"} {
 		action := action
 		var run func() error
@@ -493,7 +904,9 @@ func (a *cliApp) startupCmd() *cobra.Command {
 		case "status":
 			run = startupStatusCommand
 		}
-		cmd.AddCommand(a.simpleCmd(action, fmt.Sprintf("%s startup integration", action), run))
+		child := a.simpleCmd(action, strings.Title(action)+" startup integration", run)
+		a.addJSONFlag(child)
+		cmd.AddCommand(child)
 	}
 	return cmd
 }
