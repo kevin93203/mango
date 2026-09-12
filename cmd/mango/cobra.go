@@ -118,8 +118,8 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	root.TraverseChildren = true
 	root.CompletionOptions.DisableDefaultCmd = false
 	root.SetCompletionCommandGroupID(groupAdvanced)
-	root.PersistentFlags().Var(colorFlagValue{target: &a.color}, "color", "color output: auto, always, or never")
-	root.PersistentFlags().BoolVar(&a.json, "json", false, "emit JSON where supported")
+	root.PersistentFlags().VarP(colorFlagValue{target: &a.color}, "color", "c", "color output: auto, always, or never")
+	root.PersistentFlags().BoolVarP(&a.json, "json", "j", false, "emit JSON where supported")
 	root.PersistentFlags().BoolVar(&a.noTrunc, "no-trunc", false, "show full run IDs in human-readable output")
 	_ = root.PersistentFlags().MarkHidden("json")
 	_ = root.PersistentFlags().MarkHidden("no-trunc")
@@ -161,7 +161,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 		}
 		return statusCommandWithOptions(ctx, args[0], watchStatus)
 	})
-	status.Flags().BoolVar(&watchStatus, "watch", false, "watch service status until interrupted")
+	status.Flags().BoolVarP(&watchStatus, "watch", "w", false, "watch service status until interrupted")
 	a.addJSONFlag(status)
 	status.GroupID = groupStart
 	root.AddCommand(status)
@@ -175,8 +175,8 @@ func (a *cliApp) rootCommand() *cobra.Command {
 	})
 	events.Long = "Read the durable event stream. Use `mango events --json` for machine-readable output; --json cannot be combined with --follow."
 	events.Example = "  mango events --json\n  mango events --follow"
-	events.Flags().IntVar(&eventLimit, "limit", 100, "maximum events per read")
-	events.Flags().BoolVar(&followEvents, "follow", false, "follow new events")
+	events.Flags().IntVarP(&eventLimit, "limit", "n", 100, "maximum events per read")
+	events.Flags().BoolVarP(&followEvents, "follow", "f", false, "follow new events")
 	a.addJSONFlag(events)
 	a.addNoTruncFlag(events)
 	events.GroupID = groupAdvanced
@@ -193,8 +193,8 @@ const (
 func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	var project, file string
 	projectFlag := func(cmd *cobra.Command) {
-		cmd.Flags().Var(&singleStringFlag{target: &project, name: "project"}, "project", "project name")
-		cmd.Flags().Var(&singleStringFlag{target: &file, name: "file"}, "file", "path to mango.yaml (compatibility form)")
+		cmd.Flags().VarP(&singleStringFlag{target: &project, name: "project"}, "project", "p", "project name")
+		cmd.Flags().VarP(&singleStringFlag{target: &file, name: "file"}, "file", "f", "path to mango.yaml (compatibility form)")
 	}
 
 	switch action {
@@ -209,7 +209,7 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 		})
 		projectFlag(cmd)
 		cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "do not start mangod automatically")
-		cmd.Flags().BoolVar(&wait, "wait", false, "wait until services are ready/healthy")
+		cmd.Flags().BoolVarP(&wait, "wait", "w", false, "wait until services are ready/healthy")
 		a.addJSONFlag(cmd)
 		cmd.GroupID = groupStart
 		return cmd
@@ -334,7 +334,7 @@ func (a *cliApp) groupedSimpleCmd(use, short, group string, run func() error) *c
 }
 
 func (a *cliApp) addJSONFlag(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&a.json, "json", false, "emit JSON")
+	cmd.Flags().BoolVarP(&a.json, "json", "j", false, "emit JSON")
 }
 
 func (a *cliApp) addNoTruncFlag(cmd *cobra.Command) {
@@ -467,7 +467,7 @@ func (a *cliApp) initCmd() *cobra.Command {
 		}
 		return initCommand(initOptions{Path: path, HasPath: len(args) == 1, Force: force})
 	})
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite existing files")
 	cmd.GroupID = groupStart
 	return cmd
 }
@@ -505,8 +505,8 @@ func (a *cliApp) daemonCmd() *cobra.Command {
 	})
 	logs.Long = "Read daemon logs. Use `mango daemon logs --json` for machine-readable output; --json cannot be combined with --follow."
 	logs.Example = "  mango daemon logs --json\n  mango daemon logs --follow"
-	logs.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
-	logs.Flags().BoolVar(&follow, "follow", false, "follow new output")
+	logs.Flags().IntVarP(&tail, "tail", "n", 100, "number of lines; 0 means all")
+	logs.Flags().BoolVarP(&follow, "follow", "f", false, "follow new output")
 	a.addJSONFlag(logs)
 	cmd.AddCommand(logs)
 	return cmd
@@ -546,7 +546,7 @@ func (a *cliApp) projectCmd() *cobra.Command {
 	apply := a.leafCmd("apply NAME", "Accept and reconcile project configuration", cobra.ExactArgs(1), func(args []string) error {
 		return applyProjectCommandWithOptions(args[0], waitApply)
 	})
-	apply.Flags().BoolVar(&waitApply, "wait", false, "wait until the accepted generation is ready")
+	apply.Flags().BoolVarP(&waitApply, "wait", "w", false, "wait until the accepted generation is ready")
 	a.addJSONFlag(apply)
 	cmd.AddCommand(apply)
 
@@ -573,7 +573,7 @@ func (a *cliApp) projectCmd() *cobra.Command {
 		}
 		return projectRollbackCommandWithOptions(args[0], generation, waitRollback)
 	})
-	rollback.Flags().BoolVar(&waitRollback, "wait", false, "wait until the accepted generation is ready")
+	rollback.Flags().BoolVarP(&waitRollback, "wait", "w", false, "wait until the accepted generation is ready")
 	a.addJSONFlag(rollback)
 	cmd.AddCommand(rollback)
 	return cmd
@@ -630,9 +630,9 @@ func (a *cliApp) logsCmd() *cobra.Command {
 	})
 	cmd.Long = "Read service, task, or workflow-node logs. Use `mango logs TARGET --json` for machine-readable output; --json cannot be combined with --follow."
 	cmd.Example = "  mango logs demo/api --json\n  mango logs demo/api --follow"
-	cmd.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
-	cmd.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
-	cmd.Flags().BoolVar(&follow, "follow", false, "follow new output")
+	cmd.Flags().StringVarP(&stream, "stream", "s", "all", "stdout, stderr, or all")
+	cmd.Flags().IntVarP(&tail, "tail", "n", 100, "number of lines; 0 means all")
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "follow new output")
 	a.addJSONFlag(cmd)
 	cmd.GroupID = groupStart
 	clear := a.leafCmd("clear TARGET", "Clear service logs", cobra.ExactArgs(1), func(args []string) error {
@@ -734,7 +734,7 @@ func (a *cliApp) runsCmd() *cobra.Command {
 		}
 		return runWatchCommand(ctx, runWatchOptions{RunID: args[0], Timeout: timeout})
 	})
-	watch.Flags().DurationVar(&timeout, "timeout", executionWatchDefaultTimeout, "maximum wait")
+	watch.Flags().DurationVarP(&timeout, "timeout", "t", executionWatchDefaultTimeout, "maximum wait")
 	a.addJSONFlag(watch)
 	a.addNoTruncFlag(watch)
 	cmd.AddCommand(watch)
@@ -760,8 +760,8 @@ func (a *cliApp) runsCmd() *cobra.Command {
 		}
 		return runLogsCommand(runLogsOptions{RunID: args[0], Stream: stream, Tail: tail})
 	})
-	logs.Flags().StringVar(&stream, "stream", "all", "stdout, stderr, or all")
-	logs.Flags().IntVar(&tail, "tail", 100, "number of lines; 0 means all")
+	logs.Flags().StringVarP(&stream, "stream", "s", "all", "stdout, stderr, or all")
+	logs.Flags().IntVarP(&tail, "tail", "n", 100, "number of lines; 0 means all")
 	a.addJSONFlag(logs)
 	a.addNoTruncFlag(logs)
 	cmd.AddCommand(logs)
@@ -771,20 +771,20 @@ func (a *cliApp) runsCmd() *cobra.Command {
 	prune := a.actionCmd("prune", "Prune terminal runs", func() error {
 		return runPruneCommand(runPruneOptions{Before: before, All: all, Yes: yes})
 	})
-	prune.Flags().StringVar(&before, "before", "", "prune terminal runs finished before RFC3339 timestamp")
-	prune.Flags().BoolVar(&all, "all", false, "prune all terminal runs")
-	prune.Flags().BoolVar(&yes, "yes", false, "confirm the prune")
+	prune.Flags().StringVarP(&before, "before", "b", "", "prune terminal runs finished before RFC3339 timestamp")
+	prune.Flags().BoolVarP(&all, "all", "a", false, "prune all terminal runs")
+	prune.Flags().BoolVarP(&yes, "yes", "y", false, "confirm the prune")
 	a.addJSONFlag(prune)
 	cmd.AddCommand(prune)
 	return cmd
 }
 
 func addRunListFlags(cmd *cobra.Command, options *runListOptions) {
-	cmd.Flags().IntVar(&options.Limit, "limit", 100, "maximum runs; 0 means all")
-	cmd.Flags().StringVar(&options.Status, "status", "", "filter by status")
-	cmd.Flags().BoolVar(&options.Active, "active", false, "show only queued and running runs")
+	cmd.Flags().IntVarP(&options.Limit, "limit", "n", 100, "maximum runs; 0 means all")
+	cmd.Flags().StringVarP(&options.Status, "status", "s", "", "filter by status")
+	cmd.Flags().BoolVarP(&options.Active, "active", "a", false, "show only queued and running runs")
 	cmd.Flags().StringVar(&options.TriggerType, "trigger-type", "", "filter by trigger type")
-	cmd.Flags().StringVar(&options.Trigger, "trigger", "", "filter by trigger name")
+	cmd.Flags().StringVarP(&options.Trigger, "trigger", "t", "", "filter by trigger name")
 	cmd.Flags().StringVar(&options.Project, "project", "", "filter by project")
 	cmd.Flags().StringVar(&options.TargetType, "target-type", "", "filter by target type")
 	cmd.Flags().StringVar(&options.Target, "target", "", "filter by target")
@@ -807,7 +807,7 @@ func (a *cliApp) runTargetCmd(kind string) *cobra.Command {
 		}
 		return workflowRunCommandWithOptions(args[0], wait)
 	})
-	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the run to finish")
+	cmd.Flags().BoolVarP(&wait, "wait", "w", false, "wait for the run to finish")
 	a.addJSONFlag(cmd)
 	a.addNoTruncFlag(cmd)
 	return cmd

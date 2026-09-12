@@ -321,6 +321,194 @@ func TestCobraAcceptsPersistentFlagsAfterLeafFlags(t *testing.T) {
 	}
 }
 
+func TestCobraRegistersFlagShorthands(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+
+	rootFlags := []struct {
+		name      string
+		shorthand string
+	}{
+		{name: "color", shorthand: "c"},
+		{name: "json", shorthand: "j"},
+	}
+	for _, test := range rootFlags {
+		t.Run("root/"+test.name, func(t *testing.T) {
+			flag := root.Flag(test.name)
+			if flag == nil {
+				t.Fatalf("root flag %q missing", test.name)
+			}
+			if flag.Shorthand != test.shorthand {
+				t.Fatalf("root --%s shorthand = %q, want %q", test.name, flag.Shorthand, test.shorthand)
+			}
+		})
+	}
+
+	cases := []struct {
+		path      []string
+		name      string
+		shorthand string
+	}{
+		{path: []string{"status"}, name: "watch", shorthand: "w"},
+		{path: []string{"events"}, name: "limit", shorthand: "n"},
+		{path: []string{"events"}, name: "follow", shorthand: "f"},
+		{path: []string{"up"}, name: "project", shorthand: "p"},
+		{path: []string{"up"}, name: "file", shorthand: "f"},
+		{path: []string{"up"}, name: "wait", shorthand: "w"},
+		{path: []string{"down"}, name: "project", shorthand: "p"},
+		{path: []string{"down"}, name: "file", shorthand: "f"},
+		{path: []string{"init"}, name: "force", shorthand: "f"},
+		{path: []string{"daemon", "logs"}, name: "tail", shorthand: "n"},
+		{path: []string{"daemon", "logs"}, name: "follow", shorthand: "f"},
+		{path: []string{"project", "apply"}, name: "wait", shorthand: "w"},
+		{path: []string{"project", "rollback"}, name: "wait", shorthand: "w"},
+		{path: []string{"logs"}, name: "stream", shorthand: "s"},
+		{path: []string{"logs"}, name: "tail", shorthand: "n"},
+		{path: []string{"logs"}, name: "follow", shorthand: "f"},
+		{path: []string{"runs", "watch"}, name: "timeout", shorthand: "t"},
+		{path: []string{"runs", "logs"}, name: "stream", shorthand: "s"},
+		{path: []string{"runs", "logs"}, name: "tail", shorthand: "n"},
+		{path: []string{"runs", "prune"}, name: "before", shorthand: "b"},
+		{path: []string{"runs", "prune"}, name: "all", shorthand: "a"},
+		{path: []string{"runs", "prune"}, name: "yes", shorthand: "y"},
+		{path: []string{"runs", "list"}, name: "limit", shorthand: "n"},
+		{path: []string{"runs", "list"}, name: "status", shorthand: "s"},
+		{path: []string{"runs", "list"}, name: "active", shorthand: "a"},
+		{path: []string{"runs", "list"}, name: "trigger", shorthand: "t"},
+		{path: []string{"run", "task"}, name: "wait", shorthand: "w"},
+		{path: []string{"run", "workflow"}, name: "wait", shorthand: "w"},
+		{path: []string{"logs"}, name: "json", shorthand: "j"},
+	}
+	for _, test := range cases {
+		t.Run(strings.Join(append(append([]string{}, test.path...), test.name), "/"), func(t *testing.T) {
+			command, _, err := root.Find(test.path)
+			if err != nil || command == root {
+				t.Fatalf("command %v missing: command=%v err=%v", test.path, command, err)
+			}
+			flag := command.Flag(test.name)
+			if flag == nil {
+				t.Fatalf("flag --%s missing on %v", test.name, test.path)
+			}
+			if flag.Shorthand != test.shorthand {
+				t.Fatalf("%v --%s shorthand = %q, want %q", test.path, test.name, flag.Shorthand, test.shorthand)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		path []string
+		name string
+	}{
+		{path: []string{"up"}, name: "no-daemon"},
+		{path: []string{"runs", "list"}, name: "no-trunc"},
+		{path: []string{"runs", "list"}, name: "trigger-type"},
+		{path: []string{"runs", "list"}, name: "target-type"},
+		{path: []string{"runs", "list"}, name: "target"},
+		{path: []string{"runs", "list"}, name: "attempts"},
+	} {
+		t.Run(strings.Join(append(append([]string{}, test.path...), test.name), "/")+"/long-only", func(t *testing.T) {
+			command, _, err := root.Find(test.path)
+			if err != nil || command == root {
+				t.Fatalf("command %v missing: command=%v err=%v", test.path, command, err)
+			}
+			flag := command.Flag(test.name)
+			if flag == nil {
+				t.Fatalf("flag --%s missing on %v", test.name, test.path)
+			}
+			if flag.Shorthand != "" {
+				t.Fatalf("%v --%s shorthand = %q, want long-only", test.path, test.name, flag.Shorthand)
+			}
+		})
+	}
+}
+
+func TestCobraParsesFlagShorthands(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantJSON bool
+	}{
+		{name: "root json", args: []string{"-j"}, wantJSON: true},
+		{name: "local json", args: []string{"logs", "demo/api", "-j"}, wantJSON: true},
+		{name: "logs", args: []string{"logs", "demo/api", "-s", "stderr", "-n", "5", "-f"}},
+		{name: "runs list", args: []string{"runs", "list", "-n", "5", "-s", "failed", "-a", "-t", "nightly"}},
+		{name: "runs prune", args: []string{"runs", "prune", "-b", "2026-01-01T00:00:00Z", "-a", "-y"}},
+		{name: "run task", args: []string{"run", "task", "demo/job", "-w"}},
+		{name: "run workflow", args: []string{"run", "workflow", "demo/release", "-w"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			app, _ := newTestRoot(t)
+			root := app.rootCommand()
+			root.SetArgs(append(append([]string{}, test.args...), "--help"))
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() = %v", err)
+			}
+			if app.json != test.wantJSON {
+				t.Fatalf("json = %v, want %v", app.json, test.wantJSON)
+			}
+		})
+	}
+}
+
+func TestCobraHelpDisplaysFlagShorthands(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "logs",
+			args: []string{"logs", "--help"},
+			want: []string{"-s, --stream", "-n, --tail", "-f, --follow", "-j, --json"},
+		},
+		{
+			name: "runs list",
+			args: []string{"runs", "list", "--help"},
+			want: []string{"-n, --limit", "-s, --status", "-a, --active", "-t, --trigger", "--target string"},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			app, output := newTestRoot(t)
+			root := app.rootCommand()
+			root.SetArgs(test.args)
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() = %v", err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("help = %q, want %q", output.String(), want)
+				}
+			}
+			if test.name == "runs list" && strings.Contains(output.String(), "-t, --target") {
+				t.Fatalf("runs list help assigns -t to target: %q", output.String())
+			}
+		})
+	}
+}
+
+func TestCobraRunsListShorthandOwnership(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	command, _, err := root.Find([]string{"runs", "list"})
+	if err != nil || command == root {
+		t.Fatalf("runs list missing: command=%v err=%v", command, err)
+	}
+
+	for shorthand, name := range map[string]string{
+		"a": "active",
+		"n": "limit",
+		"s": "status",
+		"t": "trigger",
+	} {
+		flag := command.Flags().ShorthandLookup(shorthand)
+		if flag == nil || flag.Name != name {
+			t.Fatalf("-%s resolves to %v, want --%s", shorthand, flag, name)
+		}
+	}
+}
+
 func TestCobraAcceptsPersistentFlagsAroundPositionalArguments(t *testing.T) {
 	cases := []struct {
 		name string
