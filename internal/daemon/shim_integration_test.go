@@ -32,7 +32,7 @@ func TestDaemonReattachesRustShimAfterControlPlaneShutdown(t *testing.T) {
 	fixture := testfixture.Build(t)
 	layout := testLayout(root)
 	configPath := filepath.Join(root, "mango.yaml")
-	configData := []byte(fmt.Sprintf(`version: 4
+	configData := []byte(strings.TrimSpace(fmt.Sprintf(`version: 4
 
 defaults:
 services:
@@ -42,7 +42,7 @@ services:
     args: [--mode, sleep, --duration, 60s]
     autostart: true
     restart: never
-	`, yamlSingleQuote(fixture)))
+	`, yamlSingleQuote(fixture))))
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +101,109 @@ services:
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("shim did not stop during explicit daemon shutdown")
+}
+
+func TestDaemonRecreatesServiceAfterShimKill(t *testing.T) {
+	shimBinary := os.Getenv("MANGO_SHIM_TEST_BINARY")
+	if shimBinary == "" {
+		t.Skip("MANGO_SHIM_TEST_BINARY is not set")
+	}
+	if _, err := os.Stat(shimBinary); err != nil {
+		t.Fatalf("mango-shim test binary: %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(shimBinary)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	root := t.TempDir()
+	fixture := testfixture.Build(t)
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "mango.yaml")
+	configData := []byte(fmt.Sprintf(`version: 4
+
+defaults:
+services:
+  api:
+    command: %s
+    supervisor: shim
+    args: [--mode, sleep, --duration, 60s]
+    autostart: true
+    restart: never
+`, yamlSingleQuote(fixture)))
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := registry.Project{Name: "demo", ConfigPath: configPath, Enabled: true}
+	reg := registry.File{Version: 1, Projects: map[string]registry.Project{"demo": project}}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	d.registry = reg
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	var oldClient *shim.Client
+	var oldStateDir string
+	defer func() {
+		d.stopAllServices(true)
+		d.cancel()
+		if oldClient != nil {
+			_ = shim.RecoverDead(context.Background(), oldClient, time.Second)
+		}
+	}()
+	if err := d.ApplyProject("demo"); err != nil {
+		t.Fatal(err)
+	}
+	items := d.ListProcesses("demo")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		items = d.ListProcesses("demo")
+		if len(items) == 1 && items[0].PID > 0 && items[0].State == StateRunning {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if len(items) != 1 || items[0].PID <= 0 || items[0].State != StateRunning {
+		t.Fatalf("initial services = %+v", items)
+	}
+	oldPID := items[0].PID
+	d.mu.RLock()
+	managed := d.projects["demo"].processes["api"]
+	if managed != nil && managed.shim != nil {
+		oldClient = managed.shim
+		oldStateDir = managed.shim.StateDir
+	}
+	var oldShimPID int
+	if managed != nil && managed.shim != nil {
+		oldShimPID = managed.shimStatus.ShimPID
+	}
+	d.mu.RUnlock()
+	if oldClient == nil || oldStateDir == "" || oldShimPID <= 0 {
+		t.Fatalf("initial shim observation = client %v, state %q, pid %d", oldClient != nil, oldStateDir, oldShimPID)
+	}
+	oldIncarnation := oldClient.Incarnation
+	if err := syscall.Kill(oldShimPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill shim %d: %v", oldShimPID, err)
+	}
+
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		items = d.ListProcesses("demo")
+		d.mu.RLock()
+		managed = d.projects["demo"].processes["api"]
+		newIncarnation := ""
+		if managed != nil && managed.shim != nil {
+			newIncarnation = managed.shim.Incarnation
+		}
+		d.mu.RUnlock()
+		if len(items) == 1 && items[0].State == StateRunning && items[0].PID > 0 &&
+			items[0].PID != oldPID && newIncarnation != "" && newIncarnation != oldIncarnation &&
+			items[0].RestartCount == 0 {
+			if shimExitedForTest(oldStateDir) {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("service was not recreated after shim kill: %+v", items)
 }
 
 func (d *Daemon) shimStoppedForTest(project, service string) bool {

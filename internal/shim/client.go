@@ -445,7 +445,9 @@ func findMatching(ctx context.Context, root string, desired Bootstrap) (*Client,
 			if statusErr == nil && status.ServicePID > 0 && processIsAliveWithToken(status.ServicePID, status.ProcessStartToken) {
 				return nil, Status{}, false, fmt.Errorf("%w: old shim state for %s has a live orphaned service process", ErrMigration, desired.ServiceKey)
 			}
-			cleanupDeadState(stateDir, endpoint)
+			if err := cleanupDeadState(stateDir, endpoint); err != nil {
+				return nil, Status{}, false, fmt.Errorf("%w: remove stale shim state: %v", ErrOrphaned, err)
+			}
 			continue
 		}
 		if existing.ConfigFingerprint == desired.ConfigFingerprint {
@@ -465,14 +467,13 @@ func findMatching(ctx context.Context, root string, desired Bootstrap) (*Client,
 			if statusErr == nil && status.ShimPID > 0 && processIsAlive(status.ShimPID) {
 				return nil, Status{}, false, fmt.Errorf("%w: %s", ErrUnavailable, desired.ServiceKey)
 			}
-			if statusErr == nil && status.ServicePID > 0 && processIsAliveWithToken(status.ServicePID, status.ProcessStartToken) {
-				return nil, Status{}, false, fmt.Errorf("%w: %s", ErrOrphaned, desired.ServiceKey)
-			}
 			if pid, pidErr := readPID(filepath.Join(stateDir, "shim.pid")); pidErr == nil && processIsAlive(pid) {
 				return nil, Status{}, false, fmt.Errorf("%w: %s", ErrUnavailable, desired.ServiceKey)
 			}
 			if statusErr == nil {
-				cleanupDeadState(stateDir, endpoint)
+				if err := RecoverDead(ctx, client, time.Duration(desired.StopTimeoutMS)*time.Millisecond); err != nil {
+					return nil, Status{}, false, err
+				}
 			}
 			continue
 		}
@@ -492,17 +493,16 @@ func findMatching(ctx context.Context, root string, desired Bootstrap) (*Client,
 			return nil, Status{}, false, fmt.Errorf("old shim for %s is still running: %w", desired.ServiceKey, stopErr)
 		}
 		if statusErr == nil {
-			cleanupDeadState(stateDir, endpoint)
+			if err := cleanupDeadState(stateDir, endpoint); err != nil {
+				return nil, Status{}, false, fmt.Errorf("%w: remove stale shim state: %v", ErrOrphaned, err)
+			}
 		}
 	}
 	return nil, Status{}, false, nil
 }
 
-func cleanupDeadState(stateDir, endpoint string) {
-	if runtime.GOOS != "windows" {
-		_ = os.Remove(endpoint)
-	}
-	_ = os.RemoveAll(stateDir)
+func cleanupDeadState(stateDir, endpoint string) error {
+	return removeDeadState(stateDir, endpoint)
 }
 
 func retryHello(ctx context.Context, client *Client, lastErr error, wait time.Duration) error {

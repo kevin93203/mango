@@ -2017,6 +2017,16 @@ func shimErrorState(err error) string {
 	return StateFailed
 }
 
+func clearShimObservationLocked(managed *managedProcess) {
+	if managed.healthCancel != nil {
+		managed.healthCancel()
+		managed.healthCancel = nil
+	}
+	managed.health = nil
+	managed.startedAt = time.Time{}
+	managed.shimStatus = shim.Status{}
+}
+
 func (d *Daemon) watchShim(projectName string, managed *managedProcess, generation uint64, client *shim.Client) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -2052,20 +2062,31 @@ func (d *Daemon) watchShim(projectName string, managed *managedProcess, generati
 		} else {
 			shouldRecover := false
 			d.mu.Lock()
-			if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation {
+			if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation && managed.shim == client {
+				clearShimObservationLocked(managed)
 				managed.state = shimErrorState(err)
 				managed.lastError = err.Error()
 				shouldRecover = errors.Is(err, shim.ErrUnavailable)
+				if shouldRecover {
+					managed.state = StateStarting
+				}
 			}
 			d.mu.Unlock()
 			if shouldRecover {
 				if recoveryErr := d.recoverShim(projectName, managed, generation, client); recoveryErr != nil {
-					d.mu.Lock()
-					if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation {
-						managed.state = shimErrorState(recoveryErr)
-						managed.lastError = recoveryErr.Error()
+					if !errors.Is(recoveryErr, shim.ErrUnavailable) {
+						d.mu.Lock()
+						if current := d.projects[projectName]; current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation && managed.shim == client {
+							clearShimObservationLocked(managed)
+							managed.state = shimErrorState(recoveryErr)
+							managed.lastError = recoveryErr.Error()
+						}
+						d.mu.Unlock()
+						return
 					}
-					d.mu.Unlock()
+					// The IPC failure may be transient while the shim is
+					// still alive. Keep this watcher and retry on the next
+					// tick instead of killing a live service.
 				} else {
 					return
 				}
@@ -2083,10 +2104,26 @@ func (d *Daemon) recoverShim(projectName string, managed *managedProcess, genera
 	d.mu.RLock()
 	current := d.projects[projectName]
 	valid := current != nil && current.processes[managed.spec.Name] == managed && managed.generation == generation && managed.shim == client && !managed.manualStop && !managed.disabled
+	timeout := managed.spec.StopTimeout
 	d.mu.RUnlock()
 	if !valid {
 		return nil
 	}
+	if err := shim.RecoverDead(d.executionContext(), client, timeout); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	current = d.projects[projectName]
+	if current == nil || current.processes[managed.spec.Name] != managed || managed.generation != generation || managed.manualStop || managed.disabled {
+		d.mu.Unlock()
+		return nil
+	}
+	managed.shim = nil
+	clearShimObservationLocked(managed)
+	managed.state = StateStarting
+	managed.generation++
+	d.mu.Unlock()
 	return d.startShimManaged(projectName, managed)
 }
 

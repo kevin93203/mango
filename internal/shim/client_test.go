@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/secrets"
@@ -131,5 +132,46 @@ func TestFindMatchingCleansDeadV2ShimState(t *testing.T) {
 	}
 	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dead v2 state still exists: %v", err)
+	}
+}
+
+func TestFindMatchingCleansDeadShimState(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "dead")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := Bootstrap{
+		SchemaVersion: BootstrapSchemaVersion, ProtocolVersion: ProtocolVersion,
+		ServiceKey: "demo/api", Incarnation: "dead", ConfigFingerprint: "fingerprint",
+	}
+	if err := writeJSON(filepath.Join(stateDir, "bootstrap.json"), bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(stateDir, "status.json"), Status{State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, found, err := findMatching(context.Background(), root, bootstrap)
+	if err != nil || found {
+		t.Fatalf("findMatching = found %v, err %v", found, err)
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dead shim state still exists: %v", err)
+	}
+}
+
+func TestRecoverDeadLeavesLiveShimStateUntouched(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := writeJSON(filepath.Join(stateDir, "status.json"), Status{ShimPID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{StateDir: stateDir}
+	err := RecoverDead(context.Background(), client, time.Second)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("RecoverDead error = %v, want ErrUnavailable", err)
+	}
+	if _, err := os.Stat(stateDir); err != nil {
+		t.Fatalf("live shim state changed: %v", err)
 	}
 }

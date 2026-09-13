@@ -1110,7 +1110,7 @@ persistent `enable` and `disable` policy operations.
 
 Possible lifecycle states are `stopped`, `starting`, `waiting`, `running`,
 `stopping`, `exited`, `backing_off`, `crash_loop`, `failed`, `disabled`, and
-`unknown`.
+`orphaned`, `unknown`.
 
 Restart policies behave as follows:
 
@@ -1627,6 +1627,13 @@ automatic schema downgrade or rollback.
   descendants that deliberately escape the group are outside the guarantee.
 - On Windows, the shim assigns the service to a dedicated Job Object and uses
   job termination for process-tree containment.
+- If a shim exits unexpectedly while `mangod` is alive, the daemon verifies
+  that the shim is really gone, terminates any service tree left behind, and
+  creates a fresh shim and service incarnation. The replacement gets a new
+  service PID; this recovery does not consume the service's restart budget or
+  enter `crash_loop`. The configured restart policy still applies to exits of
+  the service while its shim is alive. If Mango cannot safely clean up the old
+  tree, the service is reported as `orphaned` instead of starting a duplicate.
 - An unexpected `mangod` exit leaves shim services running. A new daemon scans
   `runtime/shims`, validates the service key, incarnation, fingerprint, and
   process identity, then attaches to a matching shim without starting a
@@ -1668,8 +1675,12 @@ service key, instance/incarnation identity, configuration fingerprint, and
 shim handshake before attaching. A matching live shim is reused without
 starting a duplicate process. A live mismatch is shut down before replacement;
 an orphaned or uncertain process is surfaced as an error, while dead state is
-cleaned up. This keeps process ownership with the shim while the daemon owns
-the desired state.
+cleaned up. The same safety rule is used for unexpected shim failure: the
+daemon only replaces a shim after its old process and service identity have
+been checked. Explicit `mango daemon stop` and service-manager stop/restart
+operations remain intentional shutdowns and do not use this failure-recovery
+path. This keeps process ownership with the shim while the daemon owns the
+desired state.
 
 ## Security and observability
 
