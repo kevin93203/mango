@@ -50,8 +50,33 @@ pub fn spawn_platform(bootstrap: &Bootstrap) -> io::Result<super::Spawned> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // A new session gives the service root its own process group and keeps
-    // ordinary descendants inside the boundary used by terminate().
+    // A dedicated process group keeps ordinary descendants inside the
+    // boundary used by terminate(). On macOS, process_group(0) lets
+    // posix_spawn establish that group without the fork/exec path used by
+    // pre_exec. This matters on constrained runners, where concurrent forks
+    // can transiently fail with EAGAIN ("Resource temporarily unavailable").
+    #[cfg(target_os = "macos")]
+    if identity.is_none() {
+        command.process_group(0);
+    } else {
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if let Some(identity) = &identity {
+                    if libc::setgid(identity.gid) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::setuid(identity.uid) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {
