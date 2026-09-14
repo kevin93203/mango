@@ -29,7 +29,12 @@ jobs:
       - name: Check mango-shim formatting
         run: cargo fmt --manifest-path mango-shim/Cargo.toml -- --check
 
+      - name: Test mango-shim on macOS
+        if: runner.os == 'macOS'
+        run: cargo test --manifest-path mango-shim/Cargo.toml -- --test-threads=1
+
       - name: Test mango-shim
+        if: runner.os != 'macOS'
         run: cargo test --manifest-path mango-shim/Cargo.toml
 
       - name: Lint mango-shim
