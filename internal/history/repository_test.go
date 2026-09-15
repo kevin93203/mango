@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/scheduler"
 )
 
@@ -131,6 +133,126 @@ func TestRepositoryClearRemovesRecordsAndCounters(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].RunID != "run-2" {
 		t.Fatalf("records after rewrite = %+v, want run-2", records)
+	}
+}
+
+func TestRepositoryDeleteProjectRemovesOwnedStateOnly(t *testing.T) {
+	repository := openTestRepository(t)
+	ctx := context.Background()
+	started := time.Unix(1, 0).UTC()
+	for _, record := range []scheduler.Record{
+		{RunID: "demo-run", Project: "demo", TargetType: "workflow", Target: "pipeline", Status: scheduler.StatusFailed, Started: started, Finished: started.Add(time.Second), ExitCode: 1,
+			Tasks: []scheduler.TaskRecord{{
+				RunID: "demo-task", Node: "build", Task: "compile", Status: scheduler.StatusFailed,
+				Started: started, Finished: started.Add(time.Second),
+				Attempts:  []scheduler.Attempt{{Number: 1, Started: started, Finished: started.Add(time.Second)}},
+				Artifacts: []scheduler.Artifact{{Path: "build/output", Exists: true}},
+			}},
+		},
+		{RunID: "other-run", Project: "other", TargetType: "task", Target: "lint", Status: scheduler.StatusSuccess, Started: started, Finished: started.Add(time.Second), ExitCode: 0},
+	} {
+		if err := repository.Record(ctx, record, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := repository.BeginExecution(ctx, scheduler.Record{RunID: "demo-active", Project: "demo", TargetType: "task", Target: "watch", Status: scheduler.StatusRunning, Started: started}, "", 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []observability.Event{
+		{Project: "demo", RunID: "demo-run", Type: "execution.failed"},
+		{Project: "other", RunID: "other-run", Type: "execution.success"},
+	} {
+		if _, err := repository.AppendEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repository.AppendAudit(ctx, observability.AuditEntry{Action: "project.remove", Result: "success"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, occurrence := range []scheduler.ScheduleOccurrence{
+		{ID: "demo-occurrence", Project: "demo", Schedule: "nightly", ScheduledAt: started},
+		{ID: "other-occurrence", Project: "other", Schedule: "nightly", ScheduledAt: started},
+	} {
+		if _, _, err := repository.ClaimScheduleOccurrence(ctx, occurrence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, delivery := range []scheduler.WebhookDelivery{
+		{WebhookKey: "demo/hook", IdempotencyKey: "demo-delivery", RunID: "demo-run"},
+		{WebhookKey: "other/hook", IdempotencyKey: "other-delivery", RunID: "other-run"},
+	} {
+		if _, _, err := repository.ClaimWebhookDelivery(ctx, delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.RecordExecutionEvent(ctx, scheduler.ExecutionEvent{RunID: "demo-run", Type: "state_transition"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.RecordExecutionEvent(ctx, scheduler.ExecutionEvent{RunID: "other-run", Type: "state_transition"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReplaceSecurityMetadata(ctx, "demo", []observability.SecretReferenceMetadata{{Project: "demo", Target: "api", Name: "TOKEN"}}, []observability.ResourcePolicyMetadata{{Project: "demo", Target: "api"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repository.DeleteProject(ctx, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if records, err := repository.Query(ctx, scheduler.HistoryQuery{Project: "demo"}); err != nil || len(records) != 0 {
+		t.Fatalf("demo records = %+v, err=%v; want empty", records, err)
+	}
+	if records, err := repository.Query(ctx, scheduler.HistoryQuery{Project: "other"}); err != nil || len(records) != 1 || records[0].RunID != "other-run" {
+		t.Fatalf("other records = %+v, err=%v; want other-run", records, err)
+	}
+	if executions, err := repository.ListExecutions(ctx, scheduler.ExecutionQuery{Project: "demo", All: true}); err != nil || len(executions) != 0 {
+		t.Fatalf("demo executions = %+v, err=%v; want empty", executions, err)
+	}
+	if events, err := repository.ListExecutionEvents(ctx, "demo-run"); err != nil || len(events) != 0 {
+		t.Fatalf("demo execution events = %+v, err=%v; want empty", events, err)
+	}
+	if events, err := repository.ListEvents(ctx, observability.EventQuery{Project: "demo"}); err != nil || len(events) != 0 {
+		t.Fatalf("demo events = %+v, err=%v; want empty", events, err)
+	}
+	if events, err := repository.ListEvents(ctx, observability.EventQuery{Project: "other"}); err != nil || len(events) != 1 {
+		t.Fatalf("other events = %+v, err=%v; want one", events, err)
+	}
+	if _, err := repository.LatestScheduleOccurrence(ctx, "demo", "nightly"); err != scheduler.ErrScheduleOccurrenceNotFound {
+		t.Fatalf("demo occurrence error = %v, want ErrScheduleOccurrenceNotFound", err)
+	}
+	if _, err := repository.LatestScheduleOccurrence(ctx, "other", "nightly"); err != nil {
+		t.Fatalf("other occurrence error = %v", err)
+	}
+	if _, created, err := repository.ClaimWebhookDelivery(ctx, scheduler.WebhookDelivery{WebhookKey: "demo/hook", IdempotencyKey: "demo-delivery", RunID: "demo-run"}); err != nil || !created {
+		t.Fatalf("demo webhook recreated = created %v, err %v; want new delivery", created, err)
+	}
+	if _, created, err := repository.ClaimWebhookDelivery(ctx, scheduler.WebhookDelivery{WebhookKey: "other/hook", IdempotencyKey: "other-delivery", RunID: "other-run"}); err != nil || created {
+		t.Fatalf("other webhook recreated = created %v, err %v; want existing delivery", created, err)
+	}
+	if audits, err := repository.ListAudit(ctx, 0); err != nil || len(audits) != 1 {
+		t.Fatalf("audit entries = %+v, err=%v; want one retained entry", audits, err)
+	}
+	counters, err := repository.Counters(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := range counters {
+		if strings.Contains(key, "|demo|") {
+			t.Fatalf("demo counter %q remains", key)
+		}
+	}
+	var secrets int64
+	if err := repository.db.Model(&secretReferenceModel{}).Where("project = ?", "demo").Count(&secrets).Error; err != nil {
+		t.Fatal(err)
+	}
+	if secrets != 0 {
+		t.Fatalf("demo secret references = %d, want zero", secrets)
+	}
+	var policies int64
+	if err := repository.db.Model(&resourcePolicyModel{}).Where("project = ?", "demo").Count(&policies).Error; err != nil {
+		t.Fatal(err)
+	}
+	if policies != 0 {
+		t.Fatalf("demo resource policies = %d, want zero", policies)
 	}
 }
 

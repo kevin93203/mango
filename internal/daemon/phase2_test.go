@@ -112,6 +112,112 @@ func TestDaemonRestartRestoresAcceptedGenerationInsteadOfReloadingYAML(t *testin
 	}
 }
 
+func TestProjectRemoveClearsStateAndResetsGeneration(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "project.yaml")
+	writePhase2Project(t, configPath, "original-command")
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo":  {Name: "demo", ConfigPath: configPath, Enabled: true},
+		"other": {Name: "other", ConfigPath: configPath, Enabled: false},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatalf("initial reload = %v", err)
+	}
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool { return status.Ready })
+	if got := d.projectGeneration("demo"); got != 1 {
+		t.Fatalf("initial generation = %d, want 1", got)
+	}
+	writePhase2Project(t, configPath, "changed-command")
+	second, err := d.ApplyProjectResult("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation != 2 {
+		t.Fatalf("second generation = %d, want 2", second.Generation)
+	}
+	writer, _, err := d.logs.Open("demo", "api", "stdout", 1<<20, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("project log\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveScheduleState(layout.ScheduleState, map[string]bool{"demo/nightly": true, "other/nightly": true}); err != nil {
+		t.Fatal(err)
+	}
+	d.scheduler.RecordExecution(scheduler.Record{RunID: "demo-run", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: timeForDaemonTest(1), Finished: timeForDaemonTest(2)})
+	d.scheduler.RecordExecution(scheduler.Record{RunID: "other-run", Project: "other", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: timeForDaemonTest(1), Finished: timeForDaemonTest(2)})
+
+	reg, err := registry.Load(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(reg.Projects, "demo")
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		t.Fatal(err)
+	}
+	storedRegistry, err := registry.Load(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := storedRegistry.Projects["demo"]; ok {
+		t.Fatalf("demo remains in registry before remove: %+v", storedRegistry)
+	}
+	request := requestForMethodWithParams(t, "project.remove", struct {
+		Project string `json:"project"`
+	}{Project: "demo"})
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("project.remove failed: %+v", response.Error)
+	}
+	if generations, err := generation.ListProjectGenerations(layout.State, "demo"); err != nil || len(generations) != 0 {
+		t.Fatalf("demo generations = %v, err=%v; want empty", generations, err)
+	}
+	if _, err := os.Stat(filepath.Join(layout.Logs, "demo")); !os.IsNotExist(err) {
+		t.Fatalf("demo logs stat error = %v, want directory removed", err)
+	}
+	state, err := loadScheduleState(layout.ScheduleState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state) != 1 || !state["other/nightly"] {
+		t.Fatalf("schedule state after remove = %#v, want only other/nightly", state)
+	}
+	history, err := d.scheduler.QueryHistory(context.Background(), scheduler.HistoryQuery{Project: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("demo history after remove = %+v, want empty", history)
+	}
+	history, err = d.scheduler.QueryHistory(context.Background(), scheduler.HistoryQuery{Project: "other"})
+	if err != nil || len(history) != 1 {
+		t.Fatalf("other history after remove = %+v, err=%v; want one record", history, err)
+	}
+
+	reg, err = registry.Load(layout.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Projects["demo"] = registry.Project{Name: "demo", ConfigPath: configPath, Enabled: true}
+	if err := registry.Save(layout.Registry, reg); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.projectGeneration("demo"); got != 1 {
+		t.Fatalf("generation after re-register = %d, want 1", got)
+	}
+}
+
 func TestApplyUnchangedReusesGenerationAndProcess(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

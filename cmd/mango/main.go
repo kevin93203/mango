@@ -27,6 +27,7 @@ import (
 	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
+	"github.com/kevin93203/mango/internal/projectstate"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/runref"
@@ -836,22 +837,73 @@ func projectAddCommand(layout paths.Layout, projectName, configPath string) erro
 }
 
 func projectRemoveCommand(layout paths.Layout, name string) error {
+	if err := config.ValidateProjectName(name); err != nil {
+		return err
+	}
 	reg, err := registry.Load(layout.Registry)
 	if err != nil {
 		return err
 	}
-	if _, err := removeProjectFromRegistry(&reg, name); err != nil {
-		return err
+	if _, registered := reg.Projects[name]; registered {
+		delete(reg.Projects, name)
+		if err := registry.Save(layout.Registry, reg); err != nil {
+			return err
+		}
 	}
-	if err := registry.Save(layout.Registry, reg); err != nil {
-		return err
+	if _, err := callWithTimeout("project.remove", struct {
+		Project string `json:"project"`
+	}{Project: name}, processOperationTimeout); err != nil {
+		var callErr *ipc.CallError
+		if errors.As(err, &callErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return err
+		}
+		if err := removeProjectStateOffline(layout, name); err != nil {
+			return err
+		}
 	}
-	_, _ = call("project.reload", nil)
 	if jsonOutput {
 		return cliOutput.JSON(map[string]string{"project": name, "status": "removed"})
 	}
 	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
 	return nil
+}
+
+func removeProjectStateOffline(layout paths.Layout, name string) error {
+	var repo scheduler.HistoryRepository
+	if layout.State != "" || layout.DaemonConfig != "" {
+		configPath := layout.DaemonConfig
+		if configPath == "" && layout.Root != "" {
+			configPath = filepath.Join(layout.Root, "daemon.yaml")
+		}
+		daemonConfig, err := config.LoadDaemonConfig(configPath)
+		if err != nil {
+			return err
+		}
+		resolved, err := history.ResolveConfig(layout, daemonConfig.History.Database)
+		if err != nil {
+			return err
+		}
+		if resolved.Driver != "sqlite" || resolved.Path == "" {
+			repo, err = history.Open(resolved)
+			if err != nil {
+				return err
+			}
+		} else if _, err := os.Stat(resolved.Path); err == nil {
+			repo, err = history.Open(resolved)
+			if err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	cleanupErr := projectstate.Remove(cliCommandContext, layout, name, repo, processOperationTimeout)
+	if repo != nil {
+		if err := repo.Close(); cleanupErr == nil {
+			cleanupErr = err
+		}
+	}
+	return cleanupErr
 }
 
 func projectRenameCommand(layout paths.Layout, oldName, newName string) error {

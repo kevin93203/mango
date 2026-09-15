@@ -32,6 +32,7 @@ import (
 	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/process"
+	"github.com/kevin93203/mango/internal/projectstate"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/resources"
@@ -224,14 +225,14 @@ type bulkProjectSelection struct {
 
 func New(layout paths.Layout) *Daemon {
 	d := &Daemon{
-		layout:                  layout,
-		logs:                    logging.NewManager(layout.Logs),
-		metrics:                 metrics.NewCollector(),
-		redactor:                &secrets.Redactor{},
-		projects:                map[string]*projectRuntime{},
-		configErrors:            map[string]string{},
-		disabledSchedules:       map[string]bool{},
-		executionCancels:        map[string]context.CancelFunc{},
+		layout:            layout,
+		logs:              logging.NewManager(layout.Logs),
+		metrics:           metrics.NewCollector(),
+		redactor:          &secrets.Redactor{},
+		projects:          map[string]*projectRuntime{},
+		configErrors:      map[string]string{},
+		disabledSchedules: map[string]bool{},
+		executionCancels:  map[string]context.CancelFunc{},
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	d.workflow = workflow.New(d.runTaskAttempt, d.recordExecution)
@@ -292,7 +293,7 @@ func (d *Daemon) listEvents(ctx context.Context, query observability.EventQuery)
 
 func isAuditedMethod(method string) bool {
 	switch method {
-	case "daemon.stop", "project.reload", "config.apply", "config.rollback", "project.rollback",
+	case "daemon.stop", "project.reload", "project.remove", "config.apply", "config.rollback", "project.rollback",
 		"service.start", "service.stop", "service.restart", "service.enable", "service.disable", "service.bulk",
 		"schedule.bulk", "task.run", "workflow.run", "execution.cancel", "execution.retry":
 		return true
@@ -739,31 +740,13 @@ func migrationHealthForDatabase(database history.Config) api.HistoryMigrationHea
 }
 
 func resolveHistoryDatabase(layout paths.Layout, database config.DatabaseConfig) (history.Config, api.HistoryDatabaseHealth, error) {
-	if err := database.Validate(); err != nil {
+	resolved, err := history.ResolveConfig(layout, database)
+	if err != nil {
 		return history.Config{}, api.HistoryDatabaseHealth{}, err
 	}
-	driver := strings.ToLower(strings.TrimSpace(database.Driver))
-	if driver == "" {
-		driver = config.DefaultHistoryDatabaseDriver
-	}
-	dsn := database.DSN
-	if database.DSNEnv != "" {
-		dsn = os.Getenv(database.DSNEnv)
-		if dsn == "" {
-			return history.Config{}, api.HistoryDatabaseHealth{}, fmt.Errorf("history database environment variable %q is empty", database.DSNEnv)
-		}
-	}
-	path := database.Path
-	if driver == "sqlite" {
-		if path == "" {
-			path = filepath.Join(layout.State, "history.db")
-		} else if !filepath.IsAbs(path) {
-			path = filepath.Join(layout.Root, path)
-		}
-	}
 	info := historyDatabaseInfo(layout, database)
-	info.ConnectionInfo = databaseConnectionInfo(driver, dsn, database.DSNEnv)
-	return history.Config{Driver: driver, Path: path, DSN: dsn}, info, nil
+	info.ConnectionInfo = databaseConnectionInfo(resolved.Driver, resolved.DSN, database.DSNEnv)
+	return resolved, info, nil
 }
 
 func (d *Daemon) reloadRegistry() error {
@@ -792,13 +775,15 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 			return err
 		}
 	}
-	d.mu.Lock()
-	d.registry = reg
+	maxGeneration := uint64(0)
 	for _, project := range reg.Projects {
-		if project.ConfigurationGeneration > d.configurationGeneration {
-			d.configurationGeneration = project.ConfigurationGeneration
+		if project.ConfigurationGeneration > maxGeneration {
+			maxGeneration = project.ConfigurationGeneration
 		}
 	}
+	d.mu.Lock()
+	d.registry = reg
+	d.configurationGeneration = maxGeneration
 	d.configErrors = map[string]string{}
 	d.mu.Unlock()
 	var removed []string
@@ -811,7 +796,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	d.mu.RUnlock()
 	sort.Strings(removed)
 	for _, name := range removed {
-		d.removeProject(name)
+		if err := d.removeProject(name); err != nil {
+			return fmt.Errorf("remove project %s runtime: %w", name, err)
+		}
 		if err := d.clearScheduleStateForProject(name); err != nil {
 			return err
 		}
@@ -824,7 +811,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	for _, name := range projectNames {
 		project := reg.Projects[name]
 		if !project.Enabled {
-			d.removeProject(name)
+			if err := d.removeProject(name); err != nil {
+				return fmt.Errorf("disable project %s runtime: %w", name, err)
+			}
 			continue
 		}
 		if err := d.restoreOrMigrateProject(name, project); err != nil {
@@ -907,10 +896,13 @@ func (d *Daemon) PlanProject(name string) (reconcile.Plan, error) {
 	}
 	d.mu.RLock()
 	projectRecord, ok := d.registry.Projects[name]
-	proposed := d.configurationGeneration + 1
 	d.mu.RUnlock()
 	if !ok {
 		return reconcile.Plan{}, fmt.Errorf("project %q is not registered", name)
+	}
+	proposed := projectRecord.ConfigurationGeneration + 1
+	if proposed == 0 {
+		return reconcile.Plan{}, fmt.Errorf("project %q generation exhausted", name)
 	}
 	file, err := config.Load(projectRecord.ConfigPath)
 	if err != nil {
@@ -1065,9 +1057,14 @@ func (d *Daemon) acceptProjectDesired(name string, file config.File, desired rec
 			return api.ApplyResult{Project: name, Generation: projectRecord.ConfigurationGeneration, Status: "accepted", AcceptedAt: acceptedAt}, nil
 		}
 	}
+	requestedGeneration := projectRecord.ConfigurationGeneration + 1
+	if requestedGeneration == 0 {
+		return api.ApplyResult{}, fmt.Errorf("project %q generation exhausted", name)
+	}
 	d.mu.Lock()
-	d.configurationGeneration++
-	requestedGeneration := d.configurationGeneration
+	if requestedGeneration > d.configurationGeneration {
+		d.configurationGeneration = requestedGeneration
+	}
 	d.mu.Unlock()
 	now := time.Now().UTC()
 	schedules := desired.Schedules
@@ -1609,19 +1606,41 @@ func (d *Daemon) allWebhooksWith(webhooks []config.EffectiveWebhook, projectName
 	return result
 }
 
-func (d *Daemon) removeProject(name string) {
+func (d *Daemon) removeProject(name string) error {
 	d.mu.Lock()
 	project := d.projects[name]
 	delete(d.projects, name)
 	d.mu.Unlock()
 	if project == nil {
-		return
+		return nil
 	}
+	var firstErr error
 	for _, managed := range project.processes {
-		_ = d.stopManaged(managed)
+		if err := d.stopManaged(managed); err != nil && !errors.Is(err, shim.ErrUnavailable) && firstErr == nil {
+			firstErr = err
+		}
 		d.shutdownDetachedShim(managed)
+		d.closeManagedLogs(managed)
 	}
 	d.reapplyExecutionDefinitions()
+	return firstErr
+}
+
+func (d *Daemon) closeManagedLogs(managed *managedProcess) {
+	if managed == nil {
+		return
+	}
+	d.mu.Lock()
+	stdout, stderr := managed.stdout, managed.stderr
+	managed.stdout = nil
+	managed.stderr = nil
+	d.mu.Unlock()
+	if stdout != nil {
+		_ = stdout.Close()
+	}
+	if stderr != nil {
+		_ = stderr.Close()
+	}
 }
 
 func (d *Daemon) isManagedProcess(target *managedProcess) bool {
@@ -1684,6 +1703,63 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 	if d.historyRepo != nil {
 		if err := d.scheduler.RefreshHistorySummary(d.executionContext()); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: refresh history summary: %v\n", err)
+		}
+	}
+}
+
+func (d *Daemon) removeProjectState(ctx context.Context, name string) error {
+	if err := config.ValidateProjectName(name); err != nil {
+		return err
+	}
+	reg, err := registry.Load(d.layout.Registry)
+	if err != nil {
+		return err
+	}
+	if _, ok := reg.Projects[name]; ok {
+		return fmt.Errorf("project %q is still registered", name)
+	}
+	if err := d.cancelProjectExecutions(ctx, name); err != nil {
+		return err
+	}
+	if err := d.reloadRegistry(); err != nil {
+		return err
+	}
+	if err := d.clearScheduleStateForProject(name); err != nil {
+		return err
+	}
+	d.mu.RLock()
+	repo := d.historyRepo
+	d.mu.RUnlock()
+	if repo == nil {
+		repo = d.scheduler.HistoryRepository()
+	}
+	return projectstate.Remove(ctx, d.layout, name, repo, 30*time.Second)
+}
+
+func (d *Daemon) cancelProjectExecutions(ctx context.Context, project string) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		active, err := d.scheduler.ListActiveExecutions(ctx)
+		if err != nil {
+			return fmt.Errorf("list active executions: %w", err)
+		}
+		found := false
+		for _, execution := range active {
+			if execution.Record.Project != project {
+				continue
+			}
+			found = true
+			d.cancelManualExecution(execution.Record.RunID)
+			d.scheduler.CancelExecution(execution.Record.RunID)
+		}
+		if !found {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for project %s executions to stop: %w", project, ctx.Err())
+		case <-ticker.C:
 		}
 	}
 }
@@ -3601,6 +3677,20 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			return failure(request, "REGISTRY_RELOAD_FAILED", err)
 		}
 		return success(request, map[string]string{"status": "reloaded"})
+	case "project.remove":
+		var p struct {
+			Project string `json:"project"`
+		}
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Project == "" {
+			if err == nil {
+				err = errors.New("project is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		if err := d.removeProjectState(ctx, p.Project); err != nil {
+			return failure(request, "PROJECT_REMOVE_FAILED", err)
+		}
+		return success(request, map[string]string{"status": "removed", "project": p.Project})
 	case "config.plan":
 		var p struct {
 			Project string `json:"project"`

@@ -448,6 +448,12 @@ func (s *Scheduler) GetExecution(ctx context.Context, runID string) (Execution, 
 	return store.GetExecution(ctx, runID)
 }
 
+// HistoryRepository returns the scheduler's current persistence boundary.
+// Daemon lifecycle code uses it for project-scoped cleanup.
+func (s *Scheduler) HistoryRepository() HistoryRepository {
+	return s.executionStore()
+}
+
 func (s *Scheduler) ListExecutions(ctx context.Context, query ExecutionQuery) ([]Execution, error) {
 	store := s.executionStore()
 	if store == nil {

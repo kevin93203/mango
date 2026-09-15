@@ -1212,6 +1212,108 @@ func (r *Repository) ReplaceSecurityMetadata(ctx context.Context, project string
 	})
 }
 
+// DeleteProject removes all project-owned history and metadata while keeping
+// global audit entries and the database schema intact.
+func (r *Repository) DeleteProject(ctx context.Context, project string) error {
+	if strings.TrimSpace(project) == "" {
+		return errors.New("project is required")
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var runs []runModel
+		if err := tx.Where("project = ?", project).Find(&runs).Error; err != nil {
+			return err
+		}
+		runRowIDs := make([]int64, 0, len(runs))
+		runIDs := make([]string, 0, len(runs))
+		for _, run := range runs {
+			runRowIDs = append(runRowIDs, run.ID)
+			if run.RunID != "" {
+				runIDs = append(runIDs, run.RunID)
+			}
+		}
+
+		var taskRowIDs []int64
+		if len(runRowIDs) > 0 {
+			if err := tx.Model(&taskModel{}).Where("run_row_id IN ?", runRowIDs).Pluck("id", &taskRowIDs).Error; err != nil {
+				return err
+			}
+		}
+		if len(taskRowIDs) > 0 {
+			if err := tx.Where("task_row_id IN ?", taskRowIDs).Delete(&artifactModel{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("task_row_id IN ?", taskRowIDs).Delete(&attemptModel{}).Error; err != nil {
+				return err
+			}
+		}
+		if len(runRowIDs) > 0 {
+			if err := tx.Where("run_row_id IN ?", runRowIDs).Delete(&attemptModel{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_row_id IN ?", runRowIDs).Delete(&taskModel{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("id IN ?", runRowIDs).Delete(&runModel{}).Error; err != nil {
+				return err
+			}
+		}
+		if len(runIDs) > 0 {
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&webhookDeliveryModel{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("project = ?", project).Delete(&scheduleOccurrenceModel{}).Error; err != nil {
+			return err
+		}
+		observabilityEvents := tx.Where("project = ?", project)
+		if len(runIDs) > 0 {
+			observabilityEvents = observabilityEvents.Or("run_id IN ?", runIDs)
+		}
+		if err := observabilityEvents.Delete(&observabilityEventModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("project = ?", project).Delete(&secretReferenceModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("project = ?", project).Delete(&resourcePolicyModel{}).Error; err != nil {
+			return err
+		}
+		webhookDeliveries := tx.Where("webhook_key = ? OR webhook_key LIKE ? ESCAPE '\\'", project, escapeLikePattern(project)+"/%")
+		if len(runIDs) > 0 {
+			webhookDeliveries = webhookDeliveries.Or("run_id IN ?", runIDs)
+		}
+		if err := webhookDeliveries.Delete(&webhookDeliveryModel{}).Error; err != nil {
+			return err
+		}
+		var counters []counterModel
+		if err := tx.Find(&counters).Error; err != nil {
+			return err
+		}
+		for _, counter := range counters {
+			parts := strings.SplitN(counter.Key, "|", 3)
+			if len(parts) < 2 || parts[1] != project {
+				continue
+			}
+			if err := tx.Where("key = ?", counter.Key).Delete(&counterModel{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func escapeLikePattern(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "%", `\%`)
+	return strings.ReplaceAll(value, "_", `\_`)
+}
+
 func (r *Repository) AppendAudit(ctx context.Context, entry observability.AuditEntry) (observability.AuditEntry, error) {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()

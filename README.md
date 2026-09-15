@@ -947,7 +947,7 @@ mango project list [--json]
 | Command | Parameters | Description |
 | --- | --- | --- |
 | `register` | `NAME`, `PATH` | Validates and registers a `.yaml` file. The stored path is absolute. Duplicate names are rejected. |
-| `remove` | `NAME` | Removes the project from the registry. It does not delete the YAML file, application files, or logs. A running daemon unloads the project's services and execution definitions. |
+| `remove` | `NAME` | Removes the project from the registry and deletes its Mango-managed generations, logs, runtime/shim state, schedule state, execution history, events, and security metadata. It preserves the YAML file and application files. A running daemon stops active executions and unloads the project's services and execution definitions. |
 | `rename` | `OLD`, `NEW` | Re-registers the existing YAML path under a new name. It does not edit the YAML file. |
 | `plan` | `PROJECT` | Reads the current YAML and shows the deterministic plan v2 resources for services, tasks, workflows, and schedules without changing runtime or metadata state. |
 | `status` | `PROJECT` | Shows the accepted generation, reconciliation phase, readiness, last project error, and resource status. |
@@ -979,7 +979,9 @@ mango project remove staging
 ```
 
 `project register`, `remove`, and `rename` update the local registry even if the
-daemon is not running; they attempt to notify a running daemon to reload.
+daemon is not running. Remove also performs the project-state cleanup locally
+when no daemon is available; register and rename attempt to notify a running
+daemon to reload.
 
 ### `mango config validate`
 

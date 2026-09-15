@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/secrets"
 )
 
@@ -173,5 +174,40 @@ func TestRecoverDeadLeavesLiveShimStateUntouched(t *testing.T) {
 	}
 	if _, err := os.Stat(stateDir); err != nil {
 		t.Fatalf("live shim state changed: %v", err)
+	}
+}
+
+func TestRemoveProjectStateRemovesOnlyMatchingDeadShims(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{Runtime: root}
+	for _, item := range []struct {
+		serviceKey  string
+		incarnation string
+	}{
+		{serviceKey: "demo/api", incarnation: "demo-instance"},
+		{serviceKey: "other/api", incarnation: "other-instance"},
+	} {
+		stateDir := filepath.Join(root, "shims", hashKey(item.serviceKey), item.incarnation)
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSON(filepath.Join(stateDir, "bootstrap.json"), Bootstrap{
+			SchemaVersion: BootstrapSchemaVersion, ProtocolVersion: ProtocolVersion,
+			ServiceKey: item.serviceKey, InstanceID: item.serviceKey, Incarnation: item.incarnation,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSON(filepath.Join(stateDir, "status.json"), Status{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RemoveProjectState(context.Background(), layout, "demo", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "shims", hashKey("demo/api"), "demo-instance")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("demo shim state stat = %v, want removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "shims", hashKey("other/api"), "other-instance")); err != nil {
+		t.Fatalf("other shim state stat = %v, want retained", err)
 	}
 }

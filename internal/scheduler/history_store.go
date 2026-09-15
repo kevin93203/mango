@@ -45,6 +45,7 @@ type HistoryRepository interface {
 	ListAudit(context.Context, int) ([]observability.AuditEntry, error)
 	PruneEvents(context.Context, int) error
 	ReplaceSecurityMetadata(context.Context, string, []observability.SecretReferenceMetadata, []observability.ResourcePolicyMetadata) error
+	DeleteProject(context.Context, string) error
 	Record(context.Context, Record, int) error
 	BeginExecution(context.Context, Record, string, uint64) (Execution, bool, error)
 	GetExecution(context.Context, string) (Execution, error)
@@ -120,6 +121,59 @@ func (r *memoryHistoryRepository) PruneEvents(_ context.Context, limit int) erro
 }
 
 func (r *memoryHistoryRepository) ReplaceSecurityMetadata(_ context.Context, _ string, _ []observability.SecretReferenceMetadata, _ []observability.ResourcePolicyMetadata) error {
+	return nil
+}
+
+func (r *memoryHistoryRepository) DeleteProject(_ context.Context, project string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	runIDs := make(map[string]struct{})
+	for runID, execution := range r.executions {
+		if execution.Record.Project != project {
+			continue
+		}
+		runIDs[runID] = struct{}{}
+		delete(r.executions, runID)
+	}
+	keptRecords := r.records[:0]
+	for _, record := range r.records {
+		if record.Project == project {
+			runIDs[record.RunID] = struct{}{}
+			continue
+		}
+		keptRecords = append(keptRecords, record)
+	}
+	r.records = keptRecords
+	for runID := range runIDs {
+		delete(r.events, runID)
+	}
+	for key, delivery := range r.webhookDeliveries {
+		if _, ok := runIDs[delivery.RunID]; ok || delivery.WebhookKey == project || strings.HasPrefix(delivery.WebhookKey, project+"/") {
+			delete(r.webhookDeliveries, key)
+		}
+	}
+	for id, occurrence := range r.occurrences {
+		if occurrence.Project == project {
+			delete(r.occurrences, id)
+		}
+	}
+	for key := range r.counters {
+		parts := strings.SplitN(key, "|", 3)
+		if len(parts) >= 2 && parts[1] == project {
+			delete(r.counters, key)
+		}
+	}
+	keptEvents := r.observabilityEvents[:0]
+	for _, event := range r.observabilityEvents {
+		if event.Project != project {
+			if _, ok := runIDs[event.RunID]; ok {
+				continue
+			}
+			keptEvents = append(keptEvents, event)
+		}
+	}
+	r.observabilityEvents = keptEvents
 	return nil
 }
 

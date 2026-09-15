@@ -20,6 +20,8 @@ import (
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
+	"github.com/kevin93203/mango/internal/generation"
+	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
@@ -962,6 +964,94 @@ func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
 	}
 	if _, ok := reg.Projects["demo"]; ok {
 		t.Fatal("project demo remains registered after removal")
+	}
+}
+
+func TestProjectRemoveClearsOfflineProjectState(t *testing.T) {
+	root := t.TempDir()
+	layout := paths.Layout{
+		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
+		State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"),
+		ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+		DaemonConfig: filepath.Join(root, "daemon.yaml"), SocketPath: filepath.Join(root, "runtime", "mango.sock"),
+	}
+	configPath := filepath.Join(root, "demo.yaml")
+	if err := os.WriteFile(configPath, []byte("version: 4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
+		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(layout.Generations, "demo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(generation.SnapshotPath(layout.State, "demo", 7), []byte("snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(layout.Logs, "demo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.Logs, "demo", "api.log"), []byte("log"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.ScheduleState), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.ScheduleState, []byte("{\"version\":1,\"disabled\":[\"demo/nightly\",\"other/nightly\"]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Record(context.Background(), scheduler.Record{RunID: "demo-run", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: time.Unix(1, 0), Finished: time.Unix(2, 0)}, 0); err != nil {
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	if err := repository.Record(context.Background(), scheduler.Record{RunID: "other-run", Project: "other", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: time.Unix(1, 0), Finished: time.Unix(2, 0)}, 0); err != nil {
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ipc.SetEndpoint(filepath.Join(root, "missing.sock"))
+	t.Cleanup(func() { ipc.SetEndpoint("") })
+	if err := projectRemoveCommand(layout, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(layout.Generations, "demo")); !os.IsNotExist(err) {
+		t.Fatalf("generation directory stat = %v, want removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(layout.Logs, "demo")); !os.IsNotExist(err) {
+		t.Fatalf("log directory stat = %v, want removed", err)
+	}
+	scheduleData, err := os.ReadFile(layout.ScheduleState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(scheduleData), "demo/") || !strings.Contains(string(scheduleData), "other/nightly") {
+		t.Fatalf("schedule state = %s, want only other project", scheduleData)
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("project YAML was removed: %v", err)
+	}
+	repository, err = history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	if records, err := repository.Query(context.Background(), scheduler.HistoryQuery{Project: "demo"}); err != nil || len(records) != 0 {
+		t.Fatalf("demo history = %+v, err=%v; want empty", records, err)
+	}
+	if records, err := repository.Query(context.Background(), scheduler.HistoryQuery{Project: "other"}); err != nil || len(records) != 1 {
+		t.Fatalf("other history = %+v, err=%v; want one record", records, err)
+	}
+	if err := projectRemoveCommand(layout, "demo"); err != nil {
+		t.Fatalf("repeat project remove = %v", err)
 	}
 }
 
