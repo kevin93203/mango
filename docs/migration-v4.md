@@ -34,9 +34,10 @@ mango list
 mango down
 ```
 
-`mango up` reads `./mango.yaml` by default. Use `--file PATH` for another file
-and `--project NAME` to override the resolved name. The resolution order
-is `--project`, YAML `name`, then the YAML directory name.
+`mango up` reads `./mango.yaml` by default. Use `--file PATH` for another file.
+With only `--project NAME`, it uses that registered project's config path; with
+both flags, an already registered project must match the file. Otherwise, the
+resolution order is YAML `name`, then the YAML directory name.
 
 In the Stage 3 major release, use `mango project register`; the older project
 registration spelling returns a migration error. `project apply/plan/status/rollback`

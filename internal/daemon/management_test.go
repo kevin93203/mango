@@ -119,7 +119,9 @@ func TestProjectUpAndDownPersistScheduleState(t *testing.T) {
 	if !state["demo/nightly"] {
 		t.Fatalf("schedule state after down = %#v, want demo/nightly disabled", state)
 	}
-	if response := d.Handle(context.Background(), requestForMethodWithParams(t, "project.up", params)); !response.OK {
+	if response := d.Handle(context.Background(), requestForMethodWithParams(t, "project.up", struct {
+		Project string `json:"project"`
+	}{Project: "demo"})); !response.OK {
 		t.Fatalf("project.up failed: %+v", response.Error)
 	}
 	state, err = loadScheduleState(layout.ScheduleState)

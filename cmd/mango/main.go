@@ -466,16 +466,20 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 			return err
 		}
 	}
-	path, err := composeConfigPath(options.File)
-	if err != nil {
-		return err
+	path := ""
+	if options.File != "" || options.Project == "" {
+		var err error
+		path, err = composeConfigPath(options.File)
+		if err != nil {
+			return err
+		}
 	}
 	if err := ensureDaemon(layout, options.NoDaemon); err != nil {
 		return err
 	}
 	response, err := call("project.up", struct {
 		Project    string `json:"project,omitempty"`
-		ConfigPath string `json:"config_path"`
+		ConfigPath string `json:"config_path,omitempty"`
 	}{Project: options.Project, ConfigPath: path})
 	if err != nil {
 		return err

@@ -172,6 +172,16 @@ func tailDaemonLogData(data []byte, lines int) []byte {
 }
 
 func (d *Daemon) UpProject(projectName, configPath string) (api.ApplyResult, error) {
+	if configPath == "" {
+		_, project, registered, err := d.resolveProjectTarget(projectName, "")
+		if err != nil {
+			return api.ApplyResult{}, err
+		}
+		if !registered {
+			return api.ApplyResult{}, fmt.Errorf("project %q is not registered", projectName)
+		}
+		configPath = project.ConfigPath
+	}
 	loaded, err := config.Load(configPath)
 	if err != nil {
 		return api.ApplyResult{}, err

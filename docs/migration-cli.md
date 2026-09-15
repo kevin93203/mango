@@ -57,7 +57,7 @@ Use these commands in README examples, CI, packages, and new scripts:
 
 ```text
 mango init [PATH]
-mango up [--file PATH]
+mango up [--project PROJECT] [--file PATH]
 mango down [--project PROJECT] [--file PATH]
 mango list [PROJECT]
 mango status PROJECT/SERVICE

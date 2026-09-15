@@ -139,8 +139,9 @@ for the project to become ready:
 ```
 
 In Windows PowerShell, replace `./bin/mango` with `.\bin\mango.exe`.
-The default file is `./mango.yaml`; use `--file PATH` for another file and
-`--project NAME` to override the project name.
+The default file is `./mango.yaml`; use `--file PATH` for another file.
+With only `--project NAME`, Mango uses that registered project's config path;
+if the project is already registered, `--file PATH` must match its path.
 
 Inspect the sample service and its logs:
 
@@ -216,9 +217,11 @@ mango list [PROJECT]
 mango down [--project NAME] [--file PATH]
 ```
 
-With no `--file`, Mango reads `./mango.yaml`. Project resolution is
-`--project`, then YAML `name`, then the YAML directory name. `up` starts the
-daemon when needed, registers or updates the project, applies the
+Without `--project`, Mango reads `./mango.yaml` (or `--file PATH`) and resolves
+the project from YAML `name`, then the YAML directory name. With only
+`--project`, it uses the registered project's config path; an already
+registered project must match `--file PATH` when both are supplied. `up` starts
+the daemon when needed, registers or updates the project, applies the
 configuration, enables schedules, starts autostart services, and waits up to
 60 seconds for readiness. If the effective configuration is unchanged, apply
 reuses the current generation and does not restart services. A readiness

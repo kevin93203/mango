@@ -3671,9 +3671,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		return success(request, result)
 	case "project.up":
 		var p projectTargetRequest
-		if err := json.Unmarshal(request.Params, &p); err != nil || p.ConfigPath == "" {
+		if err := json.Unmarshal(request.Params, &p); err != nil || (p.Project == "" && p.ConfigPath == "") {
 			if err == nil {
-				err = errors.New("config_path is required")
+				err = errors.New("project or config_path is required")
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
