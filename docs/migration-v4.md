@@ -34,8 +34,8 @@ mango list
 mango down
 ```
 
-`mango up` reads `./mango.yaml` by default. Use positional `PATH` (or the
-compatibility `--file PATH`) for another file and `--project NAME` to override the resolved name. The resolution order
+`mango up` reads `./mango.yaml` by default. Use `--file PATH` for another file
+and `--project NAME` to override the resolved name. The resolution order
 is `--project`, YAML `name`, then the YAML directory name.
 
 In the Stage 3 major release, use `mango project register`; the older project

@@ -139,8 +139,7 @@ for the project to become ready:
 ```
 
 In Windows PowerShell, replace `./bin/mango` with `.\bin\mango.exe`.
-The default file is `./mango.yaml`; pass `PATH` to `up` for another file.
-`--file PATH` remains a compatibility form, and
+The default file is `./mango.yaml`; use `--file PATH` for another file and
 `--project NAME` to override the project name.
 
 Inspect the sample service and its logs:
@@ -212,9 +211,9 @@ schedules:
 ### Compose-like project lifecycle
 
 ```text
-mango up [PATH] [--project NAME] [--file PATH] [--no-daemon] [--wait]
+mango up [--project NAME] [--file PATH] [--no-daemon] [--wait]
 mango list [PROJECT]
-mango down [PROJECT] [--project NAME] [--file PATH]
+mango down [--project NAME] [--file PATH]
 ```
 
 With no `--file`, Mango reads `./mango.yaml`. Project resolution is
@@ -381,9 +380,9 @@ services.
 ### Services
 
 ```sh
-mango up [PATH] [--project NAME] [--file PATH] [--no-daemon] [--wait]
+mango up [--project NAME] [--file PATH] [--no-daemon] [--wait]
 mango list [PROJECT]
-mango down [PROJECT] [--project NAME] [--file PATH]
+mango down [--project NAME] [--file PATH]
 mango status PROJECT/SERVICE
 mango start PROJECT/SERVICE
 mango stop PROJECT/SERVICE

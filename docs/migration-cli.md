@@ -47,9 +47,9 @@ not change the registry, generations, logs, history, or run references.
 | `mango history show REF` | `mango runs show REF` | The canonical command also accepts active runs. |
 | `mango history purge ...` / `clear` | `mango runs prune ...` | `--yes` remains required; only terminal metadata is pruned. |
 
-`mango up --file PATH` and `mango down --project PROJECT` remain accepted
-compatibility flag forms. New scripts should use `mango up PATH` and
-`mango down PROJECT`.
+`mango up --file PATH` remains available for selecting another config file.
+`mango up` and `mango down` no longer accept positional paths or project names;
+use `--file PATH` and `--project PROJECT` instead.
 
 ## Canonical surface
 
@@ -57,8 +57,8 @@ Use these commands in README examples, CI, packages, and new scripts:
 
 ```text
 mango init [PATH]
-mango up [PATH]
-mango down [PROJECT]
+mango up [--file PATH]
+mango down [--project PROJECT] [--file PATH]
 mango list [PROJECT]
 mango status PROJECT/SERVICE
 mango start TARGET [TARGET ...]

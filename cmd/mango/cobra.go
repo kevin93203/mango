@@ -200,12 +200,8 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	switch action {
 	case "up":
 		var noDaemon, wait bool
-		cmd := a.leafCmd("up [PATH]", "Start a project", cobra.MaximumNArgs(1), func(args []string) error {
-			path, err := upConfigPath(args, file)
-			if err != nil {
-				return err
-			}
-			return upCommand(a.layout, composeProjectOptions{Project: project, File: path, NoDaemon: noDaemon, Wait: wait})
+		cmd := a.actionCmd("up", "Start a project", func() error {
+			return upCommand(a.layout, composeProjectOptions{Project: project, File: file, NoDaemon: noDaemon, Wait: wait})
 		})
 		projectFlag(cmd)
 		cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "do not start mangod automatically")
@@ -214,15 +210,8 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 		cmd.GroupID = groupStart
 		return cmd
 	case "down":
-		cmd := a.leafCmd("down [PROJECT]", "Stop a project", cobra.MaximumNArgs(1), func(args []string) error {
-			if len(args) == 1 && project != "" {
-				return errors.New("down accepts PROJECT or --project, not both")
-			}
-			name := project
-			if len(args) == 1 {
-				name = args[0]
-			}
-			return downCommand(a.layout, composeProjectOptions{Project: name, File: file})
+		cmd := a.actionCmd("down", "Stop a project", func() error {
+			return downCommand(a.layout, composeProjectOptions{Project: project, File: file})
 		})
 		projectFlag(cmd)
 		a.addJSONFlag(cmd)
@@ -231,16 +220,6 @@ func (a *cliApp) composeProjectCmd(action string) *cobra.Command {
 	default:
 		return a.actionCmd(action, "", func() error { return fmt.Errorf("unsupported compose command %q", action) })
 	}
-}
-
-func upConfigPath(args []string, file string) (string, error) {
-	if len(args) == 1 && file != "" {
-		return "", errors.New("up accepts PATH or --file, not both")
-	}
-	if len(args) == 1 {
-		return args[0], nil
-	}
-	return file, nil
 }
 
 func (a *cliApp) simpleCmd(use, short string, run func() error) *cobra.Command {

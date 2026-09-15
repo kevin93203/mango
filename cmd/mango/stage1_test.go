@@ -14,36 +14,6 @@ import (
 	"github.com/kevin93203/mango/internal/paths"
 )
 
-func TestUpPathAndFileResolveSameProject(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "nested", "mango.yaml")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte("version: 4\nname: demo\nservices:\n  api:\n    command: go\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	path, err := upConfigPath([]string{configPath}, "")
-	if err != nil {
-		t.Fatalf("up PATH parsing = %v", err)
-	}
-	file, err := upConfigPath(nil, configPath)
-	if err != nil {
-		t.Fatalf("up --file parsing = %v", err)
-	}
-	if path != file {
-		t.Fatalf("PATH = %q, --file = %q", path, file)
-	}
-	if _, err := upConfigPath([]string{configPath}, configPath); err == nil {
-		t.Fatal("up accepted PATH and --file together")
-	}
-
-	if path != file {
-		t.Fatalf("normalized config paths differ: PATH=%q, --file=%q", path, file)
-	}
-}
-
 func TestEnsureDaemonStateTransitions(t *testing.T) {
 	t.Run("already running", func(t *testing.T) {
 		started := false

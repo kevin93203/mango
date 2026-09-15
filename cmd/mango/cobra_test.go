@@ -619,6 +619,47 @@ func TestCobraUpExposesWaitFlag(t *testing.T) {
 	if up.Flag("wait") == nil {
 		t.Fatal("up --wait flag missing")
 	}
+	if up.Use != "up" {
+		t.Fatalf("up usage = %q, want no positional PATH", up.Use)
+	}
+	if up.Flag("file") == nil {
+		t.Fatal("up --file flag missing")
+	}
+
+	app, output := newTestRoot(t)
+	root = app.rootCommand()
+	root.SetArgs([]string{"up", "config.yaml"})
+	if err := root.Execute(); err == nil || !commandErrorWasShown(err) {
+		t.Fatalf("mango up PATH error = %v, want usage error", err)
+	}
+	if !strings.Contains(output.String(), "Usage:") {
+		t.Fatalf("mango up PATH output = %q, want command usage", output.String())
+	}
+}
+
+func TestCobraDownUsesProjectFlagOnly(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	down, _, err := root.Find([]string{"down"})
+	if err != nil || down == root {
+		t.Fatalf("down command missing: command=%v err=%v", down, err)
+	}
+	if down.Use != "down" {
+		t.Fatalf("down usage = %q, want no positional PROJECT", down.Use)
+	}
+	if down.Flag("project") == nil {
+		t.Fatal("down --project flag missing")
+	}
+
+	app, output := newTestRoot(t)
+	root = app.rootCommand()
+	root.SetArgs([]string{"down", "demo"})
+	if err := root.Execute(); err == nil || !commandErrorWasShown(err) {
+		t.Fatalf("mango down PROJECT error = %v, want usage error", err)
+	}
+	if !strings.Contains(output.String(), "Usage:") {
+		t.Fatalf("mango down PROJECT output = %q, want command usage", output.String())
+	}
 }
 
 func TestCobraRequiredArgumentCommandsPrintUsageAndFail(t *testing.T) {
