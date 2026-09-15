@@ -92,9 +92,9 @@ func TestDownPreservesProjectDataForExplicitAndCurrentDirectory(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			configPath := filepath.Join(root, "mango.yaml")
 
 			var workingDir string
+			var expectedConfigPath string
 			var err error
 			if test.currentDir {
 				workingDir, err = os.Getwd()
@@ -102,6 +102,10 @@ func TestDownPreservesProjectDataForExplicitAndCurrentDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := os.Chdir(root); err != nil {
+					t.Fatal(err)
+				}
+				expectedConfigPath, err = filepath.Abs("mango.yaml")
+				if err != nil {
 					t.Fatal(err)
 				}
 				defer os.Chdir(workingDir)
@@ -128,8 +132,8 @@ func TestDownPreservesProjectDataForExplicitAndCurrentDirectory(t *testing.T) {
 				if request.Project != options.Project {
 					t.Fatalf("project = %q, want %q", request.Project, options.Project)
 				}
-				if test.currentDir && request.ConfigPath != configPath {
-					t.Fatalf("config path = %q, want %q", request.ConfigPath, configPath)
+				if test.currentDir && request.ConfigPath != expectedConfigPath {
+					t.Fatalf("config path = %q, want %q", request.ConfigPath, expectedConfigPath)
 				}
 				if !test.currentDir && request.ConfigPath != "" {
 					t.Fatalf("explicit project sent config path %q, want empty", request.ConfigPath)
