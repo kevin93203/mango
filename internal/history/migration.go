@@ -706,7 +706,7 @@ func markMigrationFailed(path string, marker migrationMarker, migrationErr error
 }
 
 // InspectSQLiteMigration reads migration state without running migrations.
-// It is used by mango doctor when the daemon cannot start.
+// It is used by the daemon's doctor report.
 func InspectSQLiteMigration(path string) (MigrationStatus, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {

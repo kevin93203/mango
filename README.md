@@ -52,7 +52,7 @@ Mango has a small client/daemon architecture:
 ```text
                     local IPC
   mango CLI  -------------------------->  mangod
-     |                                      |
+     |                                      +-- project registry/YAML
      |                                      +-- config/dependencies/health
      |                                      +-- task/workflow executor
      |                                      +-- cron scheduler
@@ -61,13 +61,13 @@ Mango has a small client/daemon architecture:
      |                                      mango-shim (one per shim service)
      |                                             |
      |                                      service process tree + logs
-     |
-     +-- project registry and YAML configuration
 ```
 
-- `mango` is the command-line client.
+- `mango` is the command-line client: it validates command arguments, sends
+  IPC requests, and renders responses.
 - `mangod` is the background daemon. It owns configuration, dependencies,
-  health, tasks, workflows, schedules, and reconciliation.
+  project registry, generations, runtime state, health, tasks, workflows,
+  schedules, and reconciliation.
 - `mango-shim` is a small per-service supervisor used when a service opts into
   `supervisor: shim`. It owns that service's process tree, logs, restart policy,
   and durable state independently of `mangod`.
@@ -367,9 +367,10 @@ mango project rename OLD NEW
 mango project remove NAME
 ```
 
-`project register` stores the absolute YAML path in the registry. It does not copy
-or modify the configuration file. `project plan` explicitly reads the YAML and
-previews the changes. `project apply` accepts a validated and compiled desired
+`project register` asks the daemon to store the absolute YAML path in the
+registry. It does not copy or modify the configuration file. `project plan`
+asks the daemon to read the YAML and preview the changes. `project apply` accepts
+a validated and compiled desired
 snapshot when the effective configuration changes, then reconciles the daemon
 in the background. An unchanged effective configuration reuses the current
 generation. Use `project status` to inspect convergence; `--wait` waits for
@@ -909,7 +910,7 @@ mango daemon logs [--tail N] [--follow] [--json]
 | `stop` | `--json` | Requests a graceful daemon shutdown. |
 | `restart` | `--json` | Stops the daemon, waits for the IPC endpoint to close, then starts it again. |
 | `status` | `--json` | Shows daemon status, PID, API version, and project configuration errors. A stopped daemon is reported as `stopped`. |
-| `logs` | `--tail N`, `--follow`, `--json` | Reads the local daemon log without requiring a running daemon. JSON returns log lines without display prefixes; `--json` cannot be combined with `--follow`. |
+| `logs` | `--tail N`, `--follow`, `--json` | Requests daemon log data through the daemon API. The daemon must be running. JSON returns log lines without display prefixes; `--json` cannot be combined with `--follow`. |
 
 `daemon logs` defaults to the last 100 lines. `--tail 0` prints the complete
 daemon log. `--follow` prints the initial tail and then waits for new lines;
@@ -978,10 +979,10 @@ mango project rename demo staging
 mango project remove staging
 ```
 
-`project register`, `remove`, and `rename` update the local registry even if the
-daemon is not running. Remove also performs the project-state cleanup locally
-when no daemon is available; register and rename attempt to notify a running
-daemon to reload.
+`project register`, `remove`, and `rename` are daemon-owned lifecycle operations
+and require the daemon. The CLI sends the requested mutation over IPC; the
+daemon updates the registry, runtime, schedules, generations, and other managed
+state.
 
 ### `mango config validate`
 
@@ -989,8 +990,9 @@ daemon to reload.
 mango config validate PATH
 ```
 
-`PATH` is required and must point to a `.yaml` file. This command parses and
-validates the complete schema without starting or stopping anything. It checks
+`PATH` is required and must point to a `.yaml` file. This command asks the
+daemon to parse and validate the complete schema without starting or stopping
+anything. It checks
 version, names, required commands, duration/size formats, restart/concurrency
 values, health checks, dependencies, workflow DAGs, cron expressions, time
 zones, and schedule targets.
@@ -1398,15 +1400,13 @@ mango startup uninstall
 mango doctor [--json]
 ```
 
-Checks and prints grouped environment, database, and daemon diagnostics,
+Requests grouped environment, database, and daemon diagnostics from the daemon,
 including the `daemon.yaml` and `state/schedules.json` paths. The database
 connection and history schema statuses are based on the connection currently
 used by the daemon. It also shows safe connection metadata such as connection
 type, host, database, login, and port; passwords and extra DSN options are
-never returned. If the daemon is unavailable, those statuses are `unknown`;
-configured paths alone are not treated as proof that the Mango service can
-read or write history. It is useful when a daemon cannot start or a project is
-missing from the service list.
+never returned. The command reports an IPC error when the daemon is unavailable;
+configured paths are not inspected by the CLI.
 
 ```sh
 mango doctor
@@ -1610,7 +1610,8 @@ For SQLite, omitting `path` uses `MANGO_HOME/state/history.db`. Existing
 imported or read.
 
 If a metadata migration fails, do not delete or edit the database. Keep the
-daemon stopped and run `mango doctor --json`. The migration marker identifies
+daemon stopped and inspect the daemon log and migration marker directly; after
+the daemon can start, run `mango doctor --json`. The migration marker identifies
 the verified backup and the last error. A consistent `running` or `failed`
 marker can be retried; a checksum mismatch or inconsistent marker is blocked
 until the operator restores the marker's backup. PostgreSQL and MySQL require
@@ -1733,8 +1734,9 @@ for version, commit, and build date. Product SemVer major versions are not
 startup gates yet; IPC, shim, YAML, and metadata schema compatibility are.
 
 Before upgrading, read [the migration guide](docs/release/migration.md). If a
-database migration fails, keep the daemon stopped and use `mango doctor --json`
-to inspect the marker and verified backup. Configuration rollback is
+database migration fails, keep the daemon stopped and inspect the marker and
+verified backup directly; use `mango doctor --json` after the daemon can start.
+Configuration rollback is
 documented separately in [the rollback guide](docs/release/rollback.md) and
 does not downgrade the database. The full operator checklist is in
 [docs/release/checklist.md](docs/release/checklist.md), with the contract in

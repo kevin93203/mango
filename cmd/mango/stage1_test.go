@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,10 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kevin93203/mango/internal/cliui"
+	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
-	"github.com/kevin93203/mango/internal/registry"
 )
 
 func TestUpPathAndFileResolveSameProject(t *testing.T) {
@@ -40,16 +39,8 @@ func TestUpPathAndFileResolveSameProject(t *testing.T) {
 		t.Fatal("up accepted PATH and --file together")
 	}
 
-	pathLoaded, pathName, err := resolveUpConfig(composeProjectOptions{File: path})
-	if err != nil {
-		t.Fatalf("up PATH resolution = %v", err)
-	}
-	fileLoaded, fileName, err := resolveUpConfig(composeProjectOptions{File: file})
-	if err != nil {
-		t.Fatalf("up --file PATH resolution = %v", err)
-	}
-	if pathName != fileName || pathLoaded.Path != fileLoaded.Path || pathLoaded.Version != fileLoaded.Version {
-		t.Fatalf("PATH resolution = (%q, %q, %d), --file resolution = (%q, %q, %d)", pathName, pathLoaded.Path, pathLoaded.Version, fileName, fileLoaded.Path, fileLoaded.Version)
+	if path != file {
+		t.Fatalf("normalized config paths differ: PATH=%q, --file=%q", path, file)
 	}
 }
 
@@ -132,49 +123,6 @@ func TestDownPreservesProjectDataForExplicitAndCurrentDirectory(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			configPath := filepath.Join(root, "mango.yaml")
-			if err := os.WriteFile(configPath, []byte("version: 4\nname: demo\nservices:\n  api:\n    command: go\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			layout := paths.Layout{
-				Root:       root,
-				Registry:   filepath.Join(root, "projects.json"),
-				SocketPath: filepath.Join(root, "runtime", "missing.sock"),
-			}
-			if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
-				"demo": {
-					Name: "demo", ConfigPath: configPath, Enabled: true, ConfigVersion: 4,
-					ConfigurationGeneration: 7,
-					DesiredStatePath:        filepath.Join(root, "state", "generations", "7.json"),
-				},
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			retained := []string{
-				filepath.Join(root, "logs", "demo", "api.log"),
-				filepath.Join(root, "state", "generations", "7.json"),
-				filepath.Join(root, "state", "history.db"),
-			}
-			for _, path := range retained {
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("keep\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := os.Stat(configPath); err != nil {
-				t.Fatal(err)
-			}
-
-			previousOutput, previousJSON := cliOutput, jsonOutput
-			defer func() {
-				cliOutput, jsonOutput = previousOutput, previousJSON
-				ipc.SetEndpoint("")
-			}()
-			var output bytes.Buffer
-			cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
-			jsonOutput = false
-			ipc.SetEndpoint(layout.SocketPath)
 
 			var workingDir string
 			var err error
@@ -192,31 +140,33 @@ func TestDownPreservesProjectDataForExplicitAndCurrentDirectory(t *testing.T) {
 			if test.currentDir {
 				options = composeProjectOptions{}
 			}
-			if err := downCommandWithCaller(layout, options, func(method string, _ interface{}, _ time.Duration) (ipc.Response, error) {
-				if method == "project.reload" {
-					return ipc.Response{}, ipc.ErrDaemonUnavailable
+			if err := downCommandWithCaller(paths.Layout{}, options, func(method string, params interface{}, _ time.Duration) (ipc.Response, error) {
+				if method != "project.down" {
+					t.Fatalf("method = %q, want project.down", method)
 				}
-				return ipc.Response{}, nil
+				var request struct {
+					Project    string `json:"project"`
+					ConfigPath string `json:"config_path"`
+				}
+				encoded, err := json.Marshal(params)
+				if err != nil {
+					return ipc.Response{}, err
+				}
+				if err := json.Unmarshal(encoded, &request); err != nil {
+					return ipc.Response{}, err
+				}
+				if request.Project != options.Project {
+					t.Fatalf("project = %q, want %q", request.Project, options.Project)
+				}
+				if test.currentDir && request.ConfigPath != configPath {
+					t.Fatalf("config path = %q, want %q", request.ConfigPath, configPath)
+				}
+				if !test.currentDir && request.ConfigPath != "" {
+					t.Fatalf("explicit project sent config path %q, want empty", request.ConfigPath)
+				}
+				return ipc.Response{Data: api.ProjectMutationResult{Project: "demo", Status: "disabled"}}, nil
 			}); err != nil {
 				t.Fatalf("down = %v", err)
-			}
-
-			reg, err := registry.Load(layout.Registry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			project := reg.Projects["demo"]
-			if project.Enabled || project.ConfigurationGeneration != 7 || project.DesiredStatePath == "" {
-				t.Fatalf("project after down = %+v, want disabled with generation metadata retained", project)
-			}
-			for _, path := range retained {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatalf("retained path %s missing: %v", path, err)
-				}
-				if string(data) != "keep\n" {
-					t.Fatalf("retained path %s changed to %q", path, data)
-				}
 			}
 		})
 	}

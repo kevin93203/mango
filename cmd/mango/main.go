@@ -19,15 +19,11 @@ import (
 
 	mango "github.com/kevin93203/mango"
 	"github.com/kevin93203/mango/internal/api"
-	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
-	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/ipc"
-	"github.com/kevin93203/mango/internal/logging"
 	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
-	"github.com/kevin93203/mango/internal/projectstate"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/runref"
@@ -235,6 +231,7 @@ type daemonLogsOptions struct {
 }
 
 func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
+	_ = layout
 	if jsonOutput {
 		return rejectJSON("daemon logs")
 	}
@@ -242,6 +239,11 @@ func daemonLogsCommand(layout paths.Layout, options daemonLogsOptions) error {
 }
 
 func daemonLogsCommandWithContext(ctx context.Context, layout paths.Layout, options daemonLogsOptions) error {
+	_ = layout
+	return daemonLogsCommandWithCaller(ctx, options, logsCall)
+}
+
+func daemonLogsCommandWithCaller(ctx context.Context, options daemonLogsOptions, caller logsCaller) error {
 	if options.Tail < 0 {
 		return errors.New("daemon logs tail must be non-negative")
 	}
@@ -249,13 +251,20 @@ func daemonLogsCommandWithContext(ctx context.Context, layout paths.Layout, opti
 		if jsonOutput {
 			return errors.New("--json is not supported with daemon logs --follow; use daemon logs without --follow")
 		}
-		return followDaemonLogsWithContext(ctx, layout.DaemonLog, options.Tail)
+		return followDaemonLogsWithCallerContext(ctx, options.Tail, caller)
 	}
-
-	lines, _, err := readDaemonLogSnapshot(layout.DaemonLog, options.Tail)
+	response, err := caller(ctx, "daemon.logs.read", struct {
+		Tail   int   `json:"tail"`
+		Offset int64 `json:"offset"`
+	}{Tail: options.Tail, Offset: -1})
 	if err != nil {
 		return fmt.Errorf("read daemon log: %w", err)
 	}
+	var chunk api.DaemonLogChunk
+	if err := decodeData(response.Data, &chunk); err != nil {
+		return err
+	}
+	lines := splitDaemonLogLines(chunk.Data)
 	if jsonOutput {
 		return cliOutput.JSON(lines)
 	}
@@ -264,37 +273,6 @@ func daemonLogsCommandWithContext(ctx context.Context, layout paths.Layout, opti
 		writer.write(line)
 	}
 	return nil
-}
-
-func readDaemonLogSnapshot(path string, tail int) ([]string, int64, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, 0, nil
-	}
-	if err != nil {
-		return nil, 0, err
-	}
-	offset := int64(len(data))
-	if tail > 0 {
-		data = tailDaemonLogData(data, tail)
-	}
-	return splitDaemonLogLines(string(data)), offset, nil
-}
-
-func tailDaemonLogData(data []byte, lines int) []byte {
-	if lines <= 0 || len(data) == 0 {
-		return data
-	}
-	starts := []int{0}
-	for i, value := range data {
-		if value == '\n' && i+1 < len(data) {
-			starts = append(starts, i+1)
-		}
-	}
-	if len(starts) <= lines {
-		return data
-	}
-	return data[starts[len(starts)-lines]:]
 }
 
 func splitDaemonLogLines(data string) []string {
@@ -309,28 +287,46 @@ func splitDaemonLogLines(data string) []string {
 	return lines
 }
 
-type daemonLogReader func(path string, offset int64, maxBytes int) (string, int64, error)
+type daemonLogReader func(offset int64, maxBytes int, tail int) (string, int64, error)
 
-func followDaemonLogsWithContext(ctx context.Context, path string, tail int) error {
-	writer := newDaemonLogWriter()
-	return followDaemonLogsWithReaderContext(ctx, path, tail, logging.ReadSince, writer.write, waitForDaemonLogFollowInterval)
+func followDaemonLogsWithContext(ctx context.Context, tail int) error {
+	return followDaemonLogsWithCallerContext(ctx, tail, logsCall)
 }
 
-func followDaemonLogsWithReader(path string, tail int, read daemonLogReader, emit func(string), wait func()) error {
-	return followDaemonLogsWithReaderContext(context.Background(), path, tail, read, emit, func(context.Context) {
+func followDaemonLogsWithCallerContext(ctx context.Context, tail int, caller logsCaller) error {
+	writer := newDaemonLogWriter()
+	return followDaemonLogsWithReaderContext(ctx, tail, func(offset int64, maxBytes int, initialTail int) (string, int64, error) {
+		response, err := caller(ctx, "daemon.logs.read", struct {
+			Tail     int   `json:"tail"`
+			Offset   int64 `json:"offset"`
+			MaxBytes int   `json:"max_bytes"`
+		}{Tail: initialTail, Offset: offset, MaxBytes: maxBytes})
+		if err != nil {
+			return "", offset, err
+		}
+		var chunk api.DaemonLogChunk
+		if err := decodeData(response.Data, &chunk); err != nil {
+			return "", offset, err
+		}
+		return chunk.Data, chunk.NextOffset, nil
+	}, writer.write, waitForDaemonLogFollowInterval)
+}
+
+func followDaemonLogsWithReader(tail int, read daemonLogReader, emit func(string), wait func()) error {
+	return followDaemonLogsWithReaderContext(context.Background(), tail, read, emit, func(context.Context) {
 		wait()
 	})
 }
 
-func followDaemonLogsWithReaderContext(ctx context.Context, path string, tail int, read daemonLogReader, emit func(string), wait func(context.Context)) error {
-	lines, offset, err := readDaemonLogSnapshot(path, tail)
+func followDaemonLogsWithReaderContext(ctx context.Context, tail int, read daemonLogReader, emit func(string), wait func(context.Context)) error {
+	data, offset, err := read(-1, 64<<10, tail)
 	if err != nil {
 		return fmt.Errorf("read daemon log: %w", err)
 	}
 	if ctx.Err() != nil {
 		return nil
 	}
-	for _, line := range lines {
+	for _, line := range splitDaemonLogLines(data) {
 		emit(line)
 	}
 
@@ -340,7 +336,7 @@ func followDaemonLogsWithReaderContext(ctx context.Context, path string, tail in
 			buffer.flush(emit)
 			return nil
 		}
-		data, nextOffset, err := read(path, offset, 64<<10)
+		data, nextOffset, err := read(offset, 64<<10, 0)
 		if err != nil {
 			buffer.flush(emit)
 			if ctx.Err() != nil {
@@ -464,52 +460,23 @@ func composeConfigPath(value string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func sameConfigPath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	if leftErr != nil || rightErr != nil {
-		return filepath.Clean(left) == filepath.Clean(right)
-	}
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
-	}
-	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
-}
-
 func upCommand(layout paths.Layout, options composeProjectOptions) error {
-	loaded, projectName, err := resolveUpConfig(options)
-	if err != nil {
-		return err
-	}
-	reg, err := registry.Load(layout.Registry)
-	if err != nil {
-		return err
-	}
-	if existing, ok := reg.Projects[projectName]; ok {
-		if !sameConfigPath(existing.ConfigPath, loaded.Path) {
-			return fmt.Errorf("project %q is already registered to %s; use another --project name", projectName, existing.ConfigPath)
+	if options.Project != "" {
+		if err := config.ValidateProjectName(options.Project); err != nil {
+			return err
 		}
-		existing.Name = projectName
-		existing.ConfigPath = loaded.Path
-		existing.ConfigVersion = loaded.Version
-		existing.Enabled = true
-		reg.Projects[projectName] = existing
+	}
+	path, err := composeConfigPath(options.File)
+	if err != nil {
+		return err
 	}
 	if err := ensureDaemon(layout, options.NoDaemon); err != nil {
 		return err
 	}
-	if _, ok := reg.Projects[projectName]; !ok {
-		reg.Projects[projectName] = registry.Project{
-			Name: projectName, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
-		}
-	}
-	if err := registry.Save(layout.Registry, reg); err != nil {
-		return err
-	}
-	if _, err := call("project.reload", nil); err != nil {
-		return err
-	}
-	response, err := call("config.apply", struct{ Project string }{projectName})
+	response, err := call("project.up", struct {
+		Project    string `json:"project,omitempty"`
+		ConfigPath string `json:"config_path"`
+	}{Project: options.Project, ConfigPath: path})
 	if err != nil {
 		return err
 	}
@@ -518,51 +485,25 @@ func upCommand(layout paths.Layout, options composeProjectOptions) error {
 		return err
 	}
 	if !options.Wait {
-		if len(loaded.Schedules) > 0 {
-			if err := setProjectSchedules(projectName, "enable"); err != nil {
-				return err
-			}
-		}
 		if jsonOutput {
 			return cliOutput.JSON(result)
 		}
 		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s accepted as generation %d", result.Project, result.Generation)))
 		return nil
 	}
-	status, err := waitForProjectGenerationWithTimeout(projectName, result.Generation, 60*time.Second)
+	status, err := waitForProjectGenerationWithTimeout(result.Project, result.Generation, 60*time.Second)
 	if err != nil {
 		return err
-	}
-	if len(loaded.Schedules) > 0 {
-		if err := setProjectSchedules(projectName, "enable"); err != nil {
-			return err
-		}
 	}
 	if jsonOutput {
 		return cliOutput.JSON(struct {
 			Project    string `json:"project"`
 			Generation uint64 `json:"generation"`
 			Status     string `json:"status"`
-		}{Project: projectName, Generation: status.Generation, Status: status.Phase})
+		}{Project: result.Project, Generation: status.Generation, Status: status.Phase})
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s is ready at generation %d", projectName, status.Generation)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s is ready at generation %d", result.Project, status.Generation)))
 	return nil
-}
-
-func resolveUpConfig(options composeProjectOptions) (config.File, string, error) {
-	path, err := composeConfigPath(options.File)
-	if err != nil {
-		return config.File{}, "", err
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		return config.File{}, "", err
-	}
-	projectName, err := config.ResolveProjectName(loaded, options.Project)
-	if err != nil {
-		return config.File{}, "", err
-	}
-	return loaded, projectName, nil
 }
 
 func ensureDaemon(layout paths.Layout, noDaemon bool) error {
@@ -609,46 +550,6 @@ func (e daemonAutoStartError) Unwrap() []error {
 	return []error{ipc.ErrDaemonUnavailable, e.err}
 }
 
-func resolveRegisteredComposeTarget(layout paths.Layout, options composeProjectOptions) (string, registry.Project, bool, error) {
-	reg, err := registry.Load(layout.Registry)
-	if err != nil {
-		return "", registry.Project{}, false, err
-	}
-	path, err := composeConfigPath(options.File)
-	if err != nil {
-		return "", registry.Project{}, false, err
-	}
-	if options.Project != "" {
-		if err := config.ValidateProjectName(options.Project); err != nil {
-			return "", registry.Project{}, false, err
-		}
-		project, ok := reg.Projects[options.Project]
-		if ok && options.File != "" && !sameConfigPath(project.ConfigPath, path) {
-			return "", registry.Project{}, false, fmt.Errorf("project %q is registered to %s, not %s", options.Project, project.ConfigPath, path)
-		}
-		return options.Project, project, ok, nil
-	}
-	for name, project := range reg.Projects {
-		if sameConfigPath(project.ConfigPath, path) {
-			return name, project, true, nil
-		}
-	}
-	if loaded, loadErr := config.Load(path); loadErr == nil {
-		name, nameErr := config.ResolveProjectName(loaded, "")
-		if nameErr != nil {
-			return "", registry.Project{}, false, nameErr
-		}
-		project, ok := reg.Projects[name]
-		return name, project, ok, nil
-	}
-	name, nameErr := config.ResolveProjectName(config.File{Path: path}, "")
-	if nameErr != nil {
-		return "", registry.Project{}, false, nameErr
-	}
-	project, ok := reg.Projects[name]
-	return name, project, ok, nil
-}
-
 func downCommand(layout paths.Layout, options composeProjectOptions) error {
 	return downCommandWithCaller(layout, options, func(method string, params interface{}, timeout time.Duration) (ipc.Response, error) {
 		return callWithTimeout(method, params, timeout)
@@ -656,60 +557,69 @@ func downCommand(layout paths.Layout, options composeProjectOptions) error {
 }
 
 func downCommandWithCaller(layout paths.Layout, options composeProjectOptions, caller func(string, interface{}, time.Duration) (ipc.Response, error)) error {
-	name, _, registered, err := resolveRegisteredComposeTarget(layout, options)
-	if err != nil {
-		return err
-	}
-	if !registered {
-		if jsonOutput {
-			return cliOutput.JSON(map[string]interface{}{"project": name, "status": "not_registered"})
+	_ = layout
+	if options.Project != "" {
+		if err := config.ValidateProjectName(options.Project); err != nil {
+			return err
 		}
-		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleMuted, fmt.Sprintf("Project %s is not registered; nothing to stop", name)))
-		return nil
 	}
-	// These calls are best-effort. Registry reload below is authoritative and
-	// also stops any process left after an individual operation fails.
-	_, _ = caller("service.bulk", struct {
-		Action  string   `json:"action"`
-		Targets []string `json:"targets"`
-	}{Action: "stop", Targets: []string{name}}, processOperationTimeout)
-	_, _ = caller("schedule.bulk", struct {
-		Action  string   `json:"action"`
-		Targets []string `json:"targets"`
-	}{Action: "disable", Targets: []string{name}}, processOperationTimeout)
-	reg, err := registry.Load(layout.Registry)
+	path := ""
+	var err error
+	if options.File != "" {
+		path, err = composeConfigPath(options.File)
+		if err != nil {
+			return err
+		}
+	} else if options.Project == "" {
+		path, err = composeConfigPath("")
+		if err != nil {
+			return err
+		}
+	}
+	response, err := caller("project.down", struct {
+		Project    string `json:"project,omitempty"`
+		ConfigPath string `json:"config_path,omitempty"`
+	}{Project: options.Project, ConfigPath: path}, processOperationTimeout)
 	if err != nil {
 		return err
 	}
-	current, ok := reg.Projects[name]
-	if !ok {
-		return nil
-	}
-	current.Enabled = false
-	reg.Projects[name] = current
-	if err := registry.Save(layout.Registry, reg); err != nil {
+	var result api.ProjectMutationResult
+	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	if _, reloadErr := caller("project.reload", nil, processOperationTimeout); reloadErr != nil && !errors.Is(reloadErr, ipc.ErrDaemonUnavailable) {
-		return reloadErr
+	if result.Status == "not_registered" {
+		if jsonOutput {
+			return cliOutput.JSON(result)
+		}
+		cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleMuted, fmt.Sprintf("Project %s is not registered; nothing to stop", result.Project)))
+		return nil
 	}
 	if jsonOutput {
-		return cliOutput.JSON(map[string]string{"project": name, "status": "disabled"})
+		return cliOutput.JSON(result)
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s stopped and disabled", name)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s stopped and disabled", result.Project)))
 	return nil
 }
 
 func psCommand(layout paths.Layout, options composeProjectOptions) error {
-	name := ""
-	if options.Project != "" || options.File != "" {
-		resolved, _, _, err := resolveRegisteredComposeTarget(layout, options)
+	_ = layout
+	if options.Project != "" {
+		if err := config.ValidateProjectName(options.Project); err != nil {
+			return err
+		}
+	}
+	path := ""
+	var err error
+	if options.File != "" {
+		path, err = composeConfigPath(options.File)
 		if err != nil {
 			return err
 		}
-		name = resolved
 	}
-	response, err := call("service.ls", struct{ Project string }{name})
+	response, err := call("service.ls", struct {
+		Project    string `json:"project,omitempty"`
+		ConfigPath string `json:"config_path,omitempty"`
+	}{Project: options.Project, ConfigPath: path})
 	if err != nil {
 		return err
 	}
@@ -724,43 +634,14 @@ func psCommand(layout paths.Layout, options composeProjectOptions) error {
 	return nil
 }
 
-func setProjectSchedules(project, action string) error {
-	response, err := callWithTimeout("schedule.bulk", struct {
-		Action  string   `json:"action"`
-		Targets []string `json:"targets"`
-	}{Action: action, Targets: []string{project}}, processOperationTimeout)
-	if err != nil {
-		return err
-	}
-	var results []api.ScheduleOperationResult
-	if err := decodeData(response.Data, &results); err != nil {
-		return err
-	}
-	for _, result := range results {
-		if result.Status != "ok" {
-			if result.Error == "" {
-				return fmt.Errorf("schedule %s %s failed", action, result.Key)
-			}
-			return fmt.Errorf("schedule %s %s failed: %s", action, result.Key, result.Error)
-		}
-	}
-	return nil
-}
-
 func waitForDaemon(layout paths.Layout) (ipc.Response, error) {
+	_ = layout
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if response, err := call("health", nil); err == nil {
 			return response, nil
 		}
 		time.Sleep(100 * time.Millisecond)
-	}
-	if data, err := os.ReadFile(layout.DaemonLog); err == nil {
-		message := string(data)
-		if len(message) > 2000 {
-			message = message[len(message)-2000:]
-		}
-		return ipc.Response{}, fmt.Errorf("daemon did not become ready; recent daemon log:\n%s", message)
 	}
 	return ipc.Response{}, errors.New("daemon did not become ready within 5 seconds")
 }
@@ -811,137 +692,94 @@ func resolveDaemonExecutableFrom(cliExecutable, goos string, lookPath func(strin
 }
 
 func projectAddCommand(layout paths.Layout, projectName, configPath string) error {
+	return projectAddCommandWithCaller(layout, projectName, configPath, call)
+}
+
+func projectAddCommandWithCaller(layout paths.Layout, projectName, configPath string, caller func(string, interface{}) (ipc.Response, error)) error {
+	_ = layout
 	if err := config.ValidateProjectName(projectName); err != nil {
 		return err
 	}
-	loaded, err := config.Load(configPath)
+	path, err := composeConfigPath(configPath)
 	if err != nil {
 		return err
 	}
-	reg, err := registry.Load(layout.Registry)
+	response, err := caller("project.register", struct {
+		Project    string `json:"project"`
+		ConfigPath string `json:"config_path"`
+	}{Project: projectName, ConfigPath: path})
 	if err != nil {
 		return err
 	}
-	if err := addProjectToRegistry(&reg, projectName, loaded); err != nil {
+	var result api.ProjectMutationResult
+	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	if err := registry.Save(layout.Registry, reg); err != nil {
-		return err
-	}
-	_, _ = call("project.reload", nil)
 	if jsonOutput {
-		return cliOutput.JSON(map[string]string{"project": projectName, "path": loaded.Path, "status": "registered"})
+		return cliOutput.JSON(result)
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", projectName)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s registered", result.Project)))
 	return nil
 }
 
 func projectRemoveCommand(layout paths.Layout, name string) error {
+	return projectRemoveCommandWithCaller(layout, name, func(method string, params interface{}) (ipc.Response, error) {
+		return callWithTimeout(method, params, processOperationTimeout)
+	})
+}
+
+func projectRemoveCommandWithCaller(layout paths.Layout, name string, caller func(string, interface{}) (ipc.Response, error)) error {
+	_ = layout
 	if err := config.ValidateProjectName(name); err != nil {
 		return err
 	}
-	reg, err := registry.Load(layout.Registry)
+	response, err := caller("project.remove", struct {
+		Project string `json:"project"`
+	}{Project: name})
 	if err != nil {
 		return err
 	}
-	if _, registered := reg.Projects[name]; registered {
-		delete(reg.Projects, name)
-		if err := registry.Save(layout.Registry, reg); err != nil {
-			return err
-		}
-	}
-	if _, err := callWithTimeout("project.remove", struct {
-		Project string `json:"project"`
-	}{Project: name}, processOperationTimeout); err != nil {
-		var callErr *ipc.CallError
-		if errors.As(err, &callErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return err
-		}
-		if err := removeProjectStateOffline(layout, name); err != nil {
-			return err
-		}
+	var result api.ProjectMutationResult
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
 	}
 	if jsonOutput {
-		return cliOutput.JSON(map[string]string{"project": name, "status": "removed"})
+		return cliOutput.JSON(result)
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", name)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s removed", result.Project)))
 	return nil
 }
 
-func removeProjectStateOffline(layout paths.Layout, name string) error {
-	var repo scheduler.HistoryRepository
-	if layout.State != "" || layout.DaemonConfig != "" {
-		configPath := layout.DaemonConfig
-		if configPath == "" && layout.Root != "" {
-			configPath = filepath.Join(layout.Root, "daemon.yaml")
-		}
-		daemonConfig, err := config.LoadDaemonConfig(configPath)
-		if err != nil {
-			return err
-		}
-		resolved, err := history.ResolveConfig(layout, daemonConfig.History.Database)
-		if err != nil {
-			return err
-		}
-		if resolved.Driver != "sqlite" || resolved.Path == "" {
-			repo, err = history.Open(resolved)
-			if err != nil {
-				return err
-			}
-		} else if _, err := os.Stat(resolved.Path); err == nil {
-			repo, err = history.Open(resolved)
-			if err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	cleanupErr := projectstate.Remove(cliCommandContext, layout, name, repo, processOperationTimeout)
-	if repo != nil {
-		if err := repo.Close(); cleanupErr == nil {
-			cleanupErr = err
-		}
-	}
-	return cleanupErr
+func projectRenameCommand(layout paths.Layout, oldName, newName string) error {
+	return projectRenameCommandWithCaller(layout, oldName, newName, call)
 }
 
-func projectRenameCommand(layout paths.Layout, oldName, newName string) error {
+func projectRenameCommandWithCaller(layout paths.Layout, oldName, newName string, caller func(string, interface{}) (ipc.Response, error)) error {
+	_ = layout
 	if oldName == newName {
 		return fmt.Errorf("project %q is already named %q", oldName, newName)
+	}
+	if err := config.ValidateProjectName(oldName); err != nil {
+		return err
 	}
 	if err := config.ValidateProjectName(newName); err != nil {
 		return err
 	}
-	reg, err := registry.Load(layout.Registry)
+	response, err := caller("project.rename", struct {
+		OldProject string `json:"old_project"`
+		NewProject string `json:"new_project"`
+	}{OldProject: oldName, NewProject: newName})
 	if err != nil {
 		return err
 	}
-	oldProject, ok := reg.Projects[oldName]
-	if !ok {
-		return fmt.Errorf("project %q is not registered", oldName)
-	}
-	if _, ok := reg.Projects[newName]; ok {
-		return fmt.Errorf("project %q is already registered", newName)
-	}
-	loaded, err := config.Load(oldProject.ConfigPath)
-	if err != nil {
+	var result api.ProjectMutationResult
+	if err := decodeData(response.Data, &result); err != nil {
 		return err
 	}
-	if _, err := removeProjectFromRegistry(&reg, oldName); err != nil {
-		return err
-	}
-	if err := addProjectToRegistry(&reg, newName, loaded); err != nil {
-		return err
-	}
-	if err := registry.Save(layout.Registry, reg); err != nil {
-		return err
-	}
-	_, _ = call("project.reload", nil)
 	if jsonOutput {
-		return cliOutput.JSON(map[string]string{"project": oldName, "new_project": newName, "status": "renamed"})
+		return cliOutput.JSON(result)
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", oldName, newName)))
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Project %s renamed to %s", result.Project, result.NewProject)))
 	return nil
 }
 
@@ -961,41 +799,29 @@ func projectListCommand() error {
 	return nil
 }
 
-func addProjectToRegistry(reg *registry.File, name string, loaded config.File) error {
-	if err := config.ValidateProjectName(name); err != nil {
-		return err
-	}
-	if _, ok := reg.Projects[name]; ok {
-		return fmt.Errorf("project %q is already registered", name)
-	}
-	reg.Projects[name] = registry.Project{
-		Name: name, ConfigPath: loaded.Path, Enabled: true, ConfigVersion: loaded.Version,
-	}
-	return nil
-}
-
-func removeProjectFromRegistry(reg *registry.File, name string) (registry.Project, error) {
-	project, ok := reg.Projects[name]
-	if !ok {
-		return registry.Project{}, fmt.Errorf("project %q is not registered", name)
-	}
-	delete(reg.Projects, name)
-	return project, nil
-}
-
 func configValidateCommand(path string) error {
-	loaded, err := config.Load(path)
+	return configValidateCommandWithCaller(path, call)
+}
+
+func configValidateCommandWithCaller(path string, caller func(string, interface{}) (ipc.Response, error)) error {
+	path, err := composeConfigPath(path)
 	if err != nil {
 		return err
 	}
-	if jsonOutput {
-		return cliOutput.JSON(map[string]interface{}{
-			"valid": true, "path": loaded.Path, "version": loaded.Version,
-			"services": len(loaded.Services), "tasks": len(loaded.Tasks),
-			"workflows": len(loaded.Workflows), "schedules": len(loaded.Schedules),
-		})
+	response, err := caller("config.validate", struct {
+		Path string `json:"path"`
+	}{Path: path})
+	if err != nil {
+		return err
 	}
-	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: services=%d tasks=%d workflows=%d schedules=%d path=%s", len(loaded.Services), len(loaded.Tasks), len(loaded.Workflows), len(loaded.Schedules), loaded.Path)))
+	var result api.ConfigValidationResult
+	if err := decodeData(response.Data, &result); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return cliOutput.JSON(result)
+	}
+	cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Configuration valid: services=%d tasks=%d workflows=%d schedules=%d path=%s", result.Services, result.Tasks, result.Workflows, result.Schedules, result.Path)))
 	return nil
 }
 
@@ -3151,29 +2977,26 @@ func startupStatusCommand() error {
 }
 
 func doctorCommand(layout paths.Layout) error {
-	historyDriver, historyLocation := historyDatabaseDisplay(layout)
-	registryOK := true
-	registryError := ""
-	if _, err := os.Stat(layout.Registry); err != nil && !os.IsNotExist(err) {
-		registryOK = false
-		registryError = err.Error()
-	}
+	_ = layout
+	return doctorCommandWithCaller(layout, call)
+}
 
-	daemonData := map[string]interface{}{"status": "stopped"}
-	daemonAvailable := false
-	if response, err := call("health", nil); err == nil {
-		if decoded, decodeErr := decodeMap(response.Data); decodeErr == nil {
-			daemonData = decoded
-			daemonAvailable = true
-		}
+func doctorCommandWithCaller(layout paths.Layout, caller func(string, interface{}) (ipc.Response, error)) error {
+	_ = layout
+	response, err := caller("doctor", nil)
+	if err != nil {
+		return err
 	}
-	daemonDatabase := daemonDatabaseHealth(daemonData, daemonAvailable)
-	if daemonDatabase.Driver == "" {
-		daemonDatabase.Driver = historyDriver
+	var report api.DoctorReport
+	if err := decodeData(response.Data, &report); err != nil {
+		return err
 	}
-	if daemonDatabase.Location == "" {
-		daemonDatabase.Location = historyLocation
+	daemonData := report.Daemon
+	if daemonData == nil {
+		daemonData = map[string]interface{}{}
 	}
+	daemonAvailable := true
+	daemonDatabase := report.HistoryDatabase
 	if daemonDatabase.ConnectionInfo.ID == "" {
 		daemonDatabase.ConnectionInfo.ID = "history"
 	}
@@ -3183,77 +3006,56 @@ func doctorCommand(layout paths.Layout) error {
 	if daemonDatabase.ConnectionInfo.Status == "" {
 		daemonDatabase.ConnectionInfo.Status = daemonDatabase.Status
 	}
-	if !daemonAvailable && historyDriver == config.DefaultHistoryDatabaseDriver {
-		if migration, migrationErr := history.InspectSQLiteMigration(historyLocation); migrationErr == nil {
-			daemonDatabase.Migration = api.HistoryMigrationHealth{
-				Status: migration.Status, CurrentVersion: migration.CurrentVersion,
-				TargetVersion: migration.TargetVersion, MarkerPath: migration.MarkerPath,
-				BackupPath: migration.BackupPath, ChecksumMismatch: migration.ChecksumMismatch,
-				Error: migration.Error, Recovery: migration.Recovery,
-			}
-		}
-	}
 	daemonData["history_database"] = daemonDatabase
-	daemonExecutable, daemonExecutableErr := resolveDaemonExecutable()
-	startupStatus, startupErr := startup.GetStatus()
-	daemonHealth := daemonHealthData{Status: "stopped", ConfigErrors: map[string]string{}}
-	if daemonAvailable {
-		if err := decodeData(daemonData, &daemonHealth); err != nil {
-			daemonHealth.Status = "unknown"
-			daemonHealth.ConfigErrors = map[string]string{}
-		}
+	daemonHealth := daemonHealthData{Status: "unknown", ConfigErrors: map[string]string{}}
+	if err := decodeData(daemonData, &daemonHealth); err != nil {
+		return err
 	}
-	environmentReport := map[string]string{
-		"platform":       runtime.GOOS,
-		"root":           layout.Root,
-		"daemon_config":  layout.DaemonConfig,
-		"registry":       layout.Registry,
-		"logs_root":      layout.Logs,
-		"state_root":     layout.State,
-		"schedule_state": scheduleStatePath(layout),
-		"runtime_socket": layout.SocketPath,
+	environmentReport := report.Environment
+	if environmentReport == nil {
+		environmentReport = map[string]string{}
 	}
 	databaseReport := doctorDatabaseReport(daemonDatabase)
-	capabilityReport := capability.Discover()
+	capabilityReport := report.Capabilities
 	if jsonOutput {
-		report := map[string]interface{}{
-			"platform": runtime.GOOS, "root": layout.Root, "registry": layout.Registry, "logs": layout.Logs,
-			"daemon_log": layout.DaemonLog, "execution_history": historyLocation,
-			"history_database": map[string]string{"driver": historyDriver, "location": historyLocation},
-			"registry_ok":      registryOK, "registry_error": registryError,
+		outputReport := map[string]interface{}{
+			"platform": report.Platform, "root": report.Root, "registry": report.Registry, "logs": report.Logs,
+			"daemon_log": report.DaemonLog, "execution_history": report.ExecutionHistory,
+			"history_database": map[string]string{"driver": daemonDatabase.Driver, "location": daemonDatabase.Location},
+			"registry_ok":      report.RegistryOK, "registry_error": report.RegistryError,
 			"daemon":       daemonData,
 			"environment":  environmentReport,
 			"database":     databaseReport,
 			"capabilities": capabilityReport,
 		}
-		if daemonExecutableErr == nil {
-			report["daemon_executable"] = daemonExecutable
-			daemonData["daemon_binary"] = daemonExecutable
+		if report.DaemonExecutable != "" {
+			outputReport["daemon_executable"] = report.DaemonExecutable
+			daemonData["daemon_binary"] = report.DaemonExecutable
 		} else {
-			report["daemon_executable_error"] = daemonExecutableErr.Error()
-			daemonData["daemon_binary_error"] = daemonExecutableErr.Error()
+			outputReport["daemon_executable_error"] = report.DaemonExecutableError
+			daemonData["daemon_binary_error"] = report.DaemonExecutableError
 		}
-		if startupErr == nil {
-			report["startup"] = startupStatus
-			daemonData["startup"] = startupStatus
+		if report.Startup != nil {
+			outputReport["startup"] = report.Startup
+			daemonData["startup"] = report.Startup
 		} else {
-			report["startup_error"] = startupErr.Error()
-			daemonData["startup_error"] = startupErr.Error()
+			outputReport["startup_error"] = report.StartupError
+			daemonData["startup_error"] = report.StartupError
 		}
 		daemonData["api_version"] = daemonHealth.Version
-		return cliOutput.JSON(report)
+		return cliOutput.JSON(outputReport)
 	}
 
 	cliOutput.Println(cliOutput.Text(cliui.StyleHeader, "mango doctor"))
 	printDoctorSection("Environment", []doctorField{
-		{Name: "platform", Value: runtime.GOOS},
-		{Name: "root", Value: layout.Root},
-		{Name: "daemon config", Value: layout.DaemonConfig},
-		{Name: "registry", Value: layout.Registry, Style: doctorStatusStyle(registryOK, registryError)},
-		{Name: "logs root", Value: layout.Logs},
-		{Name: "state root", Value: layout.State},
-		{Name: "schedule state", Value: scheduleStatePath(layout)},
-		{Name: "runtime socket", Value: layout.SocketPath},
+		{Name: "platform", Value: report.Platform},
+		{Name: "root", Value: report.Root},
+		{Name: "daemon config", Value: environmentReport["daemon_config"]},
+		{Name: "registry", Value: report.Registry, Style: doctorStatusStyle(report.RegistryOK, report.RegistryError)},
+		{Name: "logs root", Value: report.Logs},
+		{Name: "state root", Value: environmentReport["state_root"]},
+		{Name: "schedule state", Value: environmentReport["schedule_state"]},
+		{Name: "runtime socket", Value: environmentReport["runtime_socket"]},
 	})
 	printDoctorSection("Database", []doctorField{
 		{Name: "driver", Value: daemonDatabase.Driver},
@@ -3283,24 +3085,24 @@ func doctorCommand(layout paths.Layout) error {
 		daemonStatus = "unknown"
 	}
 	daemonStatusStyle := cliui.StateStyle(daemonStatus)
-	daemonBinary := daemonExecutable
+	daemonBinary := report.DaemonExecutable
 	daemonBinaryStyle := cliui.StyleNone
-	if daemonExecutableErr != nil {
-		daemonBinary = daemonExecutableErr.Error()
+	if report.DaemonExecutableError != "" {
+		daemonBinary = report.DaemonExecutableError
 		daemonBinaryStyle = cliui.StyleError
 	}
 	startupValue := "unknown"
 	startupStyle := cliui.StyleWarning
-	if startupErr == nil {
-		startupValue = doctorStatusValue(startupStatus.Installed, startupStatus.Detail)
-		startupStyle = doctorStatusStyle(startupStatus.Installed, startupStatus.Detail)
-		if startupStatus.Installed && !startupStatus.BootEnabled {
-			startupValue = "boot disabled: " + startupStatus.Detail
+	if report.Startup != nil {
+		startupValue = doctorStatusValue(report.Startup.Installed, report.Startup.Detail)
+		startupStyle = doctorStatusStyle(report.Startup.Installed, report.Startup.Detail)
+		if report.Startup.Installed && !report.Startup.BootEnabled {
+			startupValue = "boot disabled: " + report.Startup.Detail
 			startupStyle = cliui.StyleWarning
 		}
 	}
-	if startupErr != nil {
-		startupValue = startupErr.Error()
+	if report.StartupError != "" {
+		startupValue = report.StartupError
 		startupStyle = cliui.StyleError
 	}
 	printDoctorSection("Daemon", []doctorField{
@@ -3347,13 +3149,6 @@ func printDoctorSection(title string, fields []doctorField) {
 	for _, field := range fields {
 		cliOutput.Printf("  %-16s %s\n", field.Name, cliOutput.Text(field.Style, field.Value))
 	}
-}
-
-func scheduleStatePath(layout paths.Layout) string {
-	if layout.ScheduleState != "" {
-		return layout.ScheduleState
-	}
-	return filepath.Join(layout.State, "schedules.json")
 }
 
 type doctorDatabaseJSON struct {
@@ -3525,27 +3320,6 @@ func doctorStatusValue(ok bool, detail string) string {
 	return "not installed"
 }
 
-func daemonDatabaseHealth(data map[string]interface{}, available bool) api.HistoryDatabaseHealth {
-	result := api.HistoryDatabaseHealth{
-		Status: "unknown",
-		Schema: api.HistorySchemaHealth{Status: "unknown"},
-	}
-	if !available {
-		result.Error = "daemon unavailable; cannot verify its database connection"
-		return result
-	}
-	raw, ok := data["history_database"]
-	if !ok {
-		result.Error = "daemon did not report history database health"
-		return result
-	}
-	if err := decodeData(raw, &result); err != nil {
-		result.Status = "unknown"
-		result.Error = "invalid daemon history database health: " + err.Error()
-	}
-	return result
-}
-
 func doctorDatabaseStyle(database api.HistoryDatabaseHealth) cliui.Style {
 	switch database.Status {
 	case "connected":
@@ -3555,35 +3329,6 @@ func doctorDatabaseStyle(database api.HistoryDatabaseHealth) cliui.Style {
 	default:
 		return cliui.StyleWarning
 	}
-}
-
-func historyDatabaseDisplay(layout paths.Layout) (string, string) {
-	configPath := layout.DaemonConfig
-	if configPath == "" {
-		configPath = filepath.Join(layout.Root, "daemon.yaml")
-	}
-	daemonConfig, err := config.LoadDaemonConfig(configPath)
-	if err != nil {
-		return config.DefaultHistoryDatabaseDriver, filepath.Join(layout.State, "history.db")
-	}
-	database := daemonConfig.History.Database
-	driver := database.Driver
-	if driver == "" {
-		driver = config.DefaultHistoryDatabaseDriver
-	}
-	if driver == "sqlite" {
-		path := database.Path
-		if path == "" {
-			path = filepath.Join(layout.State, "history.db")
-		} else if !filepath.IsAbs(path) {
-			path = filepath.Join(layout.Root, path)
-		}
-		return driver, path
-	}
-	if database.DSNEnv != "" {
-		return driver, "dsn from " + database.DSNEnv
-	}
-	return driver, "configured dsn"
 }
 
 func call(method string, params interface{}) (ipc.Response, error) {

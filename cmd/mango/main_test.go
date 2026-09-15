@@ -20,8 +20,6 @@ import (
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/cliui"
 	"github.com/kevin93203/mango/internal/config"
-	"github.com/kevin93203/mango/internal/generation"
-	"github.com/kevin93203/mango/internal/history"
 	"github.com/kevin93203/mango/internal/ipc"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/registry"
@@ -590,7 +588,7 @@ func TestDaemonLogsCommandDefaultsToLastFifteenLines(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, daemonLogsOptions{Tail: 15}); err != nil {
+	if err := daemonLogsCommandWithCaller(context.Background(), daemonLogsOptions{Tail: 15}, daemonLogTestCaller(path)); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
@@ -618,7 +616,7 @@ func TestDaemonLogsCommandTailZeroAndMissingFile(t *testing.T) {
 	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
 	jsonOutput = false
 
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: path}, daemonLogsOptions{Tail: 0}); err != nil {
+	if err := daemonLogsCommandWithCaller(context.Background(), daemonLogsOptions{Tail: 0}, daemonLogTestCaller(path)); err != nil {
 		t.Fatal(err)
 	}
 	want := "｜daemon｜ first\n｜daemon｜ \n｜daemon｜ last\n"
@@ -627,11 +625,58 @@ func TestDaemonLogsCommandTailZeroAndMissingFile(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := daemonLogsCommand(paths.Layout{DaemonLog: filepath.Join(root, "missing.log")}, daemonLogsOptions{Tail: 15}); err != nil {
+	if err := daemonLogsCommandWithCaller(context.Background(), daemonLogsOptions{Tail: 15}, daemonLogTestCaller(filepath.Join(root, "missing.log"))); err != nil {
 		t.Fatalf("missing daemon log = %v, want success", err)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("missing daemon log output = %q, want empty", output.String())
+	}
+}
+
+func daemonLogTestCaller(path string) logsCaller {
+	return func(_ context.Context, method string, params interface{}) (ipc.Response, error) {
+		if method != "daemon.logs.read" {
+			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
+		}
+		var request struct {
+			Tail     int   `json:"tail"`
+			Offset   int64 `json:"offset"`
+			MaxBytes int   `json:"max_bytes"`
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return ipc.Response{Data: api.DaemonLogChunk{}}, nil
+		}
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if request.Offset >= 0 {
+			if request.Offset > int64(len(data)) {
+				return ipc.Response{}, fmt.Errorf("offset %d exceeds log length %d", request.Offset, len(data))
+			}
+			data = data[request.Offset:]
+			if request.MaxBytes > 0 && len(data) > request.MaxBytes {
+				data = data[:request.MaxBytes]
+			}
+			return ipc.Response{Data: api.DaemonLogChunk{Data: string(data), NextOffset: request.Offset + int64(len(data))}}, nil
+		}
+		if request.Tail > 0 {
+			chunks := strings.SplitAfter(string(data), "\n")
+			if len(chunks) > 0 && chunks[len(chunks)-1] == "" {
+				chunks = chunks[:len(chunks)-1]
+			}
+			if len(chunks) > request.Tail {
+				data = []byte(strings.Join(chunks[len(chunks)-request.Tail:], ""))
+			}
+		}
+		return ipc.Response{Data: api.DaemonLogChunk{Data: string(data), NextOffset: int64(len(data))}}, nil
 	}
 }
 
@@ -654,15 +699,15 @@ func TestDaemonLogsCommandRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestFollowDaemonLogsWithReaderBuffersChunksAndFlushesOnError(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "daemon.log")
-	if err := os.WriteFile(path, []byte("initial\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	var lines []string
 	reads := 0
-	read := func(_ string, offset int64, _ int) (string, int64, error) {
+	read := func(offset int64, _ int, tail int) (string, int64, error) {
+		if offset == -1 {
+			if tail != 15 {
+				t.Fatalf("initial follow tail = %d, want 15", tail)
+			}
+			return "initial\n", int64(len("initial\n")), nil
+		}
 		reads++
 		switch reads {
 		case 1:
@@ -677,7 +722,7 @@ func TestFollowDaemonLogsWithReaderBuffersChunksAndFlushesOnError(t *testing.T) 
 		}
 	}
 
-	err := followDaemonLogsWithReader(path, 15, read, func(line string) {
+	err := followDaemonLogsWithReader(15, read, func(line string) {
 		lines = append(lines, line)
 	}, func() {})
 	if err == nil || !strings.Contains(err.Error(), "read daemon log: reader failed") {
@@ -690,19 +735,20 @@ func TestFollowDaemonLogsWithReaderBuffersChunksAndFlushesOnError(t *testing.T) 
 }
 
 func TestFollowDaemonLogsWithReaderContextStopsDuringWait(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.log")
-	if err := os.WriteFile(path, []byte("initial\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	waitStarted := make(chan struct{})
 	readCalls := 0
 	done := make(chan error, 1)
 	go func() {
-		done <- followDaemonLogsWithReaderContext(ctx, path, 15, func(_ string, offset int64, _ int) (string, int64, error) {
+		done <- followDaemonLogsWithReaderContext(ctx, 15, func(offset int64, _ int, tail int) (string, int64, error) {
 			readCalls++
+			if offset == -1 {
+				if tail != 15 {
+					return "", offset, fmt.Errorf("initial follow tail = %d, want 15", tail)
+				}
+				return "initial\n", int64(len("initial\n")), nil
+			}
 			return "", offset, nil
 		}, func(string) {}, func(ctx context.Context) {
 			close(waitStarted)
@@ -725,8 +771,8 @@ func TestFollowDaemonLogsWithReaderContextStopsDuringWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("follow did not stop after cancellation")
 	}
-	if readCalls != 1 {
-		t.Fatalf("read calls = %d, want one read before cancellation", readCalls)
+	if readCalls != 2 {
+		t.Fatalf("read calls = %d, want initial and one incremental read before cancellation", readCalls)
 	}
 }
 
@@ -766,7 +812,13 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		SocketPath:   filepath.Join(t.TempDir(), "missing.sock"),
 		DaemonConfig: "/tmp/mango/daemon.yaml",
 	}
-	if err := doctorCommand(layout); err != nil {
+	caller := func(method string, _ interface{}) (ipc.Response, error) {
+		if method != "doctor" {
+			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
+		}
+		return ipc.Response{Data: doctorTestReport(layout)}, nil
+	}
+	if err := doctorCommandWithCaller(layout, caller); err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
@@ -830,7 +882,7 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 
 	output.Reset()
 	jsonOutput = true
-	if err := doctorCommand(layout); err != nil {
+	if err := doctorCommandWithCaller(layout, caller); err != nil {
 		t.Fatal(err)
 	}
 	var report map[string]interface{}
@@ -883,6 +935,31 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 	}
 }
 
+func doctorTestReport(layout paths.Layout) api.DoctorReport {
+	database := api.HistoryDatabaseHealth{
+		Driver: "sqlite", Location: filepath.Join(layout.State, "history.db"), Status: "unknown",
+		Error:          "daemon unavailable; cannot verify its database connection",
+		ConnectionInfo: api.DatabaseConnectionInfo{ID: "history", Type: "sqlite", Status: "unknown"},
+		Schema:         api.HistorySchemaHealth{Status: "unknown", Error: "daemon unavailable; cannot verify its schema"},
+	}
+	return api.DoctorReport{
+		Platform: layout.Root, Root: layout.Root, Registry: layout.Registry, Logs: layout.Logs,
+		DaemonLog: layout.DaemonLog, ExecutionHistory: database.Location, HistoryDatabase: database,
+		RegistryOK: true, Daemon: map[string]interface{}{
+			"status": "unknown", "pid": 0, "version": 0, "config_errors": map[string]string{},
+			"history_database": database,
+		},
+		Environment: map[string]string{
+			"daemon_config": layout.DaemonConfig, "state_root": layout.State,
+			"schedule_state": filepath.Join(layout.State, "schedules.json"), "runtime_socket": layout.SocketPath,
+		},
+		Capabilities: api.CapabilityReport{Platform: "test", Capabilities: map[string]api.CapabilityInfo{
+			"process_tree_termination": {State: api.CapabilitySupported},
+		}},
+		Startup: &api.StartupStatus{Detail: "not installed"},
+	}
+}
+
 func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput := cliOutput
@@ -918,217 +995,126 @@ func TestPrintServiceTableSeparatesServiceAndProcess(t *testing.T) {
 
 func TestConfigValidateUsesPositionalPath(t *testing.T) {
 	configPath := writeCLIConfig(t)
-
-	if err := configValidateCommand(configPath); err != nil {
+	called := false
+	if err := configValidateCommandWithCaller(configPath, func(method string, params interface{}) (ipc.Response, error) {
+		called = true
+		if method != "config.validate" {
+			t.Fatalf("method = %q, want config.validate", method)
+		}
+		var request struct {
+			Path string `json:"path"`
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		if request.Path != configPath {
+			t.Fatalf("path = %q, want %q", request.Path, configPath)
+		}
+		return ipc.Response{Data: api.ConfigValidationResult{Valid: true, Path: configPath}}, nil
+	}); err != nil {
 		t.Fatalf("config validate PATH = %v", err)
+	}
+	if !called {
+		t.Fatal("config.validate caller was not invoked")
 	}
 }
 
 func TestProjectAddAndRemoveUseNameAndPathArguments(t *testing.T) {
-	root := t.TempDir()
-	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
+	var methods []string
+	caller := func(method string, params interface{}) (ipc.Response, error) {
+		methods = append(methods, method)
+		switch method {
+		case "project.register":
+			var request struct {
+				Project    string `json:"project"`
+				ConfigPath string `json:"config_path"`
+			}
+			encoded, err := json.Marshal(params)
+			if err != nil {
+				return ipc.Response{}, err
+			}
+			if err := json.Unmarshal(encoded, &request); err != nil {
+				return ipc.Response{}, err
+			}
+			if request.Project != "demo" || request.ConfigPath != configPath {
+				t.Fatalf("register params = %+v, want demo and %q", request, configPath)
+			}
+			return ipc.Response{Data: api.ProjectMutationResult{Project: "demo", ConfigPath: configPath, Status: "registered"}}, nil
+		case "project.remove":
+			var request struct {
+				Project string `json:"project"`
+			}
+			encoded, err := json.Marshal(params)
+			if err != nil {
+				return ipc.Response{}, err
+			}
+			if err := json.Unmarshal(encoded, &request); err != nil {
+				return ipc.Response{}, err
+			}
+			if request.Project != "demo" {
+				t.Fatalf("remove params = %+v, want demo", request)
+			}
+			return ipc.Response{Data: api.ProjectMutationResult{Project: "demo", Status: "removed"}}, nil
+		default:
+			return ipc.Response{}, fmt.Errorf("unexpected method %q", method)
+		}
+	}
 
-	if err := projectAddCommand(layout, "demo", configPath); err != nil {
+	if err := projectAddCommandWithCaller(paths.Layout{}, "demo", configPath, caller); err != nil {
 		t.Fatalf("project add NAME PATH = %v", err)
 	}
-	reg, err := registry.Load(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, ok := reg.Projects["demo"]
-	if !ok || project.ConfigPath != configPath {
-		t.Fatalf("registered project = %+v, want demo with path %q", project, configPath)
-	}
-	originalRegistry, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	duplicateConfigPath := writeCLIConfig(t)
-	if err := projectAddCommand(layout, "demo", duplicateConfigPath); err == nil || !strings.Contains(err.Error(), "already registered") {
-		t.Fatalf("duplicate project add error = %v, want already registered", err)
-	}
-	currentRegistry, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(currentRegistry) != string(originalRegistry) {
-		t.Fatalf("registry changed after duplicate add: before=%q after=%q", originalRegistry, currentRegistry)
-	}
-	if err := projectRemoveCommand(layout, "demo"); err != nil {
+	if err := projectRemoveCommandWithCaller(paths.Layout{}, "demo", caller); err != nil {
 		t.Fatalf("project remove NAME = %v", err)
 	}
-	reg, err = registry.Load(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := reg.Projects["demo"]; ok {
-		t.Fatal("project demo remains registered after removal")
-	}
-}
-
-func TestProjectRemoveClearsOfflineProjectState(t *testing.T) {
-	root := t.TempDir()
-	layout := paths.Layout{
-		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
-		State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"),
-		ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
-		DaemonConfig: filepath.Join(root, "daemon.yaml"), SocketPath: filepath.Join(root, "runtime", "mango.sock"),
-	}
-	configPath := filepath.Join(root, "demo.yaml")
-	if err := os.WriteFile(configPath, []byte("version: 4\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
-		"demo": {Name: "demo", ConfigPath: configPath, Enabled: true},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(layout.Generations, "demo"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(generation.SnapshotPath(layout.State, "demo", 7), []byte("snapshot"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(layout.Logs, "demo"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(layout.Logs, "demo", "api.log"), []byte("log"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.ScheduleState), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(layout.ScheduleState, []byte("{\"version\":1,\"disabled\":[\"demo/nightly\",\"other/nightly\"]}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.Record(context.Background(), scheduler.Record{RunID: "demo-run", Project: "demo", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: time.Unix(1, 0), Finished: time.Unix(2, 0)}, 0); err != nil {
-		_ = repository.Close()
-		t.Fatal(err)
-	}
-	if err := repository.Record(context.Background(), scheduler.Record{RunID: "other-run", Project: "other", TargetType: "task", Target: "job", Status: scheduler.StatusSuccess, Started: time.Unix(1, 0), Finished: time.Unix(2, 0)}, 0); err != nil {
-		_ = repository.Close()
-		t.Fatal(err)
-	}
-	if err := repository.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	ipc.SetEndpoint(filepath.Join(root, "missing.sock"))
-	t.Cleanup(func() { ipc.SetEndpoint("") })
-	if err := projectRemoveCommand(layout, "demo"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(layout.Generations, "demo")); !os.IsNotExist(err) {
-		t.Fatalf("generation directory stat = %v, want removed", err)
-	}
-	if _, err := os.Stat(filepath.Join(layout.Logs, "demo")); !os.IsNotExist(err) {
-		t.Fatalf("log directory stat = %v, want removed", err)
-	}
-	scheduleData, err := os.ReadFile(layout.ScheduleState)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(scheduleData), "demo/") || !strings.Contains(string(scheduleData), "other/nightly") {
-		t.Fatalf("schedule state = %s, want only other project", scheduleData)
-	}
-	if _, err := os.Stat(configPath); err != nil {
-		t.Fatalf("project YAML was removed: %v", err)
-	}
-	repository, err = history.Open(history.Config{Driver: "sqlite", Path: filepath.Join(layout.State, "history.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repository.Close()
-	if records, err := repository.Query(context.Background(), scheduler.HistoryQuery{Project: "demo"}); err != nil || len(records) != 0 {
-		t.Fatalf("demo history = %+v, err=%v; want empty", records, err)
-	}
-	if records, err := repository.Query(context.Background(), scheduler.HistoryQuery{Project: "other"}); err != nil || len(records) != 1 {
-		t.Fatalf("other history = %+v, err=%v; want one record", records, err)
-	}
-	if err := projectRemoveCommand(layout, "demo"); err != nil {
-		t.Fatalf("repeat project remove = %v", err)
+	if strings.Join(methods, ",") != "project.register,project.remove" {
+		t.Fatalf("methods = %v, want register then remove", methods)
 	}
 }
 
 func TestProjectRenameReusesConfigPathAndRebuildsEntry(t *testing.T) {
-	root := t.TempDir()
-	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
 	configPath := writeCLIConfig(t)
-
-	if err := projectAddCommand(layout, "a_1", configPath); err != nil {
-		t.Fatalf("project add = %v", err)
-	}
-	if err := projectRenameCommand(layout, "a_1", "demo"); err != nil {
+	if err := projectRenameCommandWithCaller(paths.Layout{}, "a_1", "demo", func(method string, params interface{}) (ipc.Response, error) {
+		if method != "project.rename" {
+			t.Fatalf("method = %q, want project.rename", method)
+		}
+		var request struct {
+			OldProject string `json:"old_project"`
+			NewProject string `json:"new_project"`
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &request); err != nil {
+			return ipc.Response{}, err
+		}
+		if request.OldProject != "a_1" || request.NewProject != "demo" {
+			t.Fatalf("rename params = %+v", request)
+		}
+		return ipc.Response{Data: api.ProjectMutationResult{Project: "a_1", NewProject: "demo", ConfigPath: configPath, Status: "renamed"}}, nil
+	}); err != nil {
 		t.Fatalf("project rename = %v", err)
-	}
-
-	reg, err := registry.Load(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := reg.Projects["a_1"]; ok {
-		t.Fatal("old project remains registered after rename")
-	}
-	project, ok := reg.Projects["demo"]
-	if !ok || project.Name != "demo" || project.ConfigPath != configPath || !project.Enabled {
-		t.Fatalf("renamed project = %+v, want demo with path %q", project, configPath)
 	}
 }
 
 func TestProjectRenameRejectsMissingConfigWithoutChangingRegistry(t *testing.T) {
-	root := t.TempDir()
-	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
-	missingPath := filepath.Join(root, "missing.yaml")
-	if err := registry.Save(layout.Registry, registry.File{Version: 1, Projects: map[string]registry.Project{
-		"a_1": {Name: "a_1", ConfigPath: missingPath, Enabled: true},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := projectRenameCommand(layout, "a_1", "demo"); err == nil {
+	if err := projectRenameCommandWithCaller(paths.Layout{}, "a_1", "demo", func(string, interface{}) (ipc.Response, error) {
+		return ipc.Response{}, errors.New("open missing config: file not found")
+	}); err == nil || !strings.Contains(err.Error(), "missing config") {
 		t.Fatal("project rename unexpectedly succeeded for missing config")
-	}
-	current, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(current) != string(original) {
-		t.Fatalf("registry changed after failed rename: before=%q after=%q", original, current)
 	}
 }
 
 func TestProjectRenameRejectsRegisteredTargetWithoutChangingRegistry(t *testing.T) {
-	root := t.TempDir()
-	layout := paths.Layout{Registry: filepath.Join(root, "projects.json")}
-	oldConfigPath := writeCLIConfig(t)
-	newConfigPath := writeCLIConfig(t)
-	if err := projectAddCommand(layout, "a_1", oldConfigPath); err != nil {
-		t.Fatalf("project add old = %v", err)
-	}
-	if err := projectAddCommand(layout, "demo", newConfigPath); err != nil {
-		t.Fatalf("project add new = %v", err)
-	}
-	original, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := projectRenameCommand(layout, "a_1", "demo"); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if err := projectRenameCommandWithCaller(paths.Layout{}, "a_1", "demo", func(string, interface{}) (ipc.Response, error) {
+		return ipc.Response{}, errors.New("project \"demo\" is already registered")
+	}); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("project rename error = %v, want registered target error", err)
-	}
-	current, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(current) != string(original) {
-		t.Fatalf("registry changed after failed rename: before=%q after=%q", original, current)
 	}
 }
 

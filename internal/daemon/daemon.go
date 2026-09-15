@@ -20,7 +20,6 @@ import (
 
 	"github.com/kevin93203/mango/internal/api"
 	"github.com/kevin93203/mango/internal/artifact"
-	"github.com/kevin93203/mango/internal/capability"
 	"github.com/kevin93203/mango/internal/config"
 	"github.com/kevin93203/mango/internal/generation"
 	"github.com/kevin93203/mango/internal/health"
@@ -32,14 +31,12 @@ import (
 	"github.com/kevin93203/mango/internal/observability"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/process"
-	"github.com/kevin93203/mango/internal/projectstate"
 	"github.com/kevin93203/mango/internal/reconcile"
 	"github.com/kevin93203/mango/internal/registry"
 	"github.com/kevin93203/mango/internal/resources"
 	"github.com/kevin93203/mango/internal/scheduler"
 	"github.com/kevin93203/mango/internal/secrets"
 	"github.com/kevin93203/mango/internal/shim"
-	"github.com/kevin93203/mango/internal/version"
 	"github.com/kevin93203/mango/internal/webhook"
 	"github.com/kevin93203/mango/internal/workflow"
 )
@@ -74,6 +71,7 @@ type Daemon struct {
 	webhookMu     sync.Mutex
 
 	mu                      sync.RWMutex
+	lifecycleMu             sync.Mutex
 	applyMu                 sync.Mutex
 	registry                registry.File
 	projects                map[string]*projectRuntime
@@ -293,7 +291,7 @@ func (d *Daemon) listEvents(ctx context.Context, query observability.EventQuery)
 
 func isAuditedMethod(method string) bool {
 	switch method {
-	case "daemon.stop", "project.reload", "project.remove", "config.apply", "config.rollback", "project.rollback",
+	case "daemon.stop", "project.reload", "project.register", "project.up", "project.down", "project.rename", "project.remove", "config.apply", "config.rollback", "project.rollback",
 		"service.start", "service.stop", "service.restart", "service.enable", "service.disable", "service.bulk",
 		"schedule.bulk", "task.run", "workflow.run", "execution.cancel", "execution.retry":
 		return true
@@ -750,10 +748,14 @@ func resolveHistoryDatabase(layout paths.Layout, database config.DatabaseConfig)
 }
 
 func (d *Daemon) reloadRegistry() error {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	return d.reloadRegistryWithOptions(false)
 }
 
 func (d *Daemon) reloadRegistryForStart() error {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	return d.reloadRegistryWithOptions(true)
 }
 
@@ -867,6 +869,8 @@ func (d *Daemon) ApplyProject(name string) error {
 }
 
 func (d *Daemon) ApplyProjectResult(name string) (api.ApplyResult, error) {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	if err := config.ValidateProjectName(name); err != nil {
 		return api.ApplyResult{}, err
 	}
@@ -889,6 +893,8 @@ func (d *Daemon) ApplyProjectResult(name string) (api.ApplyResult, error) {
 // desired state currently loaded by the daemon. It has no process or
 // persistence side effects.
 func (d *Daemon) PlanProject(name string) (reconcile.Plan, error) {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	if err := config.ValidateProjectName(name); err != nil {
@@ -927,6 +933,8 @@ func (d *Daemon) RollbackProject(name string, requestedGeneration uint64) error 
 }
 
 func (d *Daemon) RollbackProjectResult(name string, requestedGeneration uint64) (api.ApplyResult, error) {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	if err := config.ValidateProjectName(name); err != nil {
 		return api.ApplyResult{}, err
 	}
@@ -1016,6 +1024,10 @@ func (d *Daemon) applyProject(name, path string) (api.ApplyResult, error) {
 func (d *Daemon) acceptProjectDesired(name string, file config.File, desired reconcile.DesiredState, sourceGeneration uint64) (api.ApplyResult, error) {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
+	return d.acceptProjectDesiredLocked(name, file, desired, sourceGeneration)
+}
+
+func (d *Daemon) acceptProjectDesiredLocked(name string, file config.File, desired reconcile.DesiredState, sourceGeneration uint64) (api.ApplyResult, error) {
 	if err := config.Validate(file); err != nil {
 		return api.ApplyResult{}, fmt.Errorf("project %s: %w", name, err)
 	}
@@ -1705,35 +1717,6 @@ func (d *Daemon) reapplyExecutionDefinitions() {
 			fmt.Fprintf(os.Stderr, "warning: refresh history summary: %v\n", err)
 		}
 	}
-}
-
-func (d *Daemon) removeProjectState(ctx context.Context, name string) error {
-	if err := config.ValidateProjectName(name); err != nil {
-		return err
-	}
-	reg, err := registry.Load(d.layout.Registry)
-	if err != nil {
-		return err
-	}
-	if _, ok := reg.Projects[name]; ok {
-		return fmt.Errorf("project %q is still registered", name)
-	}
-	if err := d.cancelProjectExecutions(ctx, name); err != nil {
-		return err
-	}
-	if err := d.reloadRegistry(); err != nil {
-		return err
-	}
-	if err := d.clearScheduleStateForProject(name); err != nil {
-		return err
-	}
-	d.mu.RLock()
-	repo := d.historyRepo
-	d.mu.RUnlock()
-	if repo == nil {
-		repo = d.scheduler.HistoryRepository()
-	}
-	return projectstate.Remove(ctx, d.layout, name, repo, 30*time.Second)
 }
 
 func (d *Daemon) cancelProjectExecutions(ctx context.Context, project string) error {
@@ -3585,7 +3568,7 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 	}
 	scheduleStateRequired := true
 	switch request.Method {
-	case "config.plan", "config.apply", "config.rollback", "project.rollback", "project.status", "config.status":
+	case "config.plan", "config.apply", "config.rollback", "project.rollback", "project.status", "config.status", "config.validate", "daemon.logs.read", "doctor":
 		scheduleStateRequired = false
 	}
 	if scheduleStateRequired {
@@ -3595,22 +3578,23 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 	}
 	switch request.Method {
 	case "health":
-		d.mu.RLock()
-		configErrors := make(map[string]string, len(d.configErrors))
-		for project, message := range d.configErrors {
-			configErrors[project] = message
+		return success(request, d.healthData(ctx))
+	case "doctor":
+		report, err := d.Doctor(ctx)
+		if err != nil {
+			return failure(request, "DOCTOR_FAILED", err)
 		}
-		d.mu.RUnlock()
-		database := d.historyDatabaseHealth(ctx)
-		capabilities := capability.Discover()
-		status := "ok"
-		if len(configErrors) > 0 || database.Status != "connected" || database.Schema.Status != "ready" {
-			status = "degraded"
+		return success(request, report)
+	case "daemon.logs.read":
+		var p daemonLogRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil {
+			return failure(request, "BAD_PARAMS", err)
 		}
-		return success(request, map[string]interface{}{
-			"status": status, "pid": os.Getpid(), "version": ipc.ProtocolVersion, "config_errors": configErrors,
-			"build": version.Current(), "history_database": database, "capabilities": capabilities, "metrics": d.metrics.Prometheus(),
-		})
+		chunk, err := d.ReadDaemonLog(p.Tail, p.Offset, p.MaxBytes)
+		if err != nil {
+			return failure(request, "DAEMON_LOG_READ_FAILED", err)
+		}
+		return success(request, chunk)
 	case "events.list":
 		var p struct {
 			AfterID int64  `json:"after_id"`
@@ -3672,6 +3656,58 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		}
 		d.mu.RUnlock()
 		return success(request, projects)
+	case "project.register":
+		var p projectTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Project == "" || p.ConfigPath == "" {
+			if err == nil {
+				err = errors.New("project and config_path are required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		result, err := d.RegisterProject(p.Project, p.ConfigPath)
+		if err != nil {
+			return failure(request, "PROJECT_REGISTER_FAILED", err)
+		}
+		return success(request, result)
+	case "project.up":
+		var p projectTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.ConfigPath == "" {
+			if err == nil {
+				err = errors.New("config_path is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		result, err := d.UpProject(p.Project, p.ConfigPath)
+		if err != nil {
+			return failure(request, "PROJECT_UP_FAILED", err)
+		}
+		return success(request, result)
+	case "project.down":
+		var p projectTargetRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || (p.Project == "" && p.ConfigPath == "") {
+			if err == nil {
+				err = errors.New("project or config_path is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		result, err := d.DownProject(p.Project, p.ConfigPath)
+		if err != nil {
+			return failure(request, "PROJECT_DOWN_FAILED", err)
+		}
+		return success(request, result)
+	case "project.rename":
+		var p projectRenameRequest
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.OldProject == "" || p.NewProject == "" {
+			if err == nil {
+				err = errors.New("old_project and new_project are required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		result, err := d.RenameProject(p.OldProject, p.NewProject)
+		if err != nil {
+			return failure(request, "PROJECT_RENAME_FAILED", err)
+		}
+		return success(request, result)
 	case "project.reload":
 		if err := d.reloadRegistry(); err != nil {
 			return failure(request, "REGISTRY_RELOAD_FAILED", err)
@@ -3687,10 +3723,25 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 			}
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if err := d.removeProjectState(ctx, p.Project); err != nil {
+		if err := d.RemoveProject(ctx, p.Project); err != nil {
 			return failure(request, "PROJECT_REMOVE_FAILED", err)
 		}
-		return success(request, map[string]string{"status": "removed", "project": p.Project})
+		return success(request, api.ProjectMutationResult{Project: p.Project, Status: "removed"})
+	case "config.validate":
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(request.Params, &p); err != nil || p.Path == "" {
+			if err == nil {
+				err = errors.New("path is required")
+			}
+			return failure(request, "BAD_PARAMS", err)
+		}
+		result, err := d.ValidateConfig(p.Path)
+		if err != nil {
+			return failure(request, "CONFIG_VALIDATE_FAILED", err)
+		}
+		return success(request, result)
 	case "config.plan":
 		var p struct {
 			Project string `json:"project"`
@@ -3753,8 +3804,18 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		}
 		return success(request, result)
 	case "service.ls":
-		var p struct{ Project string }
+		var p projectTargetRequest
 		_ = json.Unmarshal(request.Params, &p)
+		if p.Project == "" && p.ConfigPath != "" {
+			name, _, registered, err := d.resolveProjectTarget(p.Project, p.ConfigPath)
+			if err != nil {
+				return failure(request, "BAD_PARAMS", err)
+			}
+			if !registered {
+				return success(request, []api.ServiceInfo{})
+			}
+			p.Project = name
+		}
 		return success(request, d.ListProcesses(p.Project))
 	case "service.get":
 		var p struct{ Key string }
