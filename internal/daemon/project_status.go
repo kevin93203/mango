@@ -39,8 +39,13 @@ func (d *Daemon) ensureReconciler(projectName string) {
 		return
 	}
 	project.reconcileRunning = true
+	reconcileDone := make(chan struct{})
+	project.reconcileDone = reconcileDone
 	d.mu.Unlock()
-	go d.reconcileProject(projectName)
+	go func() {
+		defer close(reconcileDone)
+		d.reconcileProject(projectName)
+	}()
 }
 
 func (d *Daemon) reconcileProject(projectName string) {

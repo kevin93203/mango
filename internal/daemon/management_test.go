@@ -100,6 +100,7 @@ func TestProjectUpAndDownPersistScheduleState(t *testing.T) {
 	configPath := filepath.Join(root, "project.yaml")
 	writeTestScheduleConfig(t, configPath, "nightly")
 	d := New(layout)
+	t.Cleanup(func() { _ = d.removeProject("demo") })
 	params := struct {
 		Project    string `json:"project"`
 		ConfigPath string `json:"config_path"`

@@ -97,6 +97,7 @@ type projectRuntime struct {
 	lastError         *api.ReconcileError
 	wake              chan struct{}
 	reconcileRunning  bool
+	reconcileDone     chan struct{}
 	lastReconcileAt   time.Time
 }
 
@@ -1622,9 +1623,24 @@ func (d *Daemon) removeProject(name string) error {
 	d.mu.Lock()
 	project := d.projects[name]
 	delete(d.projects, name)
+	var reconcileDone chan struct{}
+	var wake chan struct{}
+	if project != nil {
+		reconcileDone = project.reconcileDone
+		wake = project.wake
+	}
 	d.mu.Unlock()
 	if project == nil {
 		return nil
+	}
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	if reconcileDone != nil {
+		<-reconcileDone
 	}
 	var firstErr error
 	for _, managed := range project.processes {
