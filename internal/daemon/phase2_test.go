@@ -89,8 +89,8 @@ func TestDaemonRestartRestoresAcceptedGenerationInsteadOfReloadingYAML(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Projects["demo"].ConfigurationGeneration == 0 {
-		t.Fatalf("registry = %+v, want accepted generation", stored.Projects["demo"])
+	if stored.Projects["demo"].ConfigurationGeneration != 1 {
+		t.Fatalf("registry = %+v, want first accepted generation 1", stored.Projects["demo"])
 	}
 	if err := os.WriteFile(configPath, []byte("version: 4\nservices:\n  api:\n    command: changed-without-apply\n    autostart: false\n"), 0o600); err != nil {
 		t.Fatal(err)

@@ -232,7 +232,6 @@ func New(layout paths.Layout) *Daemon {
 		configErrors:            map[string]string{},
 		disabledSchedules:       map[string]bool{},
 		executionCancels:        map[string]context.CancelFunc{},
-		configurationGeneration: 1,
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
 	d.workflow = workflow.New(d.runTaskAttempt, d.recordExecution)
