@@ -11,6 +11,7 @@ shell-based process definition.
 
 - [What Mango provides](#what-mango-provides)
 - [How it works](#how-it-works)
+- [Install](#install)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Command overview](#command-overview)
@@ -91,6 +92,60 @@ The main implementation areas are organized under `internal/`:
 | `scheduler` / `workflow` | Cron execution, task runs, DAGs, retries, and history |
 | `health` / `metrics` / `logging` | Probes, process metrics, and rotating logs |
 | `registry` / `startup` / `tui` | Project registry, OS startup integration, and terminal UI |
+
+## Install
+
+Mango publishes a GitHub Release for every `v*` tag. The release contains the
+`mango` CLI, the `mangod` daemon, and the `mango-shim` supervisor in one
+platform archive. The installer verifies the archive SHA-256 checksum before
+replacing any installed executable.
+
+macOS/Linux:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/kevin93203/mango/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/kevin93203/mango/main/install.ps1 | iex
+```
+
+From `cmd.exe`, the equivalent one-liner is:
+
+```cmd
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/kevin93203/mango/main/install.ps1 | iex"
+```
+
+The installers install to `~/.local/bin` (or `$HOME\.local\bin` on
+Windows), add that directory to the user PATH, and install all three binaries
+together. Open a new terminal after installation if the current shell does not
+see the updated PATH. To install a specific release instead of the latest
+release, set `MANGO_VERSION` before evaluating the installer:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/kevin93203/mango/v0.1.0/install.sh | MANGO_VERSION=v0.1.0 sh
+```
+
+```powershell
+$env:MANGO_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/kevin93203/mango/v0.1.0/install.ps1 | iex
+```
+
+`MANGO_INSTALL_DIR` changes the destination and `MANGO_NO_MODIFY_PATH=1`
+prevents the installer from changing a shell/user PATH. The installer uses
+release assets from `kevin93203/mango`; forks can set `MANGO_REPO=OWNER/REPO`.
+The current workflow publishes Linux/Windows `amd64` and macOS `amd64`/
+`arm64` archives. Both installers also recognize Windows/Linux `arm64` when a
+matching platform archive is published.
+
+After installation, verify the three-binary installation and daemon discovery:
+
+```sh
+mango --version
+mango daemon start
+mango doctor --json
+```
 
 ## Requirements
 
@@ -1723,11 +1778,13 @@ container isolation, or a security sandbox.
 
 ## Release, migration, and rollback
 
-The formal release output is a per-platform CI artifact, not a GitHub Release.
-Tagging `v*` or manually dispatching `.github/workflows/release-artifacts.yml`
-builds native Windows, Linux, and macOS packages. Each archive contains the
-three binaries together with `manifest.json`, the example configuration, and
-the README, plus a companion `.sha256` file.
+The formal release output is a GitHub Release created automatically by
+`.github/workflows/release-artifacts.yml` when a `v*` tag is pushed. Manually
+dispatching that workflow builds and verifies platform packages without
+publishing a release. Each release contains native Windows, Linux, and macOS
+archives, a companion `.sha256` file, and the versioned installer scripts.
+Each archive contains the three binaries together with `manifest.json`, the
+example configuration, and the README.
 
 All binaries support `--version`. Go build metadata is injected with ldflags;
 the Rust shim receives the same values through its build environment. The

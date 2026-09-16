@@ -103,6 +103,15 @@ try {
     $env:MANGO_HOME = $homeRoot
     Push-Location $probeRoot
     try {
+        # The doctor and config validation endpoints are daemon-owned. Start
+        # the packaged daemon first; this also exercises sibling mangod
+        # discovery before the health and validation checks below.
+        & $cli daemon start 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "packaged daemon failed to start"
+        }
+        $daemonStarted = $true
+
         $doctorOutput = & $cli doctor --json 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "mango doctor --json failed: $($doctorOutput -join "`n")"
@@ -117,11 +126,6 @@ try {
             throw "packaged YAML v4 example failed validation"
         }
 
-        & $cli daemon start 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "packaged daemon failed to start"
-        }
-        $daemonStarted = $true
         $healthOutput = & $cli doctor --json 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "packaged daemon health check failed: $($healthOutput -join "`n")"

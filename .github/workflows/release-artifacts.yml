@@ -15,10 +15,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep the runners native so the Rust shim is built for the same
+        # architecture as the Go binaries. macOS is included once per
+        # supported desktop architecture.
         os:
           - ubuntu-latest
           - windows-latest
-          - macos-latest
+          - macos-13
+          - macos-14
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -37,6 +41,9 @@ jobs:
         run: |
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $releaseVersion = $env:GITHUB_REF_NAME
+            if ($releaseVersion -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
+              throw "release tags must use SemVer form vMAJOR.MINOR.PATCH: $releaseVersion"
+            }
           } else {
             $releaseVersion = "dev-$env:GITHUB_RUN_NUMBER"
           }
@@ -94,3 +101,38 @@ jobs:
           name: mango-${{ matrix.os }}-${{ runner.arch }}
           if-no-files-found: error
           path: dist/*
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mango-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          assets=(release-assets/* install.sh install.ps1)
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Mango $tag" \
+              --generate-notes
+          fi

@@ -3,11 +3,18 @@
 ## Build and package
 
 - [ ] Build on native Windows, Linux, and macOS runners.
+- [ ] Push an annotated `vMAJOR.MINOR.PATCH` tag; confirm the release workflow
+      creates a non-draft GitHub Release instead of only a CI artifact.
 - [ ] Inject the same version, commit, and UTC build date into all three binaries.
 - [ ] Package `mango`, `mangod`, `mango-shim`, `manifest.json`, `README.md`, and
       `mango.example.yaml` at one archive level.
 - [ ] Recompute every binary and archive SHA-256 from the package.
 - [ ] Verify all three `--version` commands and sibling executable discovery.
+- [ ] Verify the release contains every archive, every `.sha256` file, and both
+      installer scripts (`install.sh` and `install.ps1`).
+- [ ] Test both installers with a temporary installation directory and a pinned
+      `MANGO_VERSION`; verify checksum failure leaves an existing installation
+      unchanged.
 
 ## Compatibility and migration
 
