@@ -106,16 +106,29 @@ try {
         # The doctor and config validation endpoints are daemon-owned. Start
         # the packaged daemon first; this also exercises sibling mangod
         # discovery before the health and validation checks below.
-        & $cli daemon start 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "packaged daemon failed to start"
+        $startOutput = & $cli daemon start 2>&1
+        $startExitCode = $LASTEXITCODE
+        $doctorOutput = @()
+        $doctorReady = $false
+        $startupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ([DateTime]::UtcNow -lt $startupDeadline) {
+            $doctorOutput = & $cli doctor --json 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $doctorReady = $true
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $doctorReady) {
+            $startText = $startOutput -join "`n"
+            $doctorText = $doctorOutput -join "`n"
+            if ($startExitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($startText)) {
+                throw "packaged daemon failed to start: $startText`nlast doctor output: $doctorText"
+            }
+            throw "packaged daemon failed to become ready: $doctorText"
         }
         $daemonStarted = $true
 
-        $doctorOutput = & $cli doctor --json 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "mango doctor --json failed: $($doctorOutput -join "`n")"
-        }
         $doctor = ($doctorOutput -join "`n") | ConvertFrom-Json
         $resolvedDaemon = [string]$doctor.daemon_executable
         if ([System.IO.Path]::GetFullPath($resolvedDaemon) -ne [System.IO.Path]::GetFullPath($daemon)) {
