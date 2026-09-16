@@ -188,6 +188,35 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 	}
 }
 
+func TestCobraServiceLifecycleAllFlag(t *testing.T) {
+	app, _ := newTestRoot(t)
+	root := app.rootCommand()
+	for _, action := range []string{"start", "stop", "restart"} {
+		command, _, err := root.Find([]string{action})
+		if err != nil || command == root {
+			t.Fatalf("command %q missing: command=%v err=%v", action, command, err)
+		}
+		if command.Flag("all") == nil {
+			t.Fatalf("command %q missing --all", action)
+		}
+		if command.Flag("all").Shorthand != "a" {
+			t.Fatalf("command %q --all shorthand = %q, want a", action, command.Flag("all").Shorthand)
+		}
+		if command.Use != action+" [TARGET...]" {
+			t.Fatalf("command %q use = %q, want optional targets", action, command.Use)
+		}
+	}
+	for _, action := range []string{"enable", "disable"} {
+		command, _, err := root.Find([]string{action})
+		if err != nil || command == root {
+			t.Fatalf("command %q missing: command=%v err=%v", action, command, err)
+		}
+		if command.Flag("all") != nil {
+			t.Fatalf("command %q unexpectedly exposes --all", action)
+		}
+	}
+}
+
 func TestCobraRejectsRemovedServiceNamespaceAndAliases(t *testing.T) {
 	for _, args := range [][]string{{"service"}, {"service", "list"}, {"ps"}, {"ls"}} {
 		name := strings.Join(args, " ")

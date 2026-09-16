@@ -216,6 +216,7 @@ type executionListRequest struct {
 type serviceBulkRequest struct {
 	Action  string   `json:"action"`
 	Targets []string `json:"targets"`
+	All     bool     `json:"all,omitempty"`
 }
 
 type bulkProjectSelection struct {
@@ -2767,11 +2768,15 @@ func (d *Daemon) RestartProcess(key string) error {
 }
 
 // BulkServiceOperation expands project targets and executes lifecycle actions
-// in dependency order. It deliberately operates only on the explicit target
+// in dependency order. It deliberately operates only on the selected target
 // set so that a bulk restart does not also apply the single-service restart
 // propagation rules.
 func (d *Daemon) BulkServiceOperation(action string, targets []string) []api.ServiceOperationResult {
-	keys, results := d.planBulkServices(targets)
+	return d.bulkServiceOperation(action, targets, false)
+}
+
+func (d *Daemon) bulkServiceOperation(action string, targets []string, all bool) []api.ServiceOperationResult {
+	keys, results := d.planBulkServicesWithAll(targets, all)
 	if len(keys) == 0 {
 		return results
 	}
@@ -2823,6 +2828,10 @@ func (d *Daemon) BulkServiceOperation(action string, targets []string) []api.Ser
 }
 
 func (d *Daemon) planBulkServices(targets []string) ([]string, []api.ServiceOperationResult) {
+	return d.planBulkServicesWithAll(targets, false)
+}
+
+func (d *Daemon) planBulkServicesWithAll(targets []string, all bool) ([]string, []api.ServiceOperationResult) {
 	selections := make(map[string]*bulkProjectSelection)
 	projectOrder := make([]string, 0)
 	results := make([]api.ServiceOperationResult, 0)
@@ -2836,6 +2845,18 @@ func (d *Daemon) planBulkServices(targets []string) ([]string, []api.ServiceOper
 			projectOrder = append(projectOrder, projectName)
 		}
 		return selection
+	}
+
+	if all {
+		d.mu.RLock()
+		targets = make([]string, 0, len(d.projects))
+		for projectName, project := range d.projects {
+			if len(project.processes) > 0 {
+				targets = append(targets, projectName)
+			}
+		}
+		d.mu.RUnlock()
+		sort.Strings(targets)
 	}
 
 	for _, target := range targets {
@@ -3872,7 +3893,10 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		if err := json.Unmarshal(request.Params, &p); err != nil {
 			return failure(request, "BAD_PARAMS", err)
 		}
-		if len(p.Targets) == 0 {
+		if p.All && len(p.Targets) > 0 {
+			return failure(request, "BAD_PARAMS", errors.New("service bulk --all cannot be combined with targets"))
+		}
+		if !p.All && len(p.Targets) == 0 {
 			return failure(request, "BAD_PARAMS", errors.New("service bulk requires at least one target"))
 		}
 		switch p.Action {
@@ -3880,7 +3904,10 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		default:
 			return failure(request, "BAD_PARAMS", fmt.Errorf("unsupported service bulk action %q", p.Action))
 		}
-		return success(request, d.BulkServiceOperation(p.Action, p.Targets))
+		if p.All && p.Action != "start" && p.Action != "stop" && p.Action != "restart" {
+			return failure(request, "BAD_PARAMS", errors.New("service bulk --all is only supported for start, stop, and restart"))
+		}
+		return success(request, d.bulkServiceOperation(p.Action, p.Targets, p.All))
 	case "schedule.bulk":
 		var p scheduleBulkRequest
 		if err := json.Unmarshal(request.Params, &p); err != nil {

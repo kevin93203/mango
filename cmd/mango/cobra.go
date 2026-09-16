@@ -567,12 +567,20 @@ func (a *cliApp) configCmd() *cobra.Command {
 }
 
 func (a *cliApp) processCmd(action string) *cobra.Command {
-	cmd := a.leafCmd(action+" TARGET [TARGET...]", strings.Title(action)+" one or more services", cobra.MinimumNArgs(1), func(args []string) error {
-		if err := validateServiceOperationTargets(args); err != nil {
-			return err
-		}
-		return processCommand(action, args)
+	allowAll := action == "start" || action == "stop" || action == "restart"
+	use := action + " TARGET [TARGET...]"
+	if allowAll {
+		use = action + " [TARGET...]"
+	}
+	var all bool
+	cmd := a.leafCmd(use, strings.Title(action)+" one or more services", func(_ *cobra.Command, args []string) error {
+		return validateProcessArgs(action, allowAll, all, args)
+	}, func(args []string) error {
+		return processCommand(action, args, all)
 	})
+	if allowAll {
+		cmd.Flags().BoolVarP(&all, "all", "a", false, "operate on all services in enabled projects")
+	}
 	a.addJSONFlag(cmd)
 	cmd.GroupID = groupManage
 	return cmd

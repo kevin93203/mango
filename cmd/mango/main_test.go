@@ -1235,8 +1235,9 @@ func TestProcessBulkCommandSendsProjectTargetsAndPrintsEachResult(t *testing.T) 
 	var params struct {
 		Action  string   `json:"action"`
 		Targets []string `json:"targets"`
+		All     bool     `json:"all"`
 	}
-	err := processBulkCommandWithCaller("restart", []string{"demo", "other/api"}, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+	err := processBulkCommandWithCaller("restart", []string{"demo", "other/api"}, false, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
 		method = gotMethod
 		encoded, err := json.Marshal(gotParams)
 		if err != nil {
@@ -1261,6 +1262,71 @@ func TestProcessBulkCommandSendsProjectTargetsAndPrintsEachResult(t *testing.T) 
 	}
 }
 
+func TestProcessBulkCommandSendsAll(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	var method string
+	var params struct {
+		Action  string   `json:"action"`
+		Targets []string `json:"targets"`
+		All     bool     `json:"all"`
+	}
+	err := processBulkCommandWithCaller("start", []string{}, true, func(gotMethod string, gotParams interface{}) (ipc.Response, error) {
+		method = gotMethod
+		encoded, err := json.Marshal(gotParams)
+		if err != nil {
+			return ipc.Response{}, err
+		}
+		if err := json.Unmarshal(encoded, &params); err != nil {
+			return ipc.Response{}, err
+		}
+		return ipc.Response{Data: []api.ServiceOperationResult{}}, nil
+	})
+	if err != nil {
+		t.Fatalf("all bulk command = %v", err)
+	}
+	if method != "service.bulk" || params.Action != "start" || !params.All || len(params.Targets) != 0 {
+		t.Fatalf("request = method %q params %+v, want service.bulk start all", method, params)
+	}
+}
+
+func TestValidateProcessArgs(t *testing.T) {
+	cases := []struct {
+		name      string
+		action    string
+		allowAll  bool
+		all       bool
+		args      []string
+		wantError string
+	}{
+		{name: "all", action: "start", allowAll: true, all: true},
+		{name: "missing target", action: "start", allowAll: true, wantError: "or --all"},
+		{name: "mixed", action: "stop", allowAll: true, all: true, args: []string{"demo/api"}, wantError: "cannot be combined"},
+		{name: "non bulk missing target", action: "enable", wantError: "requires at least one"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateProcessArgs(test.action, test.allowAll, test.all, test.args)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateProcessArgs() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("validateProcessArgs() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestProcessBulkCommandPrintsJSONAndReturnsPartialFailure(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput
@@ -1271,7 +1337,7 @@ func TestProcessBulkCommandPrintsJSONAndReturnsPartialFailure(t *testing.T) {
 	cliOutput = cliui.New(&stdout, &stderr, cliui.Options{Color: cliui.ColorNever, JSON: true})
 	jsonOutput = true
 
-	err := processBulkCommandWithCaller("stop", []string{"demo"}, func(string, interface{}) (ipc.Response, error) {
+	err := processBulkCommandWithCaller("stop", []string{"demo"}, false, func(string, interface{}) (ipc.Response, error) {
 		return ipc.Response{Data: []api.ServiceOperationResult{
 			{Key: "demo/api", Status: "ok"},
 			{Key: "demo/web", Status: "error", Error: "stop timeout"},

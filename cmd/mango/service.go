@@ -112,7 +112,32 @@ func printEventTable(events []observability.Event) {
 	cliOutput.Table([]string{"ID", "TIME", "TYPE", "ACTOR", "TARGET", "RUN_ID", "METADATA"}, rows)
 }
 
-func processCommand(command string, args []string) error {
+func validateProcessArgs(action string, allowAll, all bool, args []string) error {
+	if all {
+		if !allowAll {
+			return fmt.Errorf("--all is not supported for %s", action)
+		}
+		if len(args) > 0 {
+			return errors.New("--all cannot be combined with targets")
+		}
+		return nil
+	}
+	if len(args) == 0 {
+		if allowAll {
+			return fmt.Errorf("%s requires at least one PROJECT, PROJECT/SERVICE, or ID, or --all", action)
+		}
+		return fmt.Errorf("%s requires at least one PROJECT, PROJECT/SERVICE, or ID", action)
+	}
+	return validateServiceOperationTargets(args)
+}
+
+func processCommand(command string, args []string, all bool) error {
+	if all {
+		if len(args) > 0 {
+			return errors.New("--all cannot be combined with targets")
+		}
+		return processBulkCommand(command, args, true)
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("%s requires at least one PROJECT, PROJECT/SERVICE, or ID", command)
 	}
@@ -120,7 +145,7 @@ func processCommand(command string, args []string) error {
 		return fmt.Errorf("--follow is only supported by logs; try: mango logs %s --follow", args[0])
 	}
 	if containsProjectTarget(args) {
-		return processBulkCommand(command, args)
+		return processBulkCommand(command, args, false)
 	}
 	return processCommandWithCaller(command, args, func(key string) (ipc.Response, error) {
 		return callWithTimeout("service."+command, struct{ Key string }{key}, processOperationTimeout)
@@ -148,17 +173,18 @@ func isNonNegativeIntegerTarget(value string) bool {
 	return true
 }
 
-func processBulkCommand(command string, args []string) error {
-	return processBulkCommandWithCaller(command, args, func(method string, params interface{}) (ipc.Response, error) {
+func processBulkCommand(command string, args []string, all bool) error {
+	return processBulkCommandWithCaller(command, args, all, func(method string, params interface{}) (ipc.Response, error) {
 		return callWithTimeout(method, params, processOperationTimeout)
 	})
 }
 
-func processBulkCommandWithCaller(command string, args []string, caller func(string, interface{}) (ipc.Response, error)) error {
+func processBulkCommandWithCaller(command string, args []string, all bool, caller func(string, interface{}) (ipc.Response, error)) error {
 	response, err := caller("service.bulk", struct {
 		Action  string   `json:"action"`
 		Targets []string `json:"targets"`
-	}{Action: command, Targets: args})
+		All     bool     `json:"all,omitempty"`
+	}{Action: command, Targets: args, All: all})
 	if err != nil {
 		return err
 	}

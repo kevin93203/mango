@@ -442,16 +442,17 @@ mango up [--project NAME] [--file PATH] [--no-daemon] [--wait]
 mango list [PROJECT]
 mango down [--project NAME] [--file PATH]
 mango status PROJECT/SERVICE
-mango start PROJECT/SERVICE
-mango stop PROJECT/SERVICE
-mango restart PROJECT/SERVICE
+mango start [TARGET ...] [--all]
+mango stop [TARGET ...] [--all]
+mango restart [TARGET ...] [--all]
 mango enable PROJECT/SERVICE
 mango disable PROJECT/SERVICE
 ```
 
 All service lifecycle commands are available at the root. They accept a
 project name to operate on all services in that project, a numeric service ID,
-or multiple targets.
+or multiple targets. `start`, `stop`, and `restart` also accept `--all` to
+operate on every service in enabled projects.
 
 Service IDs are convenient for a running daemon but can change after a daemon
 restart; project and service names are the stable form.
@@ -1131,9 +1132,9 @@ IDs rather than root executions.
 ### Service lifecycle commands
 
 ```text
-mango start TARGET [TARGET ...] [--json]
-mango stop TARGET [TARGET ...] [--json]
-mango restart TARGET [TARGET ...] [--json]
+mango start [TARGET ...] [--all] [--json]
+mango stop [TARGET ...] [--all] [--json]
+mango restart [TARGET ...] [--all] [--json]
 mango enable TARGET [TARGET ...] [--json]
 mango disable TARGET [TARGET ...] [--json]
 ```
@@ -1150,9 +1151,18 @@ Multiple targets are accepted:
 mango start demo
 mango stop demo/api 2 other/web
 mango restart demo/api
+mango start --all
+mango stop --all
+mango restart --all
 mango disable demo/api
 mango enable demo/api
 ```
+
+For `start`, `stop`, and `restart`, `--all` selects every service in the
+daemon's currently enabled projects. It cannot be combined with positional
+targets; use a project target when only one project's services should be
+selected. A project that is disabled, down, or not currently loaded is not
+implicitly enabled by `--all`.
 
 | Command | Behavior |
 | --- | --- |

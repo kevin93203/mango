@@ -1614,6 +1614,42 @@ services:
 	}
 }
 
+func TestPlanBulkServicesAllSelectsEnabledProjectsInOrder(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	alphaPath := filepath.Join(root, "alpha.yaml")
+	betaPath := filepath.Join(root, "beta.yaml")
+	disabledPath := filepath.Join(root, "disabled.yaml")
+	writeTestConfig(t, alphaPath, "db", "api")
+	writeTestConfig(t, betaPath, "worker")
+	writeTestConfig(t, disabledPath, "ignored")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 4,
+		Projects: map[string]registry.Project{
+			"beta":     {Name: "beta", ConfigPath: betaPath, Enabled: true},
+			"alpha":    {Name: "alpha", ConfigPath: alphaPath, Enabled: true},
+			"disabled": {Name: "disabled", ConfigPath: disabledPath, Enabled: false},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
+	waitForDaemonStatus(t, d, "beta", func(status api.ProjectStatus) bool { return status.Ready })
+	keys, results := d.planBulkServicesWithAll(nil, true)
+	if len(results) != 0 {
+		t.Fatalf("planning results = %+v, want no errors", results)
+	}
+	want := []string{"alpha/api", "alpha/db", "beta/worker"}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("planned keys = %v, want %v", keys, want)
+	}
+}
+
 func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)
@@ -1659,6 +1695,40 @@ func TestServiceBulkIPCRejectsBadParams(t *testing.T) {
 	response := d.Handle(context.Background(), request)
 	if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
 		t.Fatalf("response = %+v, want BAD_PARAMS", response)
+	}
+}
+
+func TestServiceBulkIPCAllSupportsEmptySetAndRejectsInvalidCombinations(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+
+	request, err := ipc.NewRequest("service.bulk", serviceBulkRequest{Action: "start", All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := d.Handle(context.Background(), request)
+	if !response.OK {
+		t.Fatalf("all service bulk failed: %+v", response.Error)
+	}
+	var results []api.ServiceOperationResult
+	if err := decodeTestData(response.Data, &results); err != nil {
+		t.Fatal(err)
+	}
+	if results == nil || len(results) != 0 {
+		t.Fatalf("all service bulk results = %+v, want empty result", results)
+	}
+
+	for _, test := range []serviceBulkRequest{
+		{Action: "stop", Targets: []string{"demo/api"}, All: true},
+		{Action: "enable", All: true},
+	} {
+		request, err = ipc.NewRequest("service.bulk", test)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response = d.Handle(context.Background(), request)
+		if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
+			t.Fatalf("request %+v response = %+v, want BAD_PARAMS", test, response)
+		}
 	}
 }
 
