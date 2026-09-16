@@ -17,12 +17,13 @@ jobs:
       matrix:
         # Keep the runners native so the Rust shim is built for the same
         # architecture as the Go binaries. macOS is included once per
-        # supported desktop architecture.
+        # supported desktop architecture. macOS 15 is used because the
+        # older macOS 13/14 images are retired or scheduled for retirement.
         os:
           - ubuntu-latest
           - windows-latest
-          - macos-13
-          - macos-14
+          - macos-15-intel
+          - macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
