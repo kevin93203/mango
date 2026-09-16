@@ -108,6 +108,10 @@ try {
         # discovery before the health and validation checks below.
         $startOutput = & $cli daemon start 2>&1
         $startExitCode = $LASTEXITCODE
+        $startText = $startOutput -join "`n"
+        if ($startExitCode -ne 0 -and -not $startText.Contains("daemon did not become ready within 5 seconds")) {
+            throw "packaged daemon failed to start: $startText"
+        }
         $doctorOutput = @()
         $doctorReady = $false
         $startupDeadline = [DateTime]::UtcNow.AddSeconds(20)
@@ -120,7 +124,6 @@ try {
             Start-Sleep -Milliseconds 500
         }
         if (-not $doctorReady) {
-            $startText = $startOutput -join "`n"
             $doctorText = $doctorOutput -join "`n"
             if ($startExitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($startText)) {
                 throw "packaged daemon failed to start: $startText`nlast doctor output: $doctorText"
