@@ -22,6 +22,7 @@ const STATE_STOPPED: &str = "stopped";
 const STATE_STARTING: &str = "starting";
 const STATE_STOPPING: &str = "stopping";
 const STATE_EXITED: &str = "exited";
+const STATE_FAILED: &str = "failed";
 const STATE_BACKING_OFF: &str = "backing_off";
 const STATE_CRASH_LOOP: &str = "crash_loop";
 const STATE_ORPHANED: &str = "orphaned";
@@ -256,7 +257,7 @@ impl Supervisor {
         if runtime.child.is_none()
             && let Err(error) = spawn_runtime(&mut runtime, &self.paths, &self.bootstrap)
         {
-            runtime.status.state = "failed".to_string();
+            runtime.status.state = STATE_FAILED.to_string();
             runtime.status.last_error = Some(error.to_string());
             let _ = self.persist_status_locked(&runtime);
             return failure(request, "START_FAILED", error.to_string());
@@ -335,7 +336,7 @@ impl Supervisor {
         }
         runtime.status.desired_state = "running".to_string();
         if let Err(error) = spawn_runtime(&mut runtime, &self.paths, &self.bootstrap) {
-            runtime.status.state = "failed".to_string();
+            runtime.status.state = STATE_FAILED.to_string();
             runtime.status.last_error = Some(error.to_string());
             let _ = self.persist_status_locked(&runtime);
             return failure(request, "START_FAILED", error.to_string());
@@ -405,7 +406,10 @@ impl Supervisor {
                     }
                 }
             } else if runtime.status.desired_state == "running"
-                && runtime.status.state != STATE_ORPHANED
+                && matches!(
+                    runtime.status.state.as_str(),
+                    STATE_STOPPED | STATE_FAILED | STATE_BACKING_OFF
+                )
             {
                 let due = runtime
                     .status
@@ -416,7 +420,7 @@ impl Supervisor {
                     .unwrap_or(true);
                 if due {
                     if let Err(error) = spawn_runtime(&mut runtime, &self.paths, &self.bootstrap) {
-                        runtime.status.state = "failed".to_string();
+                        runtime.status.state = STATE_FAILED.to_string();
                         runtime.status.last_error = Some(error.to_string());
                     }
                     changed = true;
