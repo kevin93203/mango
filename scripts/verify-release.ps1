@@ -107,6 +107,12 @@ try {
         # the packaged daemon first; this also exercises sibling mangod
         # discovery before the health and validation checks below.
         $daemonReadinessTimeoutMarker = "daemon did not become ready within"
+        $doctorTransientMarkers = @(
+            "daemon is unavailable",
+            "daemon is not running",
+            "connection refused",
+            "no such file or directory"
+        )
         $startOutput = & $cli daemon start 2>&1
         $startExitCode = $LASTEXITCODE
         $startText = $startOutput -join "`n"
@@ -121,6 +127,17 @@ try {
             $doctorOutput = & $cli doctor --json 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $doctorReady = $true
+                break
+            }
+            $doctorText = $doctorOutput -join "`n"
+            $doctorLooksTransient = $false
+            foreach ($marker in $doctorTransientMarkers) {
+                if ($doctorText.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $doctorLooksTransient = $true
+                    break
+                }
+            }
+            if (-not $doctorLooksTransient) {
                 break
             }
             $remaining = $startupDeadline - [DateTime]::UtcNow
