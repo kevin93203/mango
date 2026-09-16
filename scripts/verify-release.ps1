@@ -110,7 +110,8 @@ try {
         $startOutput = & $cli daemon start 2>&1
         $startExitCode = $LASTEXITCODE
         $startText = $startOutput -join "`n"
-        if ($startExitCode -ne 0 -and -not $startText.Contains($daemonReadinessTimeoutMarker)) {
+        $isReadinessTimeout = $startText.IndexOf($daemonReadinessTimeoutMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($startExitCode -ne 0 -and -not $isReadinessTimeout) {
             throw "packaged daemon failed to start: $startText"
         }
         $doctorOutput = @()
