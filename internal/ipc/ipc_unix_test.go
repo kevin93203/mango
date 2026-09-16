@@ -14,6 +14,67 @@ import (
 	"time"
 )
 
+func TestServeWaitsForActiveConnectionsBeforeReturning(t *testing.T) {
+	listener, err := net.Listen("unix", shortEndpoint(t))
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("Unix socket bind is unavailable in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- Serve(ctx, listener, func(_ context.Context, request Request) Response {
+			close(started)
+			cancel()
+			<-release
+			return Response{Version: ProtocolVersion, ID: request.ID, OK: true}
+		})
+	}()
+
+	conn, err := net.Dial("unix", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(Request{Version: ProtocolVersion, ID: "stop"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve returned before active connection completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	var response Response
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("response = %+v", response)
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after active connection completed")
+	}
+}
+
 func TestListenDoesNotRemoveExistingEndpoint(t *testing.T) {
 	endpoint := shortEndpoint(t)
 	listener, err := net.Listen("unix", endpoint)

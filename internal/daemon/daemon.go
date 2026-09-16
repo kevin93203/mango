@@ -86,7 +86,6 @@ type Daemon struct {
 	serviceStateLoaded      bool
 	ctx                     context.Context
 	cancel                  context.CancelFunc
-	shutdownDone            chan struct{}
 }
 
 type projectRuntime struct {
@@ -382,14 +381,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.mu.Lock()
 	runCtx, cancel := context.WithCancel(ctx)
 	d.ctx, d.cancel = runCtx, cancel
-	d.shutdownDone = make(chan struct{})
-	shutdownDone := d.shutdownDone
 	d.mu.Unlock()
 	d.scheduler.SetContext(runCtx)
-	defer func() {
-		d.shutdown()
-		close(shutdownDone)
-	}()
+	defer d.shutdown()
 	if err := d.scheduler.SetHistoryLimit(daemonConfig.ScheduleHistoryLimit); err != nil {
 		return err
 	}
@@ -3773,13 +3767,9 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		d.stopAllServices(true)
 		d.mu.RLock()
 		cancel := d.cancel
-		shutdownDone := d.shutdownDone
 		d.mu.RUnlock()
 		if cancel != nil {
 			cancel()
-			if shutdownDone != nil {
-				<-shutdownDone
-			}
 		}
 		return success(request, map[string]string{"status": "stopping"})
 	case "project.ls":

@@ -37,6 +37,9 @@ func daemonStopCommand() error {
 	if err != nil {
 		return err
 	}
+	if err := waitForDaemonStop(); err != nil {
+		return err
+	}
 	if jsonOutput {
 		return cliOutput.JSON(response.Data)
 	}

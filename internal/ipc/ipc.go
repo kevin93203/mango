@@ -146,6 +146,9 @@ func Serve(ctx context.Context, listener net.Listener, handler Handler) error {
 		}
 	}()
 	defer close(done)
+	// Keep the daemon alive until accepted clients have received their replies.
+	var connections sync.WaitGroup
+	defer connections.Wait()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -160,7 +163,11 @@ func Serve(ctx context.Context, listener net.Listener, handler Handler) error {
 			}
 			return err
 		}
-		go serveConn(ctx, conn, handler)
+		connections.Add(1)
+		go func(conn net.Conn) {
+			defer connections.Done()
+			serveConn(ctx, conn, handler)
+		}(conn)
 	}
 }
 

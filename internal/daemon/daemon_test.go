@@ -353,13 +353,11 @@ func TestHistoryDatabaseInfoRedactsDSN(t *testing.T) {
 	}
 }
 
-func TestDaemonStopWaitsForShutdown(t *testing.T) {
+func TestDaemonStopCancelsAndReturns(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	cancelled := make(chan struct{})
-	shutdownDone := make(chan struct{})
 	d.mu.Lock()
 	d.cancel = func() { close(cancelled) }
-	d.shutdownDone = shutdownDone
 	d.mu.Unlock()
 
 	responseCh := make(chan ipc.Response, 1)
@@ -372,13 +370,6 @@ func TestDaemonStopWaitsForShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("daemon.stop did not cancel the daemon")
 	}
-	select {
-	case response := <-responseCh:
-		t.Fatalf("daemon.stop returned before shutdown completed: %+v", response)
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	close(shutdownDone)
 	select {
 	case response := <-responseCh:
 		if !response.OK {
