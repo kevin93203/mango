@@ -135,7 +135,7 @@ try {
             if ([string]::IsNullOrWhiteSpace($doctorText)) {
                 $doctorText = "no doctor output captured"
             }
-            if ($startExitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($startText)) {
+            if ($startExitCode -ne 0 -and -not $isReadinessTimeout -and -not [string]::IsNullOrWhiteSpace($startText)) {
                 throw "packaged daemon failed to start: $startText`nlast doctor output: $doctorText"
             }
             throw "packaged daemon failed to become ready: $doctorText"
