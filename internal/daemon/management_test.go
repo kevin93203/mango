@@ -94,6 +94,22 @@ func TestManagementRPCsOwnProjectLifecycle(t *testing.T) {
 	}
 }
 
+func TestProjectRemoveReportsMissingProject(t *testing.T) {
+	d := New(testLayout(t.TempDir()))
+	response := d.Handle(context.Background(), requestForMethodWithParams(t, "project.remove", struct {
+		Project string `json:"project"`
+	}{Project: "missing"}))
+	if response.OK {
+		t.Fatal("project.remove unexpectedly succeeded for missing project")
+	}
+	if response.Error == nil || response.Error.Code != "PROJECT_REMOVE_FAILED" {
+		t.Fatalf("project.remove error = %+v, want PROJECT_REMOVE_FAILED", response.Error)
+	}
+	if response.Error.Message != `project "missing" is not registered` {
+		t.Fatalf("project.remove message = %q, want project not registered", response.Error.Message)
+	}
+}
+
 func TestProjectUpAndDownPersistScheduleState(t *testing.T) {
 	root := t.TempDir()
 	layout := testLayout(root)

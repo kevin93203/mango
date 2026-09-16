@@ -552,6 +552,12 @@ func (d *Daemon) RemoveProject(ctx context.Context, name string) error {
 		return err
 	}
 	_, registeredOnDisk := diskRegistry.Projects[name]
+	d.mu.RLock()
+	_, registeredInMemory := d.registry.Projects[name]
+	d.mu.RUnlock()
+	if !registeredOnDisk && !registeredInMemory {
+		return fmt.Errorf("project %q is not registered", name)
+	}
 	if err := d.cancelProjectExecutions(ctx, name); err != nil {
 		return err
 	}
