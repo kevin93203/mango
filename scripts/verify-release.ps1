@@ -106,10 +106,11 @@ try {
         # The doctor and config validation endpoints are daemon-owned. Start
         # the packaged daemon first; this also exercises sibling mangod
         # discovery before the health and validation checks below.
+        $daemonReadinessTimeoutMarker = "daemon did not become ready within"
         $startOutput = & $cli daemon start 2>&1
         $startExitCode = $LASTEXITCODE
         $startText = $startOutput -join "`n"
-        if ($startExitCode -ne 0 -and -not $startText.Contains("daemon did not become ready within 5 seconds")) {
+        if ($startExitCode -ne 0 -and -not $startText.Contains($daemonReadinessTimeoutMarker)) {
             throw "packaged daemon failed to start: $startText"
         }
         $doctorOutput = @()
