@@ -360,12 +360,11 @@ func TestApplyAcceptsRuntimeFailureAndPublishesStatus(t *testing.T) {
 	if status.Generation == 0 || status.LastError == nil || len(status.Resources) != 1 || status.Resources[0].Phase != api.ResourcePhaseDegraded {
 		t.Fatalf("status = %+v, want accepted generation with resource failure", status)
 	}
-	stored, err := registry.Load(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Projects["demo"].ConfigurationGeneration != status.Generation {
-		t.Fatalf("registry generation = %d, status generation = %d", stored.Projects["demo"].ConfigurationGeneration, status.Generation)
+	stored := waitForRegistryProject(t, layout.Registry, "demo", func(project registry.Project) bool {
+		return project.ConfigurationGeneration == status.Generation && project.LastReconcileGeneration == status.Generation && project.LastReconcileError != "" && project.LastReconcileErrorAt != nil
+	})
+	if stored.ConfigurationGeneration != status.Generation {
+		t.Fatalf("registry generation = %d, status generation = %d", stored.ConfigurationGeneration, status.Generation)
 	}
 	snapshot, err := generation.LoadSnapshot(generation.SnapshotPath(layout.State, "demo", status.Generation), "demo", status.Generation)
 	if err != nil {
@@ -464,6 +463,29 @@ func waitForDaemonStatus(t *testing.T, d *Daemon, project string, predicate func
 	status, err := d.ProjectStatus(project)
 	t.Fatalf("project status did not reach expected state: status=%+v err=%v", status, err)
 	return api.ProjectStatus{}
+}
+
+func waitForRegistryProject(t *testing.T, path, project string, predicate func(registry.Project) bool) registry.Project {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		stored, err := registry.Load(path)
+		if err == nil {
+			if storedProject, ok := stored.Projects[project]; ok && predicate(storedProject) {
+				return storedProject
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	stored, err := registry.Load(path)
+	if err != nil {
+		t.Fatalf("registry did not reach expected state: err=%v lastErr=%v", err, lastErr)
+	}
+	t.Fatalf("registry project %q did not reach expected state: %+v", project, stored.Projects[project])
+	return registry.Project{}
 }
 
 func writePhase2Project(t *testing.T, path, command string) {
