@@ -22,7 +22,11 @@ if ($actualArchiveHash -ne $expectedArchiveHash) {
     throw "release archive checksum mismatch"
 }
 
-$root = Join-Path ([System.IO.Path]::GetTempPath()) ("mango-release-smoke-" + [Guid]::NewGuid().ToString("N"))
+# Unix-domain socket paths on macOS are limited to roughly 104 bytes. The
+# runner's TMPDIR is already long, so keep the temporary directory component
+# short; otherwise MANGO_HOME/runtime/mango.sock cannot be bound.
+$temporaryName = "ms-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+$root = Join-Path ([System.IO.Path]::GetTempPath()) $temporaryName
 $extractRoot = Join-Path $root "package"
 $homeRoot = Join-Path $root "home"
 $probeRoot = Join-Path $root "outside-cwd"
