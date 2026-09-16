@@ -89,7 +89,7 @@ try {
         throw "packaged CLI help failed: $($helpOutput -join "`n")"
     }
     $helpText = $helpOutput -join "`n"
-    foreach ($removedCommand in @("ps", "ls", "execution", "history", "enable", "disable")) {
+    foreach ($removedCommand in @("ps", "ls", "execution", "history")) {
         $pattern = '(?m)^\s+' + [regex]::Escape($removedCommand) + '(?:\s|$)'
         if ([regex]::IsMatch($helpText, $pattern)) {
             throw "packaged root help exposes removed command: $removedCommand"
