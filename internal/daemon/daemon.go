@@ -2505,6 +2505,10 @@ func (d *Daemon) startService(projectName string, managed *managedProcess) error
 		d.mu.Unlock()
 		return fmt.Errorf("service no longer exists")
 	}
+	if managed.disabled {
+		d.mu.Unlock()
+		return nil
+	}
 	if !d.dependenciesSatisfiedLocked(current, managed) {
 		managed.state = StateWaiting
 		d.mu.Unlock()
@@ -2694,6 +2698,25 @@ func (d *Daemon) stopManaged(managed *managedProcess) error {
 }
 
 func (d *Daemon) StartProcess(key string) error {
+	return d.startProcess(key, false)
+}
+
+func (d *Daemon) EnableProcess(key string) error {
+	return d.startProcess(key, true)
+}
+
+func (d *Daemon) isDisabledProcess(key string) bool {
+	project, name, err := d.resolveProcessRef(key)
+	if err != nil {
+		return false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	runtimeProject := d.projects[project]
+	return runtimeProject != nil && runtimeProject.processes[name] != nil && runtimeProject.processes[name].disabled
+}
+
+func (d *Daemon) startProcess(key string, enable bool) error {
 	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
 		return err
@@ -2709,7 +2732,13 @@ func (d *Daemon) StartProcess(key string) error {
 		d.mu.Unlock()
 		return fmt.Errorf("service %q not found", key)
 	}
-	managed.disabled = false
+	if enable {
+		managed.disabled = false
+	}
+	if managed.disabled {
+		d.mu.Unlock()
+		return nil
+	}
 	managed.manualStop = false
 	managed.failures = nil
 	if managed.handle != nil {
@@ -2733,6 +2762,10 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 		return fmt.Errorf("service %q not found", key)
 	}
 	managed := runtimeProject.processes[name]
+	if managed.disabled && !disable {
+		d.mu.Unlock()
+		return nil
+	}
 	if disable {
 		managed.disabled = true
 	}
@@ -2751,6 +2784,14 @@ func (d *Daemon) RestartProcess(key string) error {
 	if err != nil {
 		return err
 	}
+	d.mu.RLock()
+	if runtimeProject := d.projects[project]; runtimeProject != nil {
+		if managed := runtimeProject.processes[name]; managed != nil && managed.disabled {
+			d.mu.RUnlock()
+			return nil
+		}
+	}
+	d.mu.RUnlock()
 	dependents := d.restartDependents(project, name)
 	for i := len(dependents) - 1; i >= 0; i-- {
 		_ = d.stopManaged(dependents[i])
@@ -2786,14 +2827,20 @@ func (d *Daemon) bulkServiceOperation(action string, targets []string, all bool)
 		if err != nil {
 			result.Status = "error"
 			result.Error = err.Error()
+		} else if (action == "start" || action == "stop" || action == "restart") && d.isDisabledProcess(key) {
+			result.Status = "skipped"
 		}
 		results = append(results, result)
 	}
 
 	switch action {
 	case "start", "enable":
+		start := d.StartProcess
+		if action == "enable" {
+			start = d.EnableProcess
+		}
 		for _, key := range keys {
-			appendResult(key, d.StartProcess(key))
+			appendResult(key, start(key))
 		}
 	case "stop":
 		for i := len(keys) - 1; i >= 0; i-- {
@@ -3875,8 +3922,10 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		}
 		canonicalKey := project + "/" + name
 		switch request.Method {
-		case "service.start", "service.enable":
+		case "service.start":
 			err = d.StartProcess(canonicalKey)
+		case "service.enable":
+			err = d.EnableProcess(canonicalKey)
 		case "service.stop":
 			err = d.StopProcess(canonicalKey, false)
 		case "service.disable":
@@ -3887,7 +3936,11 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		if err != nil {
 			return failure(request, "SERVICE_OPERATION_FAILED", err)
 		}
-		return success(request, map[string]string{"key": canonicalKey, "status": "ok"})
+		status := "ok"
+		if (request.Method == "service.start" || request.Method == "service.stop" || request.Method == "service.restart") && d.isDisabledProcess(canonicalKey) {
+			status = "skipped"
+		}
+		return success(request, map[string]string{"key": canonicalKey, "status": status})
 	case "service.bulk":
 		var p serviceBulkRequest
 		if err := json.Unmarshal(request.Params, &p); err != nil {

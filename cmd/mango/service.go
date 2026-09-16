@@ -203,6 +203,9 @@ func processBulkCommandWithCaller(command string, args []string, all bool, calle
 		"enable": "enabled", "disable": "disabled",
 	}[command]
 	for _, result := range results {
+		if result.Status == "skipped" {
+			continue
+		}
 		if result.Status == "ok" {
 			if !jsonOutput {
 				cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result.Key, action)))
@@ -240,7 +243,7 @@ func processCommandWithCaller(command string, args []string, caller func(string)
 			continue
 		}
 		results = append(results, result)
-		if !jsonOutput {
+		if !jsonOutput && result["status"] != "skipped" {
 			cliOutput.Printf("%s\n", cliOutput.Text(cliui.StyleSuccess, fmt.Sprintf("Service %s %s", result["key"], action)))
 		}
 	}

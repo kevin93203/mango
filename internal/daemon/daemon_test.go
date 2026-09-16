@@ -1686,6 +1686,75 @@ func TestBulkServiceOperationReturnsErrorsAndContinues(t *testing.T) {
 	}
 }
 
+func TestStartAndRestartDoNotOperateDisabledServices(t *testing.T) {
+	root := t.TempDir()
+	layout := testLayout(root)
+	configPath := filepath.Join(root, "alpha.yaml")
+	writeTestConfig(t, configPath, "api")
+	if err := registry.Save(layout.Registry, registry.File{
+		Version: 4,
+		Projects: map[string]registry.Project{
+			"alpha": {Name: "alpha", ConfigPath: configPath, Enabled: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(layout)
+	if err := d.reloadRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	waitForDaemonStatus(t, d, "alpha", func(status api.ProjectStatus) bool { return status.Ready })
+
+	if err := d.StopProcess("alpha/api", true); err != nil {
+		t.Fatal(err)
+	}
+	assertDisabled := func(operation string) {
+		t.Helper()
+		info, err := d.GetProcess("alpha/api")
+		if err != nil {
+			t.Fatalf("%s: GetProcess() error = %v", operation, err)
+		}
+		if !info.Disabled || info.State != StateDisabled || info.PID != 0 {
+			t.Fatalf("%s: service info = %+v, want disabled and stopped", operation, info)
+		}
+	}
+	assertDisabled("disable")
+
+	if err := d.StartProcess("alpha/api"); err != nil {
+		t.Fatal(err)
+	}
+	assertDisabled("start")
+
+	if err := d.RestartProcess("alpha/api"); err != nil {
+		t.Fatal(err)
+	}
+	assertDisabled("restart")
+
+	if err := d.StopProcess("alpha/api", false); err != nil {
+		t.Fatal(err)
+	}
+	assertDisabled("stop")
+
+	results := d.BulkServiceOperation("start", []string{"alpha/api"})
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("bulk start results = %+v, want one skipped service", results)
+	}
+	assertDisabled("bulk start")
+
+	results = d.BulkServiceOperation("restart", []string{"alpha/api"})
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("bulk restart results = %+v, want one skipped service", results)
+	}
+	assertDisabled("bulk restart")
+
+	results = d.BulkServiceOperation("stop", []string{"alpha/api"})
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("bulk stop results = %+v, want one skipped service", results)
+	}
+	assertDisabled("bulk stop")
+}
+
 func TestServiceBulkIPCRejectsBadParams(t *testing.T) {
 	d := New(testLayout(t.TempDir()))
 	request, err := ipc.NewRequest("service.bulk", serviceBulkRequest{Action: "start"})

@@ -1166,9 +1166,9 @@ implicitly enabled by `--all`.
 
 | Command | Behavior |
 | --- | --- |
-| `start` | Starts the service and clears its disabled/crash-loop state. If dependencies are not ready, it enters `waiting`. |
-| `stop` | Stops the service without changing its YAML `autostart` value. |
-| `restart` | Stops and starts the service. A single-service restart also propagates to dependents whose dependency entry has `restart: true`. |
+| `start` | Starts the service unless it is disabled. It clears crash-loop state; use `enable` to clear disabled state. If dependencies are not ready, it enters `waiting`. |
+| `stop` | Stops the service unless it is disabled, without changing its YAML `autostart` value. |
+| `restart` | Stops and starts the service unless it is disabled. A single-service restart also propagates to dependents whose dependency entry has `restart: true`. |
 | `enable` | Clears the disabled state and starts the service. |
 | `disable` | Marks the service disabled and stops it. It remains disabled until `enable` or an apply that recreates the service from a changed definition. |
 

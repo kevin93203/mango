@@ -1262,6 +1262,51 @@ func TestProcessBulkCommandSendsProjectTargetsAndPrintsEachResult(t *testing.T) 
 	}
 }
 
+func TestProcessCommandsSkipDisabledServiceOutput(t *testing.T) {
+	var output bytes.Buffer
+	previousOutput, previousJSON := cliOutput, jsonOutput
+	defer func() {
+		cliOutput = previousOutput
+		jsonOutput = previousJSON
+	}()
+	cliOutput = cliui.New(&output, &output, cliui.Options{Color: cliui.ColorNever})
+	jsonOutput = false
+
+	err := processCommandWithCaller("start", []string{"demo/api"}, func(string) (ipc.Response, error) {
+		return ipc.Response{Data: map[string]string{"key": "demo/api", "status": "skipped"}}, nil
+	})
+	if err != nil {
+		t.Fatalf("single command = %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("single command output = %q, want empty", output.String())
+	}
+
+	err = processBulkCommandWithCaller("restart", []string{"demo"}, false, func(string, interface{}) (ipc.Response, error) {
+		return ipc.Response{Data: []api.ServiceOperationResult{
+			{Key: "demo/api", Status: "skipped"},
+			{Key: "demo/web", Status: "ok"},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatalf("bulk command = %v", err)
+	}
+	if strings.Contains(output.String(), "demo/api") || !strings.Contains(output.String(), "Service demo/web restarted") {
+		t.Fatalf("bulk command output = %q, want only enabled service", output.String())
+	}
+
+	output.Reset()
+	err = processCommandWithCaller("stop", []string{"demo/api"}, func(string) (ipc.Response, error) {
+		return ipc.Response{Data: map[string]string{"key": "demo/api", "status": "skipped"}}, nil
+	})
+	if err != nil {
+		t.Fatalf("single stop command = %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("single stop output = %q, want empty", output.String())
+	}
+}
+
 func TestProcessBulkCommandSendsAll(t *testing.T) {
 	var output bytes.Buffer
 	previousOutput, previousJSON := cliOutput, jsonOutput
