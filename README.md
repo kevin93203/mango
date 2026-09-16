@@ -149,7 +149,7 @@ mango doctor --json
 
 ## Requirements
 
-- Go 1.23 or newer.
+- Go 1.27.1 or newer.
 - Stable Rust toolchain for building `mango-shim`.
 - Windows 10/11, Linux, or macOS.
 - The executables referenced by your configuration must be available on the
@@ -1852,15 +1852,16 @@ does not downgrade the database. The full operator checklist is in
 
 ## Development
 
-Run the test suite and static checks:
+Run the same Go and Rust checks used by CI:
 
 ```sh
-go test ./...
+bash scripts/verify.sh
+```
+
+On Linux, the race detector is an additional local check:
+
+```sh
 go test -race ./...
-go vet ./...
-cargo fmt --manifest-path mango-shim/Cargo.toml -- --check
-cargo test --manifest-path mango-shim/Cargo.toml
-cargo clippy --manifest-path mango-shim/Cargo.toml --all-targets -- -D warnings
 ```
 
 Build binaries for another platform by setting `GOOS` and `GOARCH`:

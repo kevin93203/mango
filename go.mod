@@ -1,6 +1,6 @@
 module github.com/kevin93203/mango
 
-go 1.23
+go 1.27.1
 
 require (
 	github.com/Microsoft/go-winio v0.6.2

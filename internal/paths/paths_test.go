@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -50,10 +51,7 @@ func TestDefaultIgnoresLegacyGoserveHome(t *testing.T) {
 
 func TestDefaultUsesExistingUnifiedHomeState(t *testing.T) {
 	root := t.TempDir()
-	configRoot := filepath.Join(root, "config")
-	cacheRoot := filepath.Join(root, "cache")
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	configRoot, _ := setUserDirs(t, root)
 	t.Setenv("MANGO_HOME", "")
 	if err := os.MkdirAll(filepath.Join(configRoot, "mango", "state"), 0o700); err != nil {
 		t.Fatal(err)
@@ -70,10 +68,7 @@ func TestDefaultUsesExistingUnifiedHomeState(t *testing.T) {
 
 func TestDefaultUsesConfigCacheSplitWithoutExistingState(t *testing.T) {
 	root := t.TempDir()
-	configRoot := filepath.Join(root, "config")
-	cacheRoot := filepath.Join(root, "cache")
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	_, cacheRoot := setUserDirs(t, root)
 	t.Setenv("MANGO_HOME", "")
 
 	layout, err := Default()
@@ -83,4 +78,27 @@ func TestDefaultUsesConfigCacheSplitWithoutExistingState(t *testing.T) {
 	if layout.State != filepath.Join(cacheRoot, "mango", "state") || layout.Logs != filepath.Join(cacheRoot, "mango", "logs") {
 		t.Fatalf("layout data paths = state %q, logs %q; want config/cache split", layout.State, layout.Logs)
 	}
+}
+
+func setUserDirs(t *testing.T, root string) (configRoot, cacheRoot string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	switch runtime.GOOS {
+	case "windows":
+		configRoot = filepath.Join(root, "config")
+		cacheRoot = filepath.Join(root, "cache")
+		t.Setenv("APPDATA", configRoot)
+		t.Setenv("LOCALAPPDATA", cacheRoot)
+	case "darwin":
+		t.Setenv("HOME", root)
+		configRoot = filepath.Join(root, "Library", "Application Support")
+		cacheRoot = filepath.Join(root, "Library", "Caches")
+	default:
+		configRoot = filepath.Join(root, "config")
+		cacheRoot = filepath.Join(root, "cache")
+		t.Setenv("XDG_CONFIG_HOME", configRoot)
+		t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	}
+	return configRoot, cacheRoot
 }

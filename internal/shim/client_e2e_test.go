@@ -64,4 +64,12 @@ func TestRustShimClientStartOrAttach(t *testing.T) {
 	if err := first.Shutdown(ctx, time.Second); err != nil {
 		t.Fatal(err)
 	}
+	for _, path := range []string{
+		filepath.Join(first.StateDir, "shim.pid"),
+		filepath.Join(first.StateDir, "endpoint"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("shim shutdown left %s behind: %v", path, err)
+		}
+	}
 }

@@ -211,7 +211,33 @@ func (c *Client) Restart(ctx context.Context) error {
 
 func (c *Client) Shutdown(ctx context.Context, timeout time.Duration) error {
 	var result Status
-	return c.call(ctx, "shutdown", map[string]int64{"timeout_ms": timeout.Milliseconds()}, &result)
+	if err := c.call(ctx, "shutdown", map[string]int64{"timeout_ms": timeout.Milliseconds()}, &result); err != nil {
+		return err
+	}
+	return waitForShimShutdown(ctx, c.StateDir)
+}
+
+func waitForShimShutdown(ctx context.Context, stateDir string) error {
+	if stateDir == "" {
+		return nil
+	}
+	pidPath := filepath.Join(stateDir, "shim.pid")
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		pid, err := readPID(pidPath)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && !processIsAlive(pid)) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *Client) call(ctx context.Context, method string, params interface{}, result interface{}) error {
