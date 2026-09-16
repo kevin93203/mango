@@ -135,6 +135,7 @@ func (a *cliApp) rootCommand() *cobra.Command {
 
 	root.AddCommand(
 		a.initCmd(), a.daemonCmd(), a.projectCmd(), a.configCmd(),
+		a.exportCmd(), a.importCmd(),
 		a.composeProjectCmd("up"), a.composeProjectCmd("down"),
 		a.serviceListCmd(), a.processCmd("start"), a.processCmd("stop"), a.processCmd("restart"),
 		a.processCmd("enable"), a.processCmd("disable"),

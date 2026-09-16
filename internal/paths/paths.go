@@ -46,6 +46,11 @@ func Default() (Layout, error) {
 	}
 	root := filepath.Join(config, "mango")
 	data := filepath.Join(cache, "mango")
+	if _, err := os.Stat(filepath.Join(root, "state")); err == nil {
+		// Older CLI-started daemons stored all data below the config directory.
+		// Keep using that home when it already contains Mango state.
+		data = root
+	}
 	runtime := filepath.Join(root, "runtime")
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),

@@ -237,6 +237,17 @@ func (resourcePolicyModel) TableName() string { return "resource_policies" }
 const currentSchemaVersion = 11
 
 func Open(config Config) (*Repository, error) {
+	return open(config, true)
+}
+
+// OpenReadOnly opens the history database without creating directories,
+// running migrations, or changing file permissions. Callers must only use
+// read methods on the returned repository.
+func OpenReadOnly(config Config) (*Repository, error) {
+	return open(config, false)
+}
+
+func open(config Config, migrateDatabase bool) (*Repository, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Driver))
 	if driver == "" {
 		driver = "sqlite"
@@ -247,7 +258,11 @@ func Open(config Config) (*Repository, error) {
 		if config.Path == "" {
 			return nil, errors.New("sqlite history database path is required")
 		}
-		if directory := filepath.Dir(config.Path); directory != "." {
+		if !migrateDatabase {
+			if _, err := os.Stat(config.Path); err != nil {
+				return nil, err
+			}
+		} else if directory := filepath.Dir(config.Path); directory != "." {
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				return nil, fmt.Errorf("create history database directory: %w", err)
 			}
@@ -283,11 +298,13 @@ func Open(config Config) (*Repository, error) {
 		sqlDB.SetMaxIdleConns(1)
 	}
 	repository := &Repository{db: db, driver: driver}
-	if err := migrate(db, driver, config.Path); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("migrate history database: %w", err)
+	if migrateDatabase {
+		if err := migrate(db, driver, config.Path); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("migrate history database: %w", err)
+		}
 	}
-	if driver == "sqlite" && config.Path != "" {
+	if migrateDatabase && driver == "sqlite" && config.Path != "" {
 		if err := os.Chmod(config.Path, 0o600); err != nil {
 			_ = sqlDB.Close()
 			return nil, fmt.Errorf("restrict history database permissions: %w", err)
@@ -1222,89 +1239,7 @@ func (r *Repository) DeleteProject(ctx context.Context, project string) error {
 	defer r.writeMu.Unlock()
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var runs []runModel
-		if err := tx.Where("project = ?", project).Find(&runs).Error; err != nil {
-			return err
-		}
-		runRowIDs := make([]int64, 0, len(runs))
-		runIDs := make([]string, 0, len(runs))
-		for _, run := range runs {
-			runRowIDs = append(runRowIDs, run.ID)
-			if run.RunID != "" {
-				runIDs = append(runIDs, run.RunID)
-			}
-		}
-
-		var taskRowIDs []int64
-		if len(runRowIDs) > 0 {
-			if err := tx.Model(&taskModel{}).Where("run_row_id IN ?", runRowIDs).Pluck("id", &taskRowIDs).Error; err != nil {
-				return err
-			}
-		}
-		if len(taskRowIDs) > 0 {
-			if err := tx.Where("task_row_id IN ?", taskRowIDs).Delete(&artifactModel{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("task_row_id IN ?", taskRowIDs).Delete(&attemptModel{}).Error; err != nil {
-				return err
-			}
-		}
-		if len(runRowIDs) > 0 {
-			if err := tx.Where("run_row_id IN ?", runRowIDs).Delete(&attemptModel{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("run_row_id IN ?", runRowIDs).Delete(&taskModel{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("id IN ?", runRowIDs).Delete(&runModel{}).Error; err != nil {
-				return err
-			}
-		}
-		if len(runIDs) > 0 {
-			if err := tx.Where("run_id IN ?", runIDs).Delete(&eventModel{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("run_id IN ?", runIDs).Delete(&webhookDeliveryModel{}).Error; err != nil {
-				return err
-			}
-		}
-		if err := tx.Where("project = ?", project).Delete(&scheduleOccurrenceModel{}).Error; err != nil {
-			return err
-		}
-		observabilityEvents := tx.Where("project = ?", project)
-		if len(runIDs) > 0 {
-			observabilityEvents = observabilityEvents.Or("run_id IN ?", runIDs)
-		}
-		if err := observabilityEvents.Delete(&observabilityEventModel{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("project = ?", project).Delete(&secretReferenceModel{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("project = ?", project).Delete(&resourcePolicyModel{}).Error; err != nil {
-			return err
-		}
-		webhookDeliveries := tx.Where("webhook_key = ? OR webhook_key LIKE ? ESCAPE '\\'", project, escapeLikePattern(project)+"/%")
-		if len(runIDs) > 0 {
-			webhookDeliveries = webhookDeliveries.Or("run_id IN ?", runIDs)
-		}
-		if err := webhookDeliveries.Delete(&webhookDeliveryModel{}).Error; err != nil {
-			return err
-		}
-		var counters []counterModel
-		if err := tx.Find(&counters).Error; err != nil {
-			return err
-		}
-		for _, counter := range counters {
-			parts := strings.SplitN(counter.Key, "|", 3)
-			if len(parts) < 2 || parts[1] != project {
-				continue
-			}
-			if err := tx.Where("key = ?", counter.Key).Delete(&counterModel{}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return deleteProjectRows(tx, project)
 	})
 }
 
@@ -1729,9 +1664,15 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 			return nil, err
 		}
 	}
+	attemptsByRun := make(map[int64][]scheduler.Attempt)
 	attemptsByTask := make(map[int64][]scheduler.Attempt)
 	for _, attempt := range attempts {
-		attemptsByTask[attempt.TaskRowID] = append(attemptsByTask[attempt.TaskRowID], attemptToRecord(attempt))
+		converted := attemptToRecord(attempt)
+		if attempt.TaskRowID == 0 {
+			attemptsByRun[attempt.RunRowID] = append(attemptsByRun[attempt.RunRowID], converted)
+		} else {
+			attemptsByTask[attempt.TaskRowID] = append(attemptsByTask[attempt.TaskRowID], converted)
+		}
 	}
 	tasksByRun := make(map[int64][]taskModel)
 	for _, task := range tasks {
@@ -1753,7 +1694,7 @@ func (r *Repository) loadRecordsFromDB(ctx context.Context, db *gorm.DB, runs []
 			Error: run.Error, Stderr: run.Stderr, StdoutPath: run.StdoutPath, StderrPath: run.StderrPath,
 			IdempotencyKey: run.IdempotencyKey, ConfigurationGeneration: run.ConfigurationGeneration,
 			RetriedFromRunID: stringValue(run.RetriedFromRunID),
-			Attempts:         cloneAttempts(attemptsByTask[0]),
+			Attempts:         cloneAttempts(attemptsByRun[run.ID]),
 		}
 		for _, task := range tasksByRun[run.ID] {
 			name := query.Target

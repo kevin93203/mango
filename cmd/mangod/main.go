@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	projectarchive "github.com/kevin93203/mango/internal/archive"
 	"github.com/kevin93203/mango/internal/daemon"
 	"github.com/kevin93203/mango/internal/paths"
 	"github.com/kevin93203/mango/internal/version"
@@ -69,6 +70,12 @@ func runDaemon(mangoHome string) error {
 	layout, err := paths.Default()
 	if err != nil {
 		return err
+	}
+	if err := paths.Ensure(layout); err != nil {
+		return err
+	}
+	if err := projectarchive.RecoverPending(context.Background(), layout); err != nil {
+		return fmt.Errorf("recover interrupted import: %w", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

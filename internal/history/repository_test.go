@@ -262,7 +262,8 @@ func TestRepositoryFiltersTasksAndRetainsCounters(t *testing.T) {
 		record := scheduler.Record{
 			RunID: "run-" + string(rune('1'+index)), Project: "demo", TargetType: "workflow", Target: "pipeline",
 			Trigger: scheduler.ManualTrigger(), Started: time.Unix(int64(index), 0),
-			Tasks: []scheduler.TaskRecord{{Task: "compile", Started: time.Unix(int64(index), 0), Attempts: []scheduler.Attempt{{Number: 1}}}},
+			Attempts: []scheduler.Attempt{{Number: index + 1}},
+			Tasks:    []scheduler.TaskRecord{{Task: "compile", Started: time.Unix(int64(index), 0), Attempts: []scheduler.Attempt{{Number: 1}}}},
 		}
 		if index == 1 {
 			record.Tasks = append(record.Tasks, scheduler.TaskRecord{Task: "lint", Started: time.Unix(int64(index+1), 0), Attempts: []scheduler.Attempt{{Number: 1}}})
@@ -278,6 +279,9 @@ func TestRepositoryFiltersTasksAndRetainsCounters(t *testing.T) {
 	}
 	if len(all) != 2 || all[0].RunID != "run-3" || all[1].RunID != "run-2" {
 		t.Fatalf("retained records = %+v, want newest-first run-3 and run-2", all)
+	}
+	if len(all[0].Attempts) != 1 || all[0].Attempts[0].Number != 3 || len(all[1].Attempts) != 1 || all[1].Attempts[0].Number != 2 {
+		t.Fatalf("run attempts = %+v, want attempts attached to their own runs", all)
 	}
 	filtered, err := repository.Query(context.Background(), scheduler.HistoryQuery{TargetType: "task", Project: "demo", Name: "lint"})
 	if err != nil {

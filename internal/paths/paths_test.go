@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -44,5 +45,42 @@ func TestDefaultIgnoresLegacyGoserveHome(t *testing.T) {
 	}
 	if layout.Root == legacy || layout.Root == "" {
 		t.Fatalf("root = %q, should not use legacy GOSERVE_HOME", layout.Root)
+	}
+}
+
+func TestDefaultUsesExistingUnifiedHomeState(t *testing.T) {
+	root := t.TempDir()
+	configRoot := filepath.Join(root, "config")
+	cacheRoot := filepath.Join(root, "cache")
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("MANGO_HOME", "")
+	if err := os.MkdirAll(filepath.Join(configRoot, "mango", "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	layout, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.State != filepath.Join(configRoot, "mango", "state") || layout.Logs != filepath.Join(configRoot, "mango", "logs") {
+		t.Fatalf("layout data paths = state %q, logs %q; want unified home", layout.State, layout.Logs)
+	}
+}
+
+func TestDefaultUsesConfigCacheSplitWithoutExistingState(t *testing.T) {
+	root := t.TempDir()
+	configRoot := filepath.Join(root, "config")
+	cacheRoot := filepath.Join(root, "cache")
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("MANGO_HOME", "")
+
+	layout, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.State != filepath.Join(cacheRoot, "mango", "state") || layout.Logs != filepath.Join(cacheRoot, "mango", "logs") {
+		t.Fatalf("layout data paths = state %q, logs %q; want config/cache split", layout.State, layout.Logs)
 	}
 }

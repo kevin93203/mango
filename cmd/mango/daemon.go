@@ -262,7 +262,11 @@ func startDaemonWithOptions(layout paths.Layout, announce bool) (daemonHealthDat
 		return daemonHealthData{}, err
 	}
 	defer logFile.Close()
-	cmd := exec.Command(executable, "run", "--home", layout.Root)
+	args := []string{"run"}
+	if os.Getenv("MANGO_HOME") != "" {
+		args = append(args, "--home", layout.Root)
+	}
+	cmd := exec.Command(executable, args...)
 	configureDaemonCommand(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

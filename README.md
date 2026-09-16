@@ -1042,6 +1042,36 @@ and require the daemon. The CLI sends the requested mutation over IPC; the
 daemon updates the registry, runtime, schedules, generations, and other managed
 state.
 
+### `mango export` and `mango import`
+
+```text
+mango export [PROJECT...] --output PATH [--force] [--json]
+mango import ARCHIVE [PROJECT...] [--config-dir DIR] [--rename OLD=NEW]
+                 [--replace --yes] [--dry-run] [--json]
+```
+
+These commands are offline operations and require `mangod` to be stopped. A
+portable archive is a standard `.tar.gz` containing the selected projects'
+raw YAML, accepted and historical generations, project service/schedule state,
+all project logs including rotations and attempt logs, and logical execution
+history. History is exported as portable records rather than as the source
+database file, so an archive can be imported into SQLite, PostgreSQL, or MySQL.
+
+The archive does not contain `daemon.yaml`, `daemon.log`, PID/socket/shim
+runtime files, global audit entries, resolved secrets, application files, or
+artifact contents. Raw YAML is preserved; relative external files and secret
+references must exist at the imported config location. Archive files should be
+protected because literal values in YAML remain in the archive.
+
+Without `--replace`, an existing registry entry, config, project log directory,
+generation directory, state entry, or project history causes import to fail.
+`--replace` requires `--yes` and replaces only Mango-managed data. `--rename`
+can be repeated to clone a project under a new name; Mango-owned project keys,
+schedule occurrence IDs, webhook keys, counters, and history log paths are
+rewritten. `--dry-run` performs archive and conflict validation without
+installing anything. Imports keep a local runtime journal and roll back an
+interrupted operation before the next archive operation or daemon startup.
+
 ### `mango config validate`
 
 ```text

@@ -29,7 +29,7 @@ func TestCobraRootRegistersCompletePublicCommandTree(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
 	want := []string{
-		"config", "daemon", "doctor", "down", "events", "init", "logs",
+		"config", "daemon", "doctor", "down", "events", "export", "import", "init", "logs",
 		"list", "monitor", "project", "restart", "run", "runs", "schedule", "start", "startup", "status",
 		"stop", "task", "up", "workflow", "enable", "disable",
 	}
@@ -74,7 +74,7 @@ func TestCobraRootCommandGroupSnapshot(t *testing.T) {
 	want := map[string][]string{
 		groupStart:    {"down", "init", "logs", "run", "runs", "status", "up"},
 		groupManage:   {"disable", "enable", "list", "project", "restart", "schedule", "start", "stop", "task", "workflow"},
-		groupAdvanced: {"config", "daemon", "doctor", "events", "monitor", "startup"},
+		groupAdvanced: {"config", "daemon", "doctor", "events", "export", "import", "monitor", "startup"},
 	}
 	got := map[string][]string{}
 	for _, command := range root.Commands() {
@@ -100,7 +100,7 @@ func TestCobraRootHelpSnapshot(t *testing.T) {
 	for _, snapshot := range []string{
 		"Start here:\n  down        Stop a project\n  init        Create an example configuration\n  logs        Read service logs\n  run         Run a task or workflow\n  runs        List and control runs\n  status      Show service status\n  up          Start a project",
 		"Manage:\n  disable     Disable one or more services\n  enable      Enable one or more services\n  list        List services\n  project     Manage registered projects\n  restart     Restart one or more services\n  schedule    Manage schedules\n  start       Start one or more services\n  stop        Stop one or more services\n  task        Manage tasks\n  workflow    Manage workflows",
-		"Advanced:\n  completion  Generate the autocompletion script for the specified shell\n  config      Inspect configuration\n  daemon      Manage the Mango daemon\n  doctor      Inspect Mango environment and daemon health\n  events      Read the event stream\n  monitor     Open the interactive service monitor\n  startup     Manage startup integration",
+		"Advanced:\n  completion  Generate the autocompletion script for the specified shell\n  config      Inspect configuration\n  daemon      Manage the Mango daemon\n  doctor      Inspect Mango environment and daemon health\n  events      Read the event stream\n  export      Export project data\n  import      Import project data\n  monitor     Open the interactive service monitor\n  startup     Manage startup integration",
 	} {
 		if !strings.Contains(output.String(), snapshot) {
 			t.Fatalf("root help = %q, want snapshot %q", output.String(), snapshot)
