@@ -123,7 +123,12 @@ try {
                 $doctorReady = $true
                 break
             }
-            Start-Sleep -Milliseconds 500
+            $remaining = $startupDeadline - [DateTime]::UtcNow
+            if ($remaining -le [TimeSpan]::Zero) {
+                break
+            }
+            $sleepMs = [Math]::Min(500, [int][Math]::Ceiling($remaining.TotalMilliseconds))
+            Start-Sleep -Milliseconds $sleepMs
         }
         if (-not $doctorReady) {
             $doctorText = $doctorOutput -join "`n"
