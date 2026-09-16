@@ -213,3 +213,7 @@ try {
 }
 
 Write-Output "release smoke test passed: $archive"
+# A native command in the cleanup block (for example, mango daemon stop) can
+# leave LASTEXITCODE set to a non-zero value even though all smoke assertions
+# passed. Make the script result explicit for the GitHub Actions step.
+exit 0
