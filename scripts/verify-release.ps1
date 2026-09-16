@@ -106,16 +106,59 @@ try {
         # The doctor and config validation endpoints are daemon-owned. Start
         # the packaged daemon first; this also exercises sibling mangod
         # discovery before the health and validation checks below.
-        & $cli daemon start 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "packaged daemon failed to start"
+        $daemonReadinessTimeoutMarker = "daemon did not become ready within"
+        $doctorTransientMarkers = @(
+            "daemon is unavailable",
+            "daemon is not running",
+            "connection refused",
+            "no such file or directory"
+        )
+        $startOutput = & $cli daemon start 2>&1
+        $startExitCode = $LASTEXITCODE
+        $startText = $startOutput -join "`n"
+        $isReadinessTimeout = $startText.IndexOf($daemonReadinessTimeoutMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($startExitCode -ne 0 -and -not $isReadinessTimeout) {
+            throw "packaged daemon failed to start: $startText"
+        }
+        $doctorOutput = @()
+        $doctorReady = $false
+        $startupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ([DateTime]::UtcNow -lt $startupDeadline) {
+            $doctorOutput = & $cli doctor --json 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $doctorReady = $true
+                break
+            }
+            $doctorText = $doctorOutput -join "`n"
+            $doctorLooksTransient = $false
+            foreach ($marker in $doctorTransientMarkers) {
+                if ($doctorText.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $doctorLooksTransient = $true
+                    break
+                }
+            }
+            if (-not $doctorLooksTransient) {
+                break
+            }
+            $remaining = $startupDeadline - [DateTime]::UtcNow
+            if ($remaining -le [TimeSpan]::Zero) {
+                break
+            }
+            $sleepMs = [Math]::Min(500, [int][Math]::Ceiling($remaining.TotalMilliseconds))
+            Start-Sleep -Milliseconds $sleepMs
+        }
+        if (-not $doctorReady) {
+            $doctorText = $doctorOutput -join "`n"
+            if ([string]::IsNullOrWhiteSpace($doctorText)) {
+                $doctorText = "no doctor output captured"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($startText)) {
+                throw "packaged daemon failed to become ready: start output: $startText`nlast doctor output: $doctorText"
+            }
+            throw "packaged daemon failed to become ready: $doctorText"
         }
         $daemonStarted = $true
 
-        $doctorOutput = & $cli doctor --json 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "mango doctor --json failed: $($doctorOutput -join "`n")"
-        }
         $doctor = ($doctorOutput -join "`n") | ConvertFrom-Json
         $resolvedDaemon = [string]$doctor.daemon_executable
         if ([System.IO.Path]::GetFullPath($resolvedDaemon) -ne [System.IO.Path]::GetFullPath($daemon)) {
