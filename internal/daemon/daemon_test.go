@@ -2245,7 +2245,7 @@ func TestScheduleLogsResolveByScheduleKey(t *testing.T) {
 func testLayout(root string) paths.Layout {
 	return paths.Layout{
 		Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
-		State: filepath.Join(root, "state"), ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+		State: filepath.Join(root, "state"), ScheduleState: filepath.Join(root, "state", "schedules.json"), ServiceState: filepath.Join(root, "state", "services.json"), Registry: filepath.Join(root, "projects.json"),
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 		DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),

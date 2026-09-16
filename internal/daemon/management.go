@@ -83,6 +83,7 @@ func (d *Daemon) Doctor(ctx context.Context) (api.DoctorReport, error) {
 		"logs_root":      d.layout.Logs,
 		"state_root":     d.layout.State,
 		"schedule_state": d.scheduleStatePath(),
+		"service_state":  d.serviceStatePath(),
 		"runtime_socket": d.layout.SocketPath,
 	}
 
@@ -587,6 +588,9 @@ func (d *Daemon) RemoveProject(ctx context.Context, name string) error {
 		return err
 	}
 	if err := d.clearScheduleStateForProject(name); err != nil {
+		return err
+	}
+	if err := d.clearServiceStateForProject(name); err != nil {
 		return err
 	}
 	d.mu.RLock()

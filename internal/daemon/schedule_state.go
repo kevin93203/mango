@@ -14,39 +14,39 @@ import (
 
 const scheduleStateVersion = 1
 
-type scheduleStateFile struct {
+type disabledStateFile struct {
 	Version  int      `json:"version"`
 	Disabled []string `json:"disabled,omitempty"`
 }
 
-// loadScheduleState reads persisted schedule controls. A missing file means
-// that every configured schedule is enabled.
-func loadScheduleState(path string) (map[string]bool, error) {
+type scheduleStateFile = disabledStateFile
+
+func loadDisabledState(path, label string, version int) (map[string]bool, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return map[string]bool{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read schedule state: %w", err)
+		return nil, fmt.Errorf("read %s state: %w", label, err)
 	}
-	var state scheduleStateFile
+	var state disabledStateFile
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("decode schedule state: %w", err)
+		return nil, fmt.Errorf("decode %s state: %w", label, err)
 	}
-	if state.Version != scheduleStateVersion {
-		return nil, fmt.Errorf("unsupported schedule state version %d", state.Version)
+	if state.Version != version {
+		return nil, fmt.Errorf("unsupported %s state version %d", label, state.Version)
 	}
 	disabled := make(map[string]bool, len(state.Disabled))
 	for _, key := range state.Disabled {
 		if key == "" {
-			return nil, fmt.Errorf("schedule state contains an empty schedule key")
+			return nil, fmt.Errorf("%s state contains an empty key", label)
 		}
 		disabled[key] = true
 	}
 	return disabled, nil
 }
 
-func saveScheduleState(path string, disabled map[string]bool) error {
+func saveDisabledState(path, label, tempPattern string, version int, disabled map[string]bool) error {
 	keys := make([]string, 0, len(disabled))
 	for key, value := range disabled {
 		if value {
@@ -54,37 +54,37 @@ func saveScheduleState(path string, disabled map[string]bool) error {
 		}
 	}
 	sort.Strings(keys)
-	data, err := json.MarshalIndent(scheduleStateFile{Version: scheduleStateVersion, Disabled: keys}, "", "  ")
+	data, err := json.MarshalIndent(disabledStateFile{Version: version, Disabled: keys}, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode schedule state: %w", err)
+		return fmt.Errorf("encode %s state: %w", label, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create schedule state directory: %w", err)
+		return fmt.Errorf("create %s state directory: %w", label, err)
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".schedules-*.tmp")
+	temp, err := os.CreateTemp(filepath.Dir(path), tempPattern)
 	if err != nil {
-		return fmt.Errorf("create schedule state temporary file: %w", err)
+		return fmt.Errorf("create %s state temporary file: %w", label, err)
 	}
 	tempName := temp.Name()
 	defer os.Remove(tempName)
 	if err := temp.Chmod(0o600); err != nil {
 		_ = temp.Close()
-		return fmt.Errorf("set schedule state permissions: %w", err)
+		return fmt.Errorf("set %s state permissions: %w", label, err)
 	}
 	if _, err := temp.Write(append(data, '\n')); err != nil {
 		_ = temp.Close()
-		return fmt.Errorf("write schedule state: %w", err)
+		return fmt.Errorf("write %s state: %w", label, err)
 	}
 	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close schedule state: %w", err)
+		return fmt.Errorf("close %s state: %w", label, err)
 	}
 	if err := os.Rename(tempName, path); err != nil {
-		return fmt.Errorf("replace schedule state: %w", err)
+		return fmt.Errorf("replace %s state: %w", label, err)
 	}
 	return nil
 }
 
-func cloneScheduleState(source map[string]bool) map[string]bool {
+func cloneDisabledState(source map[string]bool) map[string]bool {
 	clone := make(map[string]bool, len(source))
 	for key, value := range source {
 		if value {
@@ -94,7 +94,7 @@ func cloneScheduleState(source map[string]bool) map[string]bool {
 	return clone
 }
 
-func scheduleStateKeys(state map[string]bool) []string {
+func disabledStateKeys(state map[string]bool) []string {
 	keys := make([]string, 0, len(state))
 	for key, value := range state {
 		if value {
@@ -103,6 +103,24 @@ func scheduleStateKeys(state map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// loadScheduleState reads persisted schedule controls. A missing file means
+// that every configured schedule is enabled.
+func loadScheduleState(path string) (map[string]bool, error) {
+	return loadDisabledState(path, "schedule", scheduleStateVersion)
+}
+
+func saveScheduleState(path string, disabled map[string]bool) error {
+	return saveDisabledState(path, "schedule", ".schedules-*.tmp", scheduleStateVersion, disabled)
+}
+
+func cloneScheduleState(source map[string]bool) map[string]bool {
+	return cloneDisabledState(source)
+}
+
+func scheduleStateKeys(state map[string]bool) []string {
+	return disabledStateKeys(state)
 }
 
 type scheduleBulkRequest struct {

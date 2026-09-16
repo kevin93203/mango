@@ -92,6 +92,7 @@ func doctorCommandWithCaller(layout paths.Layout, caller func(string, interface{
 		{Name: "logs root", Value: report.Logs},
 		{Name: "state root", Value: environmentReport["state_root"]},
 		{Name: "schedule state", Value: environmentReport["schedule_state"]},
+		{Name: "service state", Value: environmentReport["service_state"]},
 		{Name: "runtime socket", Value: environmentReport["runtime_socket"]},
 	})
 	printDoctorSection("Database", []doctorField{

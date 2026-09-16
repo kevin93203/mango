@@ -89,6 +89,8 @@ func (d *Daemon) reconcileProject(projectName string) {
 		var err error
 		if scheduleErr := d.ensureScheduleStateLoaded(); scheduleErr != nil {
 			err = reconciliationFailure{Key: reconcile.ResourceKey{Kind: reconcile.KindSchedule}, Err: scheduleErr}
+		} else if serviceErr := d.ensureServiceStateLoaded(); serviceErr != nil {
+			err = reconciliationFailure{Key: reconcile.ResourceKey{Kind: reconcile.KindService}, Err: serviceErr}
 		} else {
 			err = d.reconcileProjectFile(projectName, file, desired, generationValue)
 		}

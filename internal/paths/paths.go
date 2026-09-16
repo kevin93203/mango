@@ -12,6 +12,7 @@ type Layout struct {
 	State         string
 	Generations   string
 	ScheduleState string
+	ServiceState  string
 	Registry      string
 	DaemonConfig  string
 	SocketPath    string
@@ -28,7 +29,7 @@ func Default() (Layout, error) {
 		}
 		return Layout{
 			Root: root, Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs"),
-			State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"), ScheduleState: filepath.Join(root, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+			State: filepath.Join(root, "state"), Generations: filepath.Join(root, "state", "generations"), ScheduleState: filepath.Join(root, "state", "schedules.json"), ServiceState: filepath.Join(root, "state", "services.json"), Registry: filepath.Join(root, "projects.json"),
 			DaemonConfig: filepath.Join(root, "daemon.yaml"),
 			SocketPath:   filepath.Join(root, "runtime", "mango.sock"),
 			DaemonLog:    filepath.Join(root, "daemon.log"), PIDFile: filepath.Join(root, "runtime", "daemon.pid"),
@@ -48,7 +49,7 @@ func Default() (Layout, error) {
 	runtime := filepath.Join(root, "runtime")
 	return Layout{
 		Root: root, Runtime: runtime, Logs: filepath.Join(data, "logs"),
-		State: filepath.Join(data, "state"), Generations: filepath.Join(data, "state", "generations"), ScheduleState: filepath.Join(data, "state", "schedules.json"), Registry: filepath.Join(root, "projects.json"),
+		State: filepath.Join(data, "state"), Generations: filepath.Join(data, "state", "generations"), ScheduleState: filepath.Join(data, "state", "schedules.json"), ServiceState: filepath.Join(data, "state", "services.json"), Registry: filepath.Join(root, "projects.json"),
 		DaemonConfig: filepath.Join(root, "daemon.yaml"),
 		SocketPath:   filepath.Join(runtime, "mango.sock"),
 		DaemonLog:    filepath.Join(data, "daemon.log"), PIDFile: filepath.Join(runtime, "daemon.pid"),

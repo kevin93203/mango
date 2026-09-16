@@ -1422,6 +1422,11 @@ and survives daemon restarts. A project apply keeps state for unchanged
 for schedules removed from the configuration. Disabled schedules remain in
 `schedule list` with `STATUS=disabled` and no `NEXT_RUN`.
 
+Service enable/disable state is stored in `MANGO_HOME/state/services.json`.
+A missing file treats all services as enabled. The state survives daemon
+restarts and project down/up; it is cleared when apply recreates or removes a
+service, or when the project is removed.
+
 ### CLI migration
 
 The command reference above uses only canonical syntax. See the
@@ -1470,7 +1475,8 @@ mango doctor [--json]
 ```
 
 Requests grouped environment, database, and daemon diagnostics from the daemon,
-including the `daemon.yaml` and `state/schedules.json` paths. The database
+including the `daemon.yaml`, `state/schedules.json`, and `state/services.json`
+paths. The database
 connection and history schema statuses are based on the connection currently
 used by the daemon. It also shows safe connection metadata such as connection
 type, host, database, login, and port; passwords and extra DSN options are
@@ -1609,6 +1615,7 @@ MANGO_HOME/
     ├── history.db.migration.json
     ├── history.db.migration-<run-id>.bak  # backup for an actual schema upgrade
     ├── schedules.json       # persisted schedule enable/disable state
+    ├── services.json        # persisted service enable/disable state
     ├── apply-operations.json     # legacy file, ignored if present
     └── generations/
         └── <project>/<generation>.json  # last and previous desired states

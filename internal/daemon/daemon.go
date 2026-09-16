@@ -79,9 +79,11 @@ type Daemon struct {
 	historyDatabase         api.HistoryDatabaseHealth
 	eventRetentionLimit     int
 	disabledSchedules       map[string]bool
+	disabledServices        map[string]bool
 	executionCancels        map[string]context.CancelFunc
 	configurationGeneration uint64
 	scheduleStateLoaded     bool
+	serviceStateLoaded      bool
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	shutdownDone            chan struct{}
@@ -232,6 +234,7 @@ func New(layout paths.Layout) *Daemon {
 		projects:          map[string]*projectRuntime{},
 		configErrors:      map[string]string{},
 		disabledSchedules: map[string]bool{},
+		disabledServices:  map[string]bool{},
 		executionCancels:  map[string]context.CancelFunc{},
 	}
 	d.scheduler = scheduler.New(d.runSchedule)
@@ -407,6 +410,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("recover active executions: %w", err)
 	}
 	if err := d.ensureScheduleStateLoaded(); err != nil {
+		return err
+	}
+	if err := d.ensureServiceStateLoaded(); err != nil {
 		return err
 	}
 	if err := d.reloadRegistryForStart(); err != nil {
@@ -765,6 +771,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 	if err := d.ensureScheduleStateLoaded(); err != nil {
 		return err
 	}
+	if err := d.ensureServiceStateLoaded(); err != nil {
+		return err
+	}
 	reg, err := registry.Load(d.layout.Registry)
 	if err != nil {
 		return err
@@ -806,6 +815,9 @@ func (d *Daemon) reloadRegistryWithOptions(resetProcessIDs bool) error {
 		if err := d.clearScheduleStateForProject(name); err != nil {
 			return err
 		}
+	}
+	if err := d.pruneServiceStateForRegistry(reg.Projects); err != nil {
+		return err
 	}
 	projectNames := make([]string, 0, len(reg.Projects))
 	for name := range reg.Projects {
@@ -1223,6 +1235,17 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, desiredStat
 		}
 	}
 	sort.Strings(changed)
+	resetServiceState := make(map[string]bool, len(changed))
+	for _, processName := range changed {
+		resetServiceState[processName] = true
+	}
+	if err := d.resetServiceStateForProjectLocked(name, desired, resetServiceState); err != nil {
+		d.mu.Unlock()
+		return reconciliationFailure{
+			Key: reconcile.ResourceKey{Kind: reconcile.KindService},
+			Err: fmt.Errorf("persist service state: %w", err),
+		}
+	}
 	dependentRestarts := collectRestartDependentsLocked(current, changed)
 	toStop := make([]*managedProcess, 0)
 	// Dependents must be stopped before a dependency is recreated. The
@@ -1265,7 +1288,9 @@ func (d *Daemon) reconcileProjectFile(name string, file config.File, desiredStat
 	for _, spec := range orderedSpecs {
 		processName := spec.Name
 		if _, exists := current.processes[processName]; !exists {
-			managed := &managedProcess{id: processIDs[processName], spec: spec, state: StateStopped}
+			key := name + "/" + processName
+			disabled := d.disabledServices[key]
+			managed := &managedProcess{id: processIDs[processName], spec: spec, state: StateDisabledIf(disabled), disabled: disabled}
 			current.processes[processName] = managed
 			if spec.Autostart || recreateRunning[processName] {
 				toStart = append(toStart, managed)
@@ -2717,6 +2742,9 @@ func (d *Daemon) isDisabledProcess(key string) bool {
 }
 
 func (d *Daemon) startProcess(key string, enable bool) error {
+	if err := d.ensureServiceStateLoaded(); err != nil {
+		return err
+	}
 	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
 		return err
@@ -2732,7 +2760,15 @@ func (d *Daemon) startProcess(key string, enable bool) error {
 		d.mu.Unlock()
 		return fmt.Errorf("service %q not found", key)
 	}
+	serviceKey := project + "/" + name
+	if d.disabledServices[serviceKey] {
+		managed.disabled = true
+	}
 	if enable {
+		if err := d.setServiceDisabledLocked(serviceKey, false); err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("persist service enable: %w", err)
+		}
 		managed.disabled = false
 	}
 	if managed.disabled {
@@ -2751,6 +2787,9 @@ func (d *Daemon) startProcess(key string, enable bool) error {
 }
 
 func (d *Daemon) StopProcess(key string, disable bool) error {
+	if err := d.ensureServiceStateLoaded(); err != nil {
+		return err
+	}
 	project, name, err := d.resolveProcessRef(key)
 	if err != nil {
 		return err
@@ -2762,11 +2801,19 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 		return fmt.Errorf("service %q not found", key)
 	}
 	managed := runtimeProject.processes[name]
+	serviceKey := project + "/" + name
+	if d.disabledServices[serviceKey] {
+		managed.disabled = true
+	}
 	if managed.disabled && !disable {
 		d.mu.Unlock()
 		return nil
 	}
 	if disable {
+		if err := d.setServiceDisabledLocked(serviceKey, true); err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("persist service disable: %w", err)
+		}
 		managed.disabled = true
 	}
 	d.mu.Unlock()
@@ -2780,13 +2827,16 @@ func (d *Daemon) StopProcess(key string, disable bool) error {
 }
 
 func (d *Daemon) RestartProcess(key string) error {
+	if err := d.ensureServiceStateLoaded(); err != nil {
+		return err
+	}
 	project, name, err := d.resolveServiceRef(key)
 	if err != nil {
 		return err
 	}
 	d.mu.RLock()
 	if runtimeProject := d.projects[project]; runtimeProject != nil {
-		if managed := runtimeProject.processes[name]; managed != nil && managed.disabled {
+		if managed := runtimeProject.processes[name]; managed != nil && (managed.disabled || d.disabledServices[project+"/"+name]) {
 			d.mu.RUnlock()
 			return nil
 		}

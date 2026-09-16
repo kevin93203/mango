@@ -28,6 +28,9 @@ func TestDefaultUsesMangoHome(t *testing.T) {
 	if layout.ScheduleState != filepath.Join(root, "state", "schedules.json") {
 		t.Fatalf("schedule state = %q", layout.ScheduleState)
 	}
+	if layout.ServiceState != filepath.Join(root, "state", "services.json") {
+		t.Fatalf("service state = %q", layout.ServiceState)
+	}
 }
 
 func TestDefaultIgnoresLegacyGoserveHome(t *testing.T) {

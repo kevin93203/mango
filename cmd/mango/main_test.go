@@ -830,6 +830,8 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		layout.State,
 		"schedule state",
 		filepath.Join(layout.State, "schedules.json"),
+		"service state",
+		filepath.Join(layout.State, "services.json"),
 		"runtime socket",
 		layout.SocketPath,
 		"Database",
@@ -899,7 +901,7 @@ func TestDoctorReportsStoragePaths(t *testing.T) {
 		}
 	}
 	environment, ok := report["environment"].(map[string]interface{})
-	if !ok || environment["daemon_config"] != layout.DaemonConfig || environment["schedule_state"] != filepath.Join(layout.State, "schedules.json") {
+	if !ok || environment["daemon_config"] != layout.DaemonConfig || environment["schedule_state"] != filepath.Join(layout.State, "schedules.json") || environment["service_state"] != filepath.Join(layout.State, "services.json") {
 		t.Fatalf("doctor JSON environment = %+v", report["environment"])
 	}
 	databaseReport, ok := report["database"].(map[string]interface{})
@@ -951,7 +953,7 @@ func doctorTestReport(layout paths.Layout) api.DoctorReport {
 		},
 		Environment: map[string]string{
 			"daemon_config": layout.DaemonConfig, "state_root": layout.State,
-			"schedule_state": filepath.Join(layout.State, "schedules.json"), "runtime_socket": layout.SocketPath,
+			"schedule_state": filepath.Join(layout.State, "schedules.json"), "service_state": filepath.Join(layout.State, "services.json"), "runtime_socket": layout.SocketPath,
 		},
 		Capabilities: api.CapabilityReport{Platform: "test", Capabilities: map[string]api.CapabilityInfo{
 			"process_tree_termination": {State: api.CapabilitySupported},
