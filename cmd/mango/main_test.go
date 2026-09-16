@@ -1352,6 +1352,8 @@ func TestValidateProcessArgs(t *testing.T) {
 		wantError string
 	}{
 		{name: "all", action: "start", allowAll: true, all: true},
+		{name: "enable all", action: "enable", allowAll: true, all: true},
+		{name: "disable all", action: "disable", allowAll: true, all: true},
 		{name: "missing target", action: "start", allowAll: true, wantError: "or --all"},
 		{name: "mixed", action: "stop", allowAll: true, all: true, args: []string{"demo/api"}, wantError: "cannot be combined"},
 		{name: "non bulk missing target", action: "enable", wantError: "requires at least one"},

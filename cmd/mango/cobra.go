@@ -567,7 +567,7 @@ func (a *cliApp) configCmd() *cobra.Command {
 }
 
 func (a *cliApp) processCmd(action string) *cobra.Command {
-	allowAll := action == "start" || action == "stop" || action == "restart"
+	allowAll := action == "start" || action == "stop" || action == "restart" || action == "enable" || action == "disable"
 	use := action + " TARGET [TARGET...]"
 	if allowAll {
 		use = action + " [TARGET...]"

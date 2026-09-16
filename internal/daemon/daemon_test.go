@@ -1786,10 +1786,7 @@ func TestServiceBulkIPCAllSupportsEmptySetAndRejectsInvalidCombinations(t *testi
 		t.Fatalf("all service bulk results = %+v, want empty result", results)
 	}
 
-	for _, test := range []serviceBulkRequest{
-		{Action: "stop", Targets: []string{"demo/api"}, All: true},
-		{Action: "enable", All: true},
-	} {
+	for _, test := range []serviceBulkRequest{{Action: "stop", Targets: []string{"demo/api"}, All: true}} {
 		request, err = ipc.NewRequest("service.bulk", test)
 		if err != nil {
 			t.Fatal(err)
@@ -1797,6 +1794,16 @@ func TestServiceBulkIPCAllSupportsEmptySetAndRejectsInvalidCombinations(t *testi
 		response = d.Handle(context.Background(), request)
 		if response.OK || response.Error == nil || response.Error.Code != "BAD_PARAMS" {
 			t.Fatalf("request %+v response = %+v, want BAD_PARAMS", test, response)
+		}
+	}
+	for _, action := range []string{"enable", "disable"} {
+		request, err = ipc.NewRequest("service.bulk", serviceBulkRequest{Action: action, All: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response = d.Handle(context.Background(), request)
+		if !response.OK {
+			t.Fatalf("all %s bulk failed: %+v", action, response.Error)
 		}
 	}
 }

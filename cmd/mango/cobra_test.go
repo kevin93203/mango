@@ -191,7 +191,7 @@ func TestCobraCanonicalCommandsExposeScopedFlags(t *testing.T) {
 func TestCobraServiceLifecycleAllFlag(t *testing.T) {
 	app, _ := newTestRoot(t)
 	root := app.rootCommand()
-	for _, action := range []string{"start", "stop", "restart"} {
+	for _, action := range []string{"start", "stop", "restart", "enable", "disable"} {
 		command, _, err := root.Find([]string{action})
 		if err != nil || command == root {
 			t.Fatalf("command %q missing: command=%v err=%v", action, command, err)
@@ -204,15 +204,6 @@ func TestCobraServiceLifecycleAllFlag(t *testing.T) {
 		}
 		if command.Use != action+" [TARGET...]" {
 			t.Fatalf("command %q use = %q, want optional targets", action, command.Use)
-		}
-	}
-	for _, action := range []string{"enable", "disable"} {
-		command, _, err := root.Find([]string{action})
-		if err != nil || command == root {
-			t.Fatalf("command %q missing: command=%v err=%v", action, command, err)
-		}
-		if command.Flag("all") != nil {
-			t.Fatalf("command %q unexpectedly exposes --all", action)
 		}
 	}
 }

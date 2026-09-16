@@ -3957,9 +3957,6 @@ func (d *Daemon) Handle(ctx context.Context, request ipc.Request) (response ipc.
 		default:
 			return failure(request, "BAD_PARAMS", fmt.Errorf("unsupported service bulk action %q", p.Action))
 		}
-		if p.All && p.Action != "start" && p.Action != "stop" && p.Action != "restart" {
-			return failure(request, "BAD_PARAMS", errors.New("service bulk --all is only supported for start, stop, and restart"))
-		}
 		return success(request, d.bulkServiceOperation(p.Action, p.Targets, p.All))
 	case "schedule.bulk":
 		var p scheduleBulkRequest
