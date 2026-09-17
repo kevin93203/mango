@@ -122,6 +122,13 @@ func (w *RotatingWriter) Write(data []byte) (int, error) {
 			return 0, err
 		}
 	}
+	// os.O_APPEND does not reliably reset an already-open Windows file
+	// handle's position after another handle truncates the file. Seek to the
+	// current end before every write so an active writer continues at the end
+	// of the cleared file instead of leaving a sparse prefix of NUL bytes.
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return 0, err
+	}
 	n, err := w.file.Write(data)
 	w.size += int64(n)
 	return n, err

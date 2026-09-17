@@ -10,7 +10,15 @@ run() {
 	"$@"
 }
 
-run "Go tests" go test -count=1 ./...
+# Windows cannot remove files that another concurrently running test package
+# still has open. Keep package test processes serialized there; this also
+# avoids starving the short daemon readiness and health-check timeouts while
+# the SQLite and archive suites run.
+go_test_args=(-count=1)
+if [[ "$goos" == "windows" ]]; then
+	go_test_args+=(-p 1)
+fi
+run "Go tests" go test "${go_test_args[@]}" ./...
 run "Go vet" go vet ./...
 run "Rust formatting" cargo fmt --manifest-path mango-shim/Cargo.toml -- --check
 

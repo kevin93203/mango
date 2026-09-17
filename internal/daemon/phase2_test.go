@@ -136,6 +136,13 @@ func TestProjectRemoveClearsStateAndResetsGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ApplyProjectResult accepts the generation before reconciliation finishes.
+	// Wait for the pass to quiesce before editing the registry directly below;
+	// otherwise the reconciler can race that write on Windows and leave an
+	// open generation file behind during TempDir cleanup.
+	waitForDaemonStatus(t, d, "demo", func(status api.ProjectStatus) bool {
+		return status.Generation == second.Generation && status.Ready
+	})
 	if second.Generation != 2 {
 		t.Fatalf("second generation = %d, want 2", second.Generation)
 	}
@@ -353,6 +360,7 @@ func TestApplyAcceptsRuntimeFailureAndPublishesStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := New(layout)
+	t.Cleanup(func() { _ = d.removeProject("demo") })
 	if err := d.reloadRegistry(); err != nil {
 		t.Fatal(err)
 	}
